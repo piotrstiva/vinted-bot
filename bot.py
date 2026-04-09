@@ -78,7 +78,6 @@ def check_search(search, seen):
     soup = BeautifulSoup(r.text, "html.parser")
 
    items = soup.select("a[data-testid='item-link']")
-   
    print("ITEMS FOUND:", len(items))
 
     # średnia cena
