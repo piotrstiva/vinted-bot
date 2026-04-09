@@ -141,6 +141,9 @@ print("🔥 Bot działa...")
 while True:
     try:
         for search in SEARCHES:
+            print("CHECKING VINTED...")
+            print(search["name"])
+        
             new_items = check_search(search, seen)
 
             for title, price, link, image_url, name, is_steal, avg_price in new_items:
