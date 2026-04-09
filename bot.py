@@ -77,7 +77,9 @@ def check_search(search, seen):
     r = requests.get(search["url"], headers=headers)
     soup = BeautifulSoup(r.text, "html.parser")
 
-    items = soup.select("a[data-testid='item-link']")
+   items = soup.select("a[data-testid='item-link']")
+   
+   print("ITEMS FOUND:", len(items))
 
     # średnia cena
     for item in items:
