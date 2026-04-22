@@ -370,19 +370,48 @@ SEARCHES = [
 ]
 
 # ─────────────────────────────────────────
-#  💾 PAMIĘĆ
+#  💾 PAMIĘĆ  (z automatycznym czyszczeniem)
 # ─────────────────────────────────────────
-SEEN_FILE = "seen_items.json"
+SEEN_FILE      = "seen_items.json"
+SEEN_MAX_DAYS  = 30   # po ilu dniach zapominamy ID
 
 def load_seen():
-    if os.path.exists(SEEN_FILE):
+    """
+    Zwraca dict {item_id: timestamp_float}.
+    Przy ładowaniu od razu usuwa wpisy starsze niż SEEN_MAX_DAYS.
+    Obsługuje też stary format (lista stringów) — migruje automatycznie.
+    """
+    if not os.path.exists(SEEN_FILE):
+        return {}
+    try:
         with open(SEEN_FILE, "r") as f:
-            return set(json.load(f))
-    return set()
+            data = json.load(f)
+
+        now = time.time()
+        cutoff = now - SEEN_MAX_DAYS * 86400
+
+        # Migracja starego formatu (lista) → nowy (dict z timestampem)
+        if isinstance(data, list):
+            print(f"💾 Migruję seen_items: {len(data)} wpisów → format z datą")
+            return {item_id: now for item_id in data}
+
+        # Usuń stare wpisy
+        fresh = {k: v for k, v in data.items() if v > cutoff}
+        removed = len(data) - len(fresh)
+        if removed:
+            print(f"💾 Wyczyszczono {removed} starych wpisów z seen_items")
+        return fresh
+
+    except Exception as e:
+        print(f"Błąd load_seen: {e} — zaczynam od pustego")
+        return {}
 
 def save_seen(seen):
-    with open(SEEN_FILE, "w") as f:
-        json.dump(list(seen), f)
+    try:
+        with open(SEEN_FILE, "w") as f:
+            json.dump(seen, f)
+    except Exception as e:
+        print(f"Błąd save_seen: {e}")
 
 # ─────────────────────────────────────────
 #  📤 TELEGRAM
@@ -529,14 +558,62 @@ Kiedy is_hidden_gem = true:
         return None
 
 # ─────────────────────────────────────────
+#  🌐 BEZPIECZNY REQUEST DO VINTED
+#  – losowy jitter między requestami
+#  – obsługa 429 (rate limit): czeka i retry
+# ─────────────────────────────────────────
+import random
+
+VINTED_MIN_DELAY  = 2.0   # min sekund między requestami do Vinted
+VINTED_MAX_DELAY  = 5.0   # max sekund (losowy jitter)
+VINTED_429_WAIT   = 300   # sekund czekania po HTTP 429 (5 min)
+VINTED_MAX_RETRY  = 2     # ile razy powtórzyć po 429
+
+def vinted_get(url, label=""):
+    """
+    Wrapper na requests.get z:
+      - losowym opóźnieniem (rate limiting)
+      - automatycznym retry po HTTP 429
+    Zwraca obiekt Response lub None.
+    """
+    for attempt in range(1, VINTED_MAX_RETRY + 2):
+        delay = random.uniform(VINTED_MIN_DELAY, VINTED_MAX_DELAY)
+        time.sleep(delay)
+
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=15)
+        except Exception as e:
+            print(f"  ⚠️ Request error {label}: {e}")
+            return None
+
+        if r.status_code == 200:
+            return r
+
+        if r.status_code == 429:
+            if attempt <= VINTED_MAX_RETRY:
+                print(f"  🚫 HTTP 429 {label} — czekam {VINTED_429_WAIT}s (próba {attempt}/{VINTED_MAX_RETRY})")
+                time.sleep(VINTED_429_WAIT)
+                continue
+            else:
+                print(f"  🚫 HTTP 429 {label} — wyczerpano retry, pomijam")
+                return None
+
+        # Inne błędy (403, 503 itd.) — nie retry
+        print(f"  ⚠️ HTTP {r.status_code} {label}")
+        return None
+
+    return None
+
+
+# ─────────────────────────────────────────
 #  🖼️ POBIERANIE SZCZEGÓŁÓW OFERTY
 #  (zdjęcie + opis ze strony oferty)
 # ─────────────────────────────────────────
 def get_item_details(item_url):
     """Zwraca (image_url, description)"""
     try:
-        r = requests.get(item_url, headers=HEADERS, timeout=15)
-        if r.status_code != 200:
+        r = vinted_get(item_url, label=item_url[-40:])
+        if not r:
             return None, None
 
         soup = BeautifulSoup(r.text, "html.parser")
@@ -564,8 +641,8 @@ def get_item_details(item_url):
 # ─────────────────────────────────────────
 def get_market_median(search):
     try:
-        r = requests.get(search["url"], headers=HEADERS, timeout=15)
-        if r.status_code != 200:
+        r = vinted_get(search["url"], label=search["name"])
+        if not r:
             return None
 
         soup   = BeautifulSoup(r.text, "html.parser")
@@ -783,10 +860,10 @@ def validate_carhartt(title, description, search):
 def check_search(search, seen, market_price):
     found = []
     try:
-        r = requests.get(search["url"], headers=HEADERS, timeout=15)
-        print(f"[{search['name']}] HTTP {r.status_code}")
-        if r.status_code != 200:
+        r = vinted_get(search["url"], label=search["name"])
+        if not r:
             return []
+        print(f"[{search['name']}] HTTP 200")
 
         soup       = BeautifulSoup(r.text, "html.parser")
         item_links = [a for a in soup.find_all("a", href=True) if "/items/" in a["href"]]
@@ -824,11 +901,9 @@ def check_search(search, seen, market_price):
 
             # ── Tryb koszulek retro ──
             if football_mode:
-                # Wstępny filtr — musi zawierać choć jedno słowo z keywords
                 keywords = search.get("keywords", [])
                 if keywords and not any(kw.lower() in title.lower() for kw in keywords):
                     continue
-                # Odrzuć repliki już na poziomie tytułu
                 if any(rep in title.lower() for rep in REPLICA_KEYWORDS):
                     continue
 
@@ -845,20 +920,30 @@ def check_search(search, seen, market_price):
             typo_brand, typo_found = detect_typo_brand(title)
             has_typo = typo_brand is not None
 
-            # ── Decyzja czy analizować AI ──
-            needs_ai = hidden_gem_mode or football_mode or lego_sw_mode or carhartt_mode or has_typo or is_steal_price or is_below_market
+            # ── Decyzja czy potrzebujemy szczegółów oferty ──
+            needs_details = (
+                hidden_gem_mode or football_mode or lego_sw_mode
+                or carhartt_mode or has_typo or is_steal_price or is_below_market
+            )
 
-            ai_result    = None
+            # ── Pobierz szczegóły JEDEN RAZ i przekaż wszędzie ──
+            item_image_url = None
+            item_description = None
+            if needs_details and ANTHROPIC_KEY:
+                item_image_url, item_description = get_item_details(href)
+                # opóźnienie wbudowane w vinted_get()
+
+            # ── AI analiza ──
+            ai_result     = None
             is_hidden_gem = False
-            ai_reason    = ""
-            ai_brand     = None
-            mismatch     = False
+            ai_reason     = ""
+            ai_brand      = None
+            mismatch      = False
 
-            if needs_ai and ANTHROPIC_KEY:
+            if needs_details and ANTHROPIC_KEY:
                 print(f"  🤖 AI scan: {title[:50]}")
-                image_url, description = get_item_details(href)
-                ai_result = analyze_with_ai(title, description, image_url)
-                time.sleep(1)  # nie przeciążaj API
+                ai_result = analyze_with_ai(title, item_description, item_image_url)
+                time.sleep(1)
 
                 if ai_result:
                     is_hidden_gem = ai_result.get("is_hidden_gem", False)
@@ -867,7 +952,6 @@ def check_search(search, seen, market_price):
                     ai_brand      = ai_result.get("detected_brand")
                     mismatch      = ai_result.get("mismatch", False)
 
-                    # Odrzuć jeśli AI nie jest pewne
                     if is_hidden_gem and ai_confidence < MIN_AI_CONFIDENCE:
                         is_hidden_gem = False
 
@@ -877,35 +961,30 @@ def check_search(search, seen, market_price):
             lego_sw_reasons = []
             lego_set_info   = {}
             if lego_sw_mode:
-                img_url_tmp, desc_tmp = get_item_details(href) if ANTHROPIC_KEY else (None, None)
                 lego_sw_valid, lego_sw_score, lego_sw_reasons, lego_set_info = validate_lego_sw(
-                    title, desc_tmp, ai_result
+                    title, item_description, ai_result   # ← reużywa pobranego opisu
                 )
                 if not lego_sw_valid:
                     print(f"  ⛔ odrzucono LEGO SW: {lego_sw_reasons[0] if lego_sw_reasons else ''}")
                     continue
-                time.sleep(1)
 
             # ── Walidacja koszulki retro ──
             football_valid   = False
             football_reasons = []
             if football_mode:
-                image_url_tmp, desc_tmp = get_item_details(href) if ANTHROPIC_KEY else (None, None)
                 football_valid, football_reasons = validate_football_jersey(
-                    title, desc_tmp, ai_result,
+                    title, item_description, ai_result   # ← reużywa pobranego opisu
                 )
                 if not football_valid:
                     print(f"  ⛔ odrzucono retro: {football_reasons[0] if football_reasons else ''}")
                     continue
-                time.sleep(1)
 
             # ── Walidacja Carhartt ──
             carhartt_valid   = False
             carhartt_reasons = []
             if carhartt_mode:
-                _, desc_tmp = get_item_details(href) if not ai_result else (None, None)
                 carhartt_valid, carhartt_reasons = validate_carhartt(
-                    title, desc_tmp, search
+                    title, item_description, search      # ← reużywa pobranego opisu
                 )
                 if not carhartt_valid:
                     print(f"  ⛔ odrzucono Carhartt: {carhartt_reasons[0] if carhartt_reasons else ''}")
@@ -1125,7 +1204,7 @@ while True:
             print("\n📊 Aktualizuję mediany rynkowe...")
             for search in SEARCHES:
                 market_prices[search["name"]] = get_market_median(search)
-                time.sleep(3)
+                # opóźnienie wbudowane w vinted_get()
 
         cycle += 1
         print(f"\n🔄 Cykl #{cycle}")
@@ -1137,7 +1216,7 @@ while True:
             for item in new_items:
                 msg = format_message(search, item)
                 send_message(msg)
-                seen.add(item["id"])
+                seen[item["id"]] = time.time()   # zapisz z timestampem
                 tag = "💎" if item["is_hidden_gem"] else ("🔤" if item["has_typo"] else "✉️")
                 print(f"  {tag} {item['title'][:55]} | {item['price']:.0f} zł")
 
