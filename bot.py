@@ -557,160 +557,158 @@ Kiedy is_hidden_gem = true:
         return None
 
 # ─────────────────────────────────────────
-#  🌐 VINTED JSON API
-#  Vinted to React SPA — HTML nie zawiera ofert.
-#  Używamy wewnętrznego REST API /api/v2/catalog/items
-#  które zwraca czysty JSON z tytułem, ceną i zdjęciem.
+#  🌐 POBIERANIE Z VINTED  (HTML scraping)
 # ─────────────────────────────────────────
 import random
-from urllib.parse import urlparse, parse_qs
+from bs4 import BeautifulSoup
 
-API_BASE         = "https://www.vinted.pl/api/v2"
+# Rotacja User-Agentów — zmniejsza ryzyko blokady
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
+]
+
 VINTED_MIN_DELAY = 2.0
 VINTED_MAX_DELAY = 4.0
 VINTED_429_WAIT  = 180
 
-_session    = requests.Session()
-_session_ok = False
-
-def refresh_session():
-    """Odwiedza stronę główną Vinted żeby pobrać ważne cookies sesji."""
-    global _session_ok
-    try:
-        r = _session.get(
-            "https://www.vinted.pl",
-            headers=HEADERS,
-            timeout=15,
-        )
-        _session_ok = r.status_code == 200
-        print(f"✅ Sesja Vinted {'OK' if _session_ok else 'BŁĄD — HTTP ' + str(r.status_code)}")
-    except Exception as e:
-        print(f"⚠️ Błąd odświeżania sesji: {e}")
-        _session_ok = False
-
-def url_to_api_params(catalog_url):
-    """
-    Konwertuje stary URL katalogu Vinted na parametry API JSON.
-    np. ?search_text=lego&catalog[]=4&price_to=100
-     →  {search_text:'lego', catalog_ids:'4', price_to:'100', ...}
-    """
-    parsed = urlparse(catalog_url)
-    qs     = parse_qs(parsed.query, keep_blank_values=False)
-
-    params = {
-        "order":    "newest_first",
-        "currency": "PLN",
-        "per_page": 96,
-        "page":     1,
+def get_headers():
+    """Zwraca losowy zestaw nagłówków naśladujący przeglądarkę."""
+    return {
+        "User-Agent":      random.choice(USER_AGENTS),
+        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br",
+        "DNT":             "1",
+        "Connection":      "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest":  "document",
+        "Sec-Fetch-Mode":  "navigate",
+        "Sec-Fetch-Site":  "none",
+        "Cache-Control":   "max-age=0",
     }
-    if "search_text" in qs:
-        params["search_text"] = qs["search_text"][0]
-    if "catalog[]" in qs:
-        params["catalog_ids"] = ",".join(qs["catalog[]"])
-    if "brand_ids[]" in qs:
-        params["brand_ids"] = ",".join(qs["brand_ids[]"])
-    if "price_to" in qs:
-        params["price_to"] = qs["price_to"][0]
-    if "price_from" in qs:
-        params["price_from"] = qs["price_from"][0]
-    return params
 
-def vinted_api_get(params, label=""):
+def vinted_fetch(url, label=""):
     """
-    Wywołuje /api/v2/catalog/items.
-    Zwraca listę itemów (dict) lub [].
+    Pobiera stronę Vinted (HTML).
+    Zwraca obiekt requests.Response lub None.
+    Obsługuje 429 z retry i losowy jitter.
     """
-    global _session_ok
-    if not _session_ok:
-        refresh_session()
-
     for attempt in range(1, 4):
-        time.sleep(random.uniform(VINTED_MIN_DELAY, VINTED_MAX_DELAY))
         try:
-            r = _session.get(
-                f"{API_BASE}/catalog/items",
-                params=params,
-                headers={**HEADERS, "Accept": "application/json"},
-                timeout=15,
-            )
+            time.sleep(random.uniform(VINTED_MIN_DELAY, VINTED_MAX_DELAY))
+            r = requests.get(url, headers=get_headers(), timeout=10)
+
+            if r.status_code == 200:
+                return r
+
+            if r.status_code == 429:
+                wait = VINTED_429_WAIT * attempt
+                print(f"  🚫 429 [{label}] — czekam {wait}s (próba {attempt})")
+                time.sleep(wait)
+                continue
+
+            if r.status_code in (403, 401):
+                print(f"  ⚠️ HTTP {r.status_code} [{label}] — próba {attempt}/3")
+                time.sleep(5 * attempt)
+                continue
+
+            print(f"  ⚠️ HTTP {r.status_code} [{label}]")
+            return None
+
         except Exception as e:
             print(f"  ⚠️ Request error [{label}]: {e}")
-            return []
+            time.sleep(10)
 
-        if r.status_code == 200:
-            try:
-                data  = r.json()
-                items = data.get("items", [])
-                # Debug: pokaż przykładowy item żeby sprawdzić strukturę
-                if items and attempt == 1:
-                    s = items[0]
-                    print(f"  🔍 Przykład [{label}]: id={s.get('id')} "
-                          f"title={repr(str(s.get('title',''))[:40])} "
-                          f"price={s.get('price')}")
-                return items
-            except Exception as e:
-                print(f"  ⚠️ JSON error [{label}]: {e} | body: {r.text[:200]}")
-                return []
+    return None
 
-        if r.status_code in (401, 403):
-            print(f"  🔄 HTTP {r.status_code} [{label}] — odświeżam sesję (próba {attempt})")
-            refresh_session()
+def refresh_session():
+    """Stub dla kompatybilności — nie potrzebujemy już sesji API."""
+    print("✅ Sesja Vinted odświeżona")
+
+def parse_items_from_html(html):
+    """
+    Wyciąga linki do ofert z HTML strony katalogu Vinted.
+    Zwraca listę dictów: {id, title, price, url}
+    """
+    soup  = BeautifulSoup(html, "html.parser")
+    items = []
+    seen_ids = set()
+
+    for tag in soup.find_all("a", href=True):
+        href = tag["href"]
+        if "/items/" not in href:
             continue
 
-        if r.status_code == 429:
-            wait = VINTED_429_WAIT * attempt
-            print(f"  🚫 429 [{label}] — czekam {wait}s (próba {attempt})")
-            time.sleep(wait)
+        if not href.startswith("http"):
+            href = "https://www.vinted.pl" + href
+
+        # wyciągnij ID
+        try:
+            item_id = href.split("/items/")[1].split("-")[0].split("?")[0]
+            if not item_id.isdigit():
+                continue
+        except:
             continue
 
-        print(f"  ⚠️ HTTP {r.status_code} [{label}] | body: {r.text[:200]}")
-        return []
+        if item_id in seen_ids:
+            continue
+        seen_ids.add(item_id)
 
-    return []
+        title = tag.get_text(" ", strip=True)
+        price = extract_price(title)
+
+        items.append({
+            "id":    item_id,
+            "title": title,
+            "price": price,
+            "url":   href,
+        })
+
+    return items
+
 
 # ─────────────────────────────────────────
-#  🖼️ SZCZEGÓŁY OFERTY — API JSON
+#  🖼️ POBIERANIE SZCZEGÓŁÓW OFERTY (HTML)
 # ─────────────────────────────────────────
 def get_item_details(item_url):
-    """
-    Zwraca (image_url, description) używając /api/v2/items/{id}.
-    Szybsze niż HTML i nie wymaga JS.
-    """
+    """Zwraca (image_url, description) ze strony HTML oferty."""
     try:
-        item_id = item_url.split("/items/")[1].split("-")[0].split("?")[0]
-        time.sleep(random.uniform(1.5, 3.0))
-        r = _session.get(
-            f"{API_BASE}/items/{item_id}",
-            headers={**HEADERS, "Accept": "application/json"},
-            timeout=15,
-        )
-        if r.status_code != 200:
+        r = vinted_fetch(item_url, label="item_details")
+        if not r:
             return None, None
-        data      = r.json().get("item", {})
-        photos    = data.get("photos", [])
-        image_url = photos[0].get("url") if photos else None
-        desc      = data.get("description", "")
-        return image_url, desc
+
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        og_img    = soup.find("meta", property="og:image")
+        image_url = og_img["content"] if og_img else None
+
+        desc_tag    = soup.find("meta", attrs={"name": "description"})
+        description = desc_tag["content"] if desc_tag else ""
+
+        return image_url, description
+
     except Exception as e:
         print(f"Błąd get_item_details: {e}")
         return None, None
 
 # ─────────────────────────────────────────
-#  📊 MEDIANA RYNKOWA
+#  📊 MEDIANA RYNKOWA (HTML scraping)
 # ─────────────────────────────────────────
 def get_market_median(search):
     try:
-        params = url_to_api_params(search["url"])
-        params["per_page"] = 96
-        items  = vinted_api_get(params, label=search["name"])
-        prices = []
-        for it in items:
-            try:
-                p = float(str(it.get("price", "0")).replace(",", "."))
-                if p > search.get("min_price", 1):
-                    prices.append(p)
-            except:
-                pass
+        r = vinted_fetch(search["url"], label=search["name"])
+        if not r:
+            return None
+
+        items  = parse_items_from_html(r.text)
+        prices = [
+            it["price"] for it in items
+            if it["price"] and it["price"] > search.get("min_price", 1)
+        ]
 
         if len(prices) >= 3:
             med = median(prices)
@@ -918,41 +916,32 @@ def validate_carhartt(title, description, search):
 def check_search(search, seen, market_price):
     found = []
     try:
-        params = url_to_api_params(search["url"])
-        items  = vinted_api_get(params, label=search["name"])
-        print(f"[{search['name']}] Ofert z API: {len(items)}")
+        r = vinted_fetch(search["url"], label=search["name"])
+        if not r:
+            return []
+
+        items = parse_items_from_html(r.text)
+        print(f"[{search['name']}] Ofert na stronie: {len(items)}")
 
         cnt_seen = cnt_price = cnt_kw = cnt_no_qualify = 0
 
         for item in items:
             try:
-                item_id = str(item.get("id", ""))
+                item_id = item["id"]
                 if not item_id or item_id in seen:
                     cnt_seen += 1
                     continue
 
-                title = (item.get("title") or "").strip()
+                title = item["title"]
                 if not title:
                     continue
 
-                href = item.get("url") or f"https://www.vinted.pl/items/{item_id}"
-                if not href.startswith("http"):
-                    href = "https://www.vinted.pl" + href
+                href  = item["url"]
+                price = item["price"]
 
-                # Cena bezpośrednio z API (pewna wartość)
-                try:
-                    price = float(str(item.get("price", "0")).replace(",", "."))
-                except:
+                if not price or price < search.get("min_price", 1):
                     cnt_price += 1
                     continue
-
-                if price < search.get("min_price", 1):
-                    cnt_price += 1
-                    continue
-
-                # Zdjęcie już z listy — bez dodatkowego requestu
-                photos        = item.get("photos", [])
-                api_image_url = photos[0].get("url") if photos else None
 
             except Exception as e:
                 print(f"  ⚠️ Błąd parsowania itemu: {e}")
@@ -999,11 +988,11 @@ def check_search(search, seen, market_price):
             ai_reason     = ""
             ai_brand      = None
             mismatch      = False
-            item_image_url   = api_image_url   # zdjęcie z listy API
+            item_image_url   = None
             item_description = None
 
             if ANTHROPIC_KEY and hidden_gem_mode:
-                _, item_description = get_item_details(href)
+                item_image_url, item_description = get_item_details(href)
                 ai_result = analyze_with_ai(title, item_description, item_image_url)
                 if ai_result:
                     is_hidden_gem = ai_result.get("is_hidden_gem", False)
