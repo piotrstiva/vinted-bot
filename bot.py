@@ -35,9 +35,9 @@ STEAL_PRICES = {
     "clothing":  30,
     "lego":      60,
     "funko":     25,
-    "football":  50,   # koszulka retro poniżej 50 zł → zawsze alert
-    "lego_sw":   80,   # LEGO Star Wars poniżej 80 zł → zawsze alert
-    "carhartt": 250,   # Carhartt — próg ogólny (modele premium ≤250 zł)
+    "football":  50,
+    "lego_sw":   80,
+    "carhartt": 250,
 }
 
 # ─────────────────────────────────────────
@@ -600,7 +600,7 @@ def vinted_fetch(url, label=""):
     for attempt in range(1, 4):
         try:
             time.sleep(random.uniform(VINTED_MIN_DELAY, VINTED_MAX_DELAY))
-            r = requests.get(url, headers=get_headers(), timeout=20)
+            r = requests.get(url, headers=get_headers(), timeout=10)
 
             if r.status_code == 200:
                 return r
@@ -613,7 +613,7 @@ def vinted_fetch(url, label=""):
 
             if r.status_code in (403, 401):
                 print(f"  ⚠️ HTTP {r.status_code} [{label}] — próba {attempt}/3")
-                time.sleep(30 * attempt)
+                time.sleep(5 * attempt)
                 continue
 
             print(f"  ⚠️ HTTP {r.status_code} [{label}]")
@@ -1278,8 +1278,10 @@ while True:
         print(f"\n🔄 Cykl #{cycle}")
 
         for search in SEARCHES:
+            print(f"  ⏳ Sprawdzam: {search['name']}")
             market_price = market_prices.get(search["name"])
             new_items    = check_search(search, seen, market_price)
+            print(f"  ✔ Gotowe: {search['name']} — nowych: {len(new_items)}")
 
             for item in new_items:
                 msg = format_message(search, item)
