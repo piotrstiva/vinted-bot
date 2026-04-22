@@ -23,7 +23,7 @@ HEADERS = {
 SEARCHES = [
     {
         "name": "Nike Dunk 42",
-        "url": "https://www.vinted.pl/catalog?search_id=32942754045&catalog[]=1206&size_ids[]=208&size_ids[]=209&size_ids[]=210&page=1&time=1775767599&brand_ids[]=872289&brand_ids[]=362&price_to=200&currency=PLN&order=newest_first",
+        "url": "https://www.vinted.pl/catalog?search_text=carhartt&search_id=33346027533&brand_ids[]=362&brand_ids[]=872289&page=1&time=1776857351&catalog[]=1206&price_to=200&currency=PLN",
 
         # 💬 słowa kluczowe — oferta MUSI zawierać przynajmniej jedno
         "keywords": ["nike", "dunk", "air force", "jordan"],
