@@ -982,33 +982,18 @@ def check_search(search, seen, market_price):
             typo_brand, typo_found = detect_typo_brand(title)
             has_typo = typo_brand is not None
 
-            # ── Wstępna kwalifikacja (bez AI) ──
-            # Tylko oferty które przeszły wstępny filtr idą dalej do AI/szczegółów
-            pre_qualifies = (
-                is_steal_price or is_below_market or has_typo
-                or hidden_gem_mode or football_mode
-                or lego_sw_mode or carhartt_mode
-            )
-            if not pre_qualifies:
-                cnt_no_qualify += 1
-                continue
-
-            # ── Pobierz szczegóły oferty TYLKO gdy potrzeba ──
-            item_image_url   = None
-            item_description = None
-            if ANTHROPIC_KEY and (hidden_gem_mode or football_mode or lego_sw_mode):
-                item_image_url, item_description = get_item_details(href)
-
-            # ── AI analiza ──
+            # ── AI analiza (tylko hidden gem i typo) ──
             ai_result     = None
             is_hidden_gem = False
             ai_reason     = ""
             ai_brand      = None
             mismatch      = False
+            item_image_url   = None
+            item_description = None
 
-            if ANTHROPIC_KEY and (hidden_gem_mode or has_typo or is_steal_price or is_below_market):
+            if ANTHROPIC_KEY and hidden_gem_mode:
+                item_image_url, item_description = get_item_details(href)
                 ai_result = analyze_with_ai(title, item_description, item_image_url)
-                time.sleep(1)
                 if ai_result:
                     is_hidden_gem = ai_result.get("is_hidden_gem", False)
                     ai_confidence = ai_result.get("confidence", 0)
@@ -1044,13 +1029,14 @@ def check_search(search, seen, market_price):
                     title, item_description, search
                 )
 
+            # ── Finalna decyzja ──
             qualifies = (
                 is_steal_price
                 or is_below_market
                 or has_typo
                 or is_hidden_gem
-                or (football_mode and football_valid)
                 or (lego_sw_mode and lego_sw_valid)
+                or (football_mode and football_valid)
                 or (carhartt_mode and carhartt_valid)
             )
 
