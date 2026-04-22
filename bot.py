@@ -38,7 +38,25 @@ STEAL_PRICES = {
     "funko":     25,
     "football":  50,   # koszulka retro poniżej 50 zł → zawsze alert
     "lego_sw":   80,   # LEGO Star Wars poniżej 80 zł → zawsze alert
+    "carhartt": 250,   # Carhartt — próg ogólny (modele premium ≤250 zł)
 }
+
+# ─────────────────────────────────────────
+#  🧥 CARHARTT — konfiguracja modeli
+# ─────────────────────────────────────────
+
+# Modele z niższym progiem (Trucker cap/hat)
+CARHARTT_TRUCKER_MODELS = [
+    "trucker", "trucker cap", "trucker hat", "czapka trucker",
+]
+CARHARTT_TRUCKER_MAX = 150   # alert gdy cena ≤ 150 zł
+
+# Modele z wyższym progiem (kurtki)
+CARHARTT_PREMIUM_MODELS = [
+    "santa fe", "detroit", "active jacket",
+    "kurtka santa fe", "kurtka detroit", "kurtka active",
+]
+CARHARTT_PREMIUM_MAX = 250   # alert gdy cena ≤ 250 zł
 
 # ─────────────────────────────────────────
 #  🧱 LEGO STAR WARS — konfiguracja
@@ -200,6 +218,7 @@ BRAND_TYPOS = {
     "balenciaga":   ["balenciag", "balenciga", "balenciaga's", "balanciaga"],
     "gucci":        ["guci", "guchi", "gucci's"],
     "louis vuitton":["louis viton", "luis vuitton", "louiss vuitton", "lv"],
+    "carhartt":     ["carhatt", "carhart", "carhарт", "cahartt", "carharrt", "charhartt"],
 }
 
 # ─────────────────────────────────────────
@@ -305,6 +324,29 @@ SEARCHES = [
         "brands":   FOOTBALL_ORIGINAL_BRANDS,
         "min_price": 15,
         "football_mode": True,
+    },
+    # ── CARHARTT ─────────────────────────────
+    {
+        "name":     "Carhartt Trucker",
+        "url":      "https://www.vinted.pl/catalog?search_text=carhartt+trucker&catalog[]=4&order=newest_first&currency=PLN&price_to=150",
+        "category": "carhartt",
+        "keywords": ["carhartt", "trucker"],
+        "brands":   ["carhartt"],
+        "min_price": 20,
+        "carhartt_mode": True,
+        "carhartt_models": CARHARTT_TRUCKER_MODELS,
+        "carhartt_max_price": CARHARTT_TRUCKER_MAX,
+    },
+    {
+        "name":     "Carhartt Santa Fe / Detroit / Active",
+        "url":      "https://www.vinted.pl/catalog?search_text=carhartt+kurtka&catalog[]=4&order=newest_first&currency=PLN&price_to=250",
+        "category": "carhartt",
+        "keywords": ["carhartt"],
+        "brands":   ["carhartt"],
+        "min_price": 50,
+        "carhartt_mode": True,
+        "carhartt_models": CARHARTT_PREMIUM_MODELS,
+        "carhartt_max_price": CARHARTT_PREMIUM_MAX,
     },
     # ── HIDDEN GEM — brak marki, niska cena ──
     {
@@ -703,6 +745,39 @@ def validate_football_jersey(title, description, ai_result):
 
 
 # ─────────────────────────────────────────
+#  🧥 WALIDACJA CARHARTT
+# ─────────────────────────────────────────
+def validate_carhartt(title, description, search):
+    """
+    Zwraca (is_valid, reasons)
+    Sprawdza czy oferta zawiera właściwy model i mieści się w progu cenowym.
+    """
+    text = (title + " " + (description or "")).lower()
+    reasons = []
+
+    # Musi być marka Carhartt
+    if "carhartt" not in text:
+        return False, ["⛔ brak słowa 'carhartt' w ofercie"]
+
+    # Sprawdź czy zawiera jeden z wymaganych modeli
+    models = search.get("carhartt_models", [])
+    found_model = next((m for m in models if m in text), None)
+    if not found_model:
+        model_names = ", ".join(dict.fromkeys(
+            m.split()[-1].title() for m in models   # unikalne nazwy modeli
+        ))
+        return False, [f"⛔ brak wymaganego modelu ({model_names})"]
+
+    reasons.append(f"✅ model: {found_model}")
+
+    # Sprawdź próg cenowy (dodatkowe zabezpieczenie — URL już filtruje)
+    max_price = search.get("carhartt_max_price", 9999)
+    reasons.append(f"✅ cena ≤ {max_price} zł")
+
+    return True, reasons
+
+
+# ─────────────────────────────────────────
 #  🕵️ SPRAWDZANIE OFERT
 # ─────────────────────────────────────────
 def check_search(search, seen, market_price):
@@ -737,9 +812,10 @@ def check_search(search, seen, market_price):
             hidden_gem_mode = search.get("hidden_gem_mode", False)
             football_mode   = search.get("football_mode", False)
             lego_sw_mode    = search.get("lego_sw_mode", False)
+            carhartt_mode   = search.get("carhartt_mode", False)
 
             # ── Tryb normalny: filtr słów kluczowych ──
-            if not hidden_gem_mode and not lego_sw_mode:
+            if not hidden_gem_mode and not lego_sw_mode and not carhartt_mode:
                 keywords = search.get("keywords", [])
                 if keywords and not any(kw.lower() in title.lower() for kw in keywords):
                     continue
@@ -770,7 +846,7 @@ def check_search(search, seen, market_price):
             has_typo = typo_brand is not None
 
             # ── Decyzja czy analizować AI ──
-            needs_ai = hidden_gem_mode or football_mode or lego_sw_mode or has_typo or is_steal_price or is_below_market
+            needs_ai = hidden_gem_mode or football_mode or lego_sw_mode or carhartt_mode or has_typo or is_steal_price or is_below_market
 
             ai_result    = None
             is_hidden_gem = False
@@ -823,6 +899,18 @@ def check_search(search, seen, market_price):
                     continue
                 time.sleep(1)
 
+            # ── Walidacja Carhartt ──
+            carhartt_valid   = False
+            carhartt_reasons = []
+            if carhartt_mode:
+                _, desc_tmp = get_item_details(href) if not ai_result else (None, None)
+                carhartt_valid, carhartt_reasons = validate_carhartt(
+                    title, desc_tmp, search
+                )
+                if not carhartt_valid:
+                    print(f"  ⛔ odrzucono Carhartt: {carhartt_reasons[0] if carhartt_reasons else ''}")
+                    continue
+
             qualifies = (
                 is_steal_price
                 or is_below_market
@@ -830,6 +918,7 @@ def check_search(search, seen, market_price):
                 or is_hidden_gem
                 or football_valid
                 or lego_sw_valid
+                or carhartt_valid
             )
 
             if not qualifies:
@@ -841,6 +930,8 @@ def check_search(search, seen, market_price):
                 reasons += lego_sw_reasons[:4]
             if football_valid:
                 reasons += football_reasons
+            if carhartt_valid:
+                reasons += carhartt_reasons
             if has_typo:
                 reasons.append(f"błędna pisownia: '{typo_found}' → {typo_brand}")
             if mismatch:
@@ -855,24 +946,25 @@ def check_search(search, seen, market_price):
                 reasons.append(ai_reason)
 
             found.append({
-                "id":             item_id,
-                "title":          title,
-                "link":           href,
-                "price":          price,
-                "market_price":   market_price,
-                "discount_pct":   discount_pct,
-                "is_steal":       is_steal_price,
-                "is_below":       is_below_market,
-                "has_typo":       has_typo,
-                "typo_brand":     typo_brand,
-                "is_hidden_gem":  is_hidden_gem,
-                "mismatch":       mismatch,
-                "ai_brand":       ai_brand,
-                "reasons":        reasons,
-                "lego_sw_valid":  lego_sw_valid,
-                "lego_sw_score":  lego_sw_score,
-                "lego_set_info":  lego_set_info,
-                "football_valid": football_valid,
+                "id":               item_id,
+                "title":            title,
+                "link":             href,
+                "price":            price,
+                "market_price":     market_price,
+                "discount_pct":     discount_pct,
+                "is_steal":         is_steal_price,
+                "is_below":         is_below_market,
+                "has_typo":         has_typo,
+                "typo_brand":       typo_brand,
+                "is_hidden_gem":    is_hidden_gem,
+                "mismatch":         mismatch,
+                "ai_brand":         ai_brand,
+                "reasons":          reasons,
+                "lego_sw_valid":    lego_sw_valid,
+                "lego_sw_score":    lego_sw_score,
+                "lego_set_info":    lego_set_info,
+                "football_valid":   football_valid,
+                "carhartt_valid":   carhartt_valid,
             })
 
     except Exception as e:
@@ -889,6 +981,7 @@ CATEGORY_EMOJI = {
     "lego":     "🧱",
     "funko":    "🎭",
     "football": "⚽",
+    "carhartt": "🧥",
 }
 
 def format_message(search, item):
@@ -925,6 +1018,30 @@ def format_message(search, item):
             lines.append("🟡 Minifigurki: <b>tak</b>")
         if info.get("complete"):
             lines.append("✅ Kompletność: <b>kompletny</b>")
+        if item["reasons"]:
+            lines.append("")
+            for r in item["reasons"][:3]:
+                lines.append(f"  • {r}")
+        lines.append("")
+        lines.append(f"🔗 <a href=\"{item['link']}\">Otwórz ofertę na Vinted</a>")
+        return "\n".join(lines)
+
+    # Nagłówek — Carhartt
+    if search.get("carhartt_mode"):
+        max_p = search.get("carhartt_max_price", 9999)
+        if item["discount_pct"] >= 40:
+            lines.append(f"🧥 <b>CARHARTT OKAZJA! -{item['discount_pct']:.0f}% poniżej rynku</b>")
+        else:
+            lines.append(f"🧥 <b>CARHARTT — model poniżej {max_p} zł!</b>")
+        lines.append(f"🧥 <b>{search['name']}</b>")
+        lines.append("")
+        lines.append(f"📦 {item['title'][:120]}")
+        lines.append("")
+        lines.append(f"💰 Cena: <b>{item['price']:.0f} zł</b>")
+        if item["market_price"]:
+            lines.append(f"📊 Średnia: <i>{item['market_price']:.0f} zł</i>")
+            if item["discount_pct"] > 0:
+                lines.append(f"✂️ Oszczędzasz: <b>~{item['market_price'] - item['price']:.0f} zł</b>")
         if item["reasons"]:
             lines.append("")
             for r in item["reasons"][:3]:
@@ -992,8 +1109,9 @@ send_message(
     "  🧱 LEGO ogólne | 🎭 Funko Pop\n"
     "  ⭐ LEGO Star Wars (kompletne zestawy)\n"
     "  ⚽ Koszulki retro 70s/80s/90s/2000s\n"
+    "  🧥 Carhartt: Trucker ≤150 zł | Santa Fe/Detroit/Active ≤250 zł\n"
     "  💎 Hidden Gem (AI scan)\n\n"
-    "🔤 Detekcja typo: Nike/Adidas/Supreme...\n"
+    "🔤 Detekcja typo: Nike/Adidas/Supreme/Carhartt...\n"
     "⚽ Retro: tylko oryginały, bez replik"
 )
 
