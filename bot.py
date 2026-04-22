@@ -1,5 +1,4 @@
 import requests
-from bs4 import BeautifulSoup
 import time
 import os
 import json
@@ -558,30 +557,137 @@ Kiedy is_hidden_gem = true:
         return None
 
 # ─────────────────────────────────────────
-#  🌐 BEZPIECZNY REQUEST DO VINTED
-#  – losowy jitter między requestami
-#  – obsługa 429 (rate limit): czeka i retry
+#  🌐 SESJA VINTED  (cookies + API JSON)
 # ─────────────────────────────────────────
 import random
+from urllib.parse import urlparse, parse_qs, urlencode
 
-VINTED_MIN_DELAY  = 2.0   # min sekund między requestami do Vinted
-VINTED_MAX_DELAY  = 5.0   # max sekund (losowy jitter)
-VINTED_429_WAIT   = 300   # sekund czekania po HTTP 429 (5 min)
-VINTED_MAX_RETRY  = 2     # ile razy powtórzyć po 429
+VINTED_MIN_DELAY  = 2.0
+VINTED_MAX_DELAY  = 4.0
+VINTED_429_WAIT   = 300
+VINTED_MAX_RETRY  = 2
+API_BASE          = "https://www.vinted.pl/api/v2"
+
+_session = requests.Session()
+_session_ok = False
+
+def refresh_session():
+    """
+    Pobiera świeże cookies sesji Vinted odwiedzając stronę główną.
+    Vinted wymaga ważnego ciasteczka _vinted_fr_session do API.
+    """
+    global _session_ok
+    try:
+        r = _session.get(
+            "https://www.vinted.pl",
+            headers=HEADERS,
+            timeout=15,
+        )
+        _session_ok = r.status_code == 200
+        if _session_ok:
+            print("✅ Sesja Vinted odświeżona")
+        else:
+            print(f"⚠️ Nie udało się odświeżyć sesji: HTTP {r.status_code}")
+    except Exception as e:
+        print(f"⚠️ Błąd odświeżania sesji: {e}")
+        _session_ok = False
+
+def url_to_api_params(catalog_url):
+    """
+    Konwertuje URL katalogu Vinted (stary format) na parametry
+    dla /api/v2/catalog/items.
+    Np. ?search_text=lego&catalog[]=4&price_to=100  →
+        {search_text: 'lego', catalog_ids: '4', price_to: 100, ...}
+    """
+    parsed = urlparse(catalog_url)
+    qs     = parse_qs(parsed.query, keep_blank_values=False)
+
+    params = {
+        "order":    "newest_first",
+        "currency": "PLN",
+        "per_page": 96,
+        "page":     1,
+    }
+
+    if "search_text" in qs:
+        params["search_text"] = qs["search_text"][0]
+
+    # catalog[] → catalog_ids (przecinkami)
+    if "catalog[]" in qs:
+        params["catalog_ids"] = ",".join(qs["catalog[]"])
+
+    # brand_ids[] → brand_ids
+    if "brand_ids[]" in qs:
+        params["brand_ids"] = ",".join(qs["brand_ids[]"])
+
+    if "price_to" in qs:
+        params["price_to"] = qs["price_to"][0]
+
+    if "price_from" in qs:
+        params["price_from"] = qs["price_from"][0]
+
+    return params
+
+def vinted_api_get(params, label=""):
+    """
+    Wywołuje /api/v2/catalog/items z podanymi parametrami.
+    Zwraca listę itemów (dict) lub [].
+    Obsługuje 429 z retry i losowy jitter.
+    """
+    global _session_ok
+    if not _session_ok:
+        refresh_session()
+
+    for attempt in range(1, VINTED_MAX_RETRY + 2):
+        time.sleep(random.uniform(VINTED_MIN_DELAY, VINTED_MAX_DELAY))
+        try:
+            r = _session.get(
+                f"{API_BASE}/catalog/items",
+                params=params,
+                headers={**HEADERS, "Accept": "application/json"},
+                timeout=15,
+            )
+        except Exception as e:
+            print(f"  ⚠️ Request error [{label}]: {e}")
+            return []
+
+        if r.status_code == 200:
+            try:
+                data = r.json()
+                return data.get("items", [])
+            except Exception as e:
+                print(f"  ⚠️ JSON parse error [{label}]: {e}")
+                return []
+
+        if r.status_code == 401 or r.status_code == 403:
+            # Sesja wygasła — odśwież i spróbuj jeszcze raz
+            print(f"  🔄 Sesja wygasła ({r.status_code}), odświeżam...")
+            refresh_session()
+            continue
+
+        if r.status_code == 429:
+            if attempt <= VINTED_MAX_RETRY:
+                print(f"  🚫 HTTP 429 [{label}] — czekam {VINTED_429_WAIT}s (próba {attempt})")
+                time.sleep(VINTED_429_WAIT)
+                continue
+            else:
+                print(f"  🚫 HTTP 429 [{label}] — wyczerpano retry")
+                return []
+
+        print(f"  ⚠️ HTTP {r.status_code} [{label}]")
+        return []
+
+    return []
 
 def vinted_get(url, label=""):
     """
-    Wrapper na requests.get z:
-      - losowym opóźnieniem (rate limiting)
-      - automatycznym retry po HTTP 429
-    Zwraca obiekt Response lub None.
+    Kompatybilność wsteczna dla get_item_details (strona oferty).
+    Dla stron ofert nadal używamy HTML (API szczegółów wymaga auth).
     """
     for attempt in range(1, VINTED_MAX_RETRY + 2):
-        delay = random.uniform(VINTED_MIN_DELAY, VINTED_MAX_DELAY)
-        time.sleep(delay)
-
+        time.sleep(random.uniform(VINTED_MIN_DELAY, VINTED_MAX_DELAY))
         try:
-            r = requests.get(url, headers=HEADERS, timeout=15)
+            r = _session.get(url, headers=HEADERS, timeout=15)
         except Exception as e:
             print(f"  ⚠️ Request error {label}: {e}")
             return None
@@ -591,14 +697,11 @@ def vinted_get(url, label=""):
 
         if r.status_code == 429:
             if attempt <= VINTED_MAX_RETRY:
-                print(f"  🚫 HTTP 429 {label} — czekam {VINTED_429_WAIT}s (próba {attempt}/{VINTED_MAX_RETRY})")
+                print(f"  🚫 HTTP 429 {label} — czekam {VINTED_429_WAIT}s")
                 time.sleep(VINTED_429_WAIT)
                 continue
-            else:
-                print(f"  🚫 HTTP 429 {label} — wyczerpano retry, pomijam")
-                return None
+            return None
 
-        # Inne błędy (403, 503 itd.) — nie retry
         print(f"  ⚠️ HTTP {r.status_code} {label}")
         return None
 
@@ -607,30 +710,31 @@ def vinted_get(url, label=""):
 
 # ─────────────────────────────────────────
 #  🖼️ POBIERANIE SZCZEGÓŁÓW OFERTY
-#  (zdjęcie + opis ze strony oferty)
+#  Używamy /api/v2/items/{id} — zwraca JSON
+#  z opisem i zdjęciami bez JavaScript
 # ─────────────────────────────────────────
 def get_item_details(item_url):
-    """Zwraca (image_url, description)"""
+    """
+    Zwraca (image_url, description) używając API JSON Vinted.
+    item_url: pełny URL oferty, np. https://www.vinted.pl/items/1234-nazwa
+    """
     try:
-        r = vinted_get(item_url, label=item_url[-40:])
-        if not r:
+        item_id = item_url.split("/items/")[1].split("-")[0].split("?")[0]
+        time.sleep(random.uniform(1.5, 3.0))
+        r = _session.get(
+            f"{API_BASE}/items/{item_id}",
+            headers={**HEADERS, "Accept": "application/json"},
+            timeout=15,
+        )
+        if r.status_code != 200:
             return None, None
 
-        soup = BeautifulSoup(r.text, "html.parser")
-
-        # Zdjęcie — szukamy og:image lub pierwszego dużego img
-        og_img = soup.find("meta", property="og:image")
-        image_url = og_img["content"] if og_img else None
-
-        if not image_url:
-            img = soup.find("img", {"src": re.compile(r"photos|images", re.I)})
-            image_url = img["src"] if img else None
-
-        # Opis
-        desc_tag = soup.find("meta", attrs={"name": "description"})
-        description = desc_tag["content"] if desc_tag else ""
-
-        return image_url, description
+        data = r.json().get("item", {})
+        # Pierwsze zdjęcie
+        photos    = data.get("photos", [])
+        image_url = photos[0].get("url") if photos else None
+        desc      = data.get("description", "")
+        return image_url, desc
 
     except Exception as e:
         print(f"Błąd get_item_details: {e}")
@@ -641,18 +745,18 @@ def get_item_details(item_url):
 # ─────────────────────────────────────────
 def get_market_median(search):
     try:
-        r = vinted_get(search["url"], label=search["name"])
-        if not r:
-            return None
-
-        soup   = BeautifulSoup(r.text, "html.parser")
-        items  = [a for a in soup.find_all("a", href=True) if "/items/" in a["href"]]
+        params = url_to_api_params(search["url"])
+        params["per_page"] = 96
+        items = vinted_api_get(params, label=search["name"])
         prices = []
 
-        for tag in items[:30]:
-            price = extract_price(tag.get_text(" ", strip=True))
-            if price and price > search.get("min_price", 1):
-                prices.append(price)
+        for item in items:
+            try:
+                price = float(str(item.get("price", "0")).replace(",", "."))
+                if price > search.get("min_price", 1):
+                    prices.append(price)
+            except:
+                pass
 
         if len(prices) >= 3:
             med = median(prices)
@@ -860,30 +964,38 @@ def validate_carhartt(title, description, search):
 def check_search(search, seen, market_price):
     found = []
     try:
-        r = vinted_get(search["url"], label=search["name"])
-        if not r:
-            return []
-        print(f"[{search['name']}] HTTP 200")
+        params = url_to_api_params(search["url"])
+        items  = vinted_api_get(params, label=search["name"])
+        print(f"[{search['name']}] Ofert z API: {len(items)}")
 
-        soup       = BeautifulSoup(r.text, "html.parser")
-        item_links = [a for a in soup.find_all("a", href=True) if "/items/" in a["href"]]
-        print(f"[{search['name']}] Ofert: {len(item_links)}")
+        for item in items:
+            try:
+                item_id  = str(item.get("id", ""))
+                if not item_id or item_id in seen:
+                    continue
 
-        for tag in item_links:
-            href = tag["href"]
-            if not href.startswith("http"):
-                href = "https://www.vinted.pl" + href
+                title = item.get("title", "").strip()
+                if not title:
+                    continue
 
-            item_id = href.split("/items/")[1].split("-")[0].split("?")[0]
-            if item_id in seen:
-                continue
+                href = item.get("url", "") or f"https://www.vinted.pl/items/{item_id}"
+                if not href.startswith("http"):
+                    href = "https://www.vinted.pl" + href
 
-            title = tag.get_text(" ", strip=True)
-            if not title:
-                continue
+                # Cena — API zwraca string lub float
+                try:
+                    price = float(str(item.get("price", "0")).replace(",", "."))
+                except:
+                    continue
+                if price < search.get("min_price", 1):
+                    continue
 
-            price = extract_price(title)
-            if not price or price < search.get("min_price", 1):
+                # Zdjęcie bezpośrednio z API (bez dodatkowego requestu)
+                photos = item.get("photos", [])
+                api_image_url = photos[0].get("url") if photos else None
+
+            except Exception as e:
+                print(f"  ⚠️ Błąd parsowania itemu: {e}")
                 continue
 
             hidden_gem_mode = search.get("hidden_gem_mode", False)
@@ -927,11 +1039,12 @@ def check_search(search, seen, market_price):
             )
 
             # ── Pobierz szczegóły JEDEN RAZ i przekaż wszędzie ──
-            item_image_url = None
+            # Zdjęcie mamy już z listy API (api_image_url)
+            # Pobieramy tylko opis z endpointu szczegółów
+            item_image_url   = api_image_url
             item_description = None
             if needs_details and ANTHROPIC_KEY:
-                item_image_url, item_description = get_item_details(href)
-                # opóźnienie wbudowane w vinted_get()
+                _, item_description = get_item_details(href)
 
             # ── AI analiza ──
             ai_result     = None
@@ -1178,6 +1291,10 @@ def format_message(search, item):
 #  🚀 GŁÓWNA PĘTLA
 # ─────────────────────────────────────────
 print("✅ BOT HIDDEN GEM FINDER URUCHOMIONY")
+
+# Pobierz sesję Vinted przed startem
+refresh_session()
+
 send_message(
     "✅ <b>Vinted Hidden Gem Finder uruchomiony!</b>\n\n"
     f"🔍 Monitoruję {len(SEARCHES)} wyszukiwań\n"
@@ -1200,11 +1317,14 @@ cycle         = 0
 
 while True:
     try:
+        # Co 50 cykli (~50 min) odśwież sesję Vinted
+        if cycle % 50 == 0:
+            refresh_session()
+
         if cycle % 10 == 0:
             print("\n📊 Aktualizuję mediany rynkowe...")
             for search in SEARCHES:
                 market_prices[search["name"]] = get_market_median(search)
-                # opóźnienie wbudowane w vinted_get()
 
         cycle += 1
         print(f"\n🔄 Cykl #{cycle}")
@@ -1216,7 +1336,7 @@ while True:
             for item in new_items:
                 msg = format_message(search, item)
                 send_message(msg)
-                seen[item["id"]] = time.time()   # zapisz z timestampem
+                seen[item["id"]] = time.time()
                 tag = "💎" if item["is_hidden_gem"] else ("🔤" if item["has_typo"] else "✉️")
                 print(f"  {tag} {item['title'][:55]} | {item['price']:.0f} zł")
 
