@@ -923,10 +923,13 @@ def check_search(search, seen, market_price):
         items = parse_items_from_html(r.text)
         print(f"[{search['name']}] Ofert na stronie: {len(items)}")
 
+        cnt_seen = cnt_price = cnt_kw = cnt_no_qualify = 0
+
         for item in items:
             try:
                 item_id = item["id"]
                 if not item_id or item_id in seen:
+                    cnt_seen += 1
                     continue
 
                 title = item["title"]
@@ -937,6 +940,7 @@ def check_search(search, seen, market_price):
                 price = item["price"]
 
                 if not price or price < search.get("min_price", 1):
+                    cnt_price += 1
                     continue
 
             except Exception as e:
@@ -952,6 +956,7 @@ def check_search(search, seen, market_price):
             if not hidden_gem_mode and not lego_sw_mode and not carhartt_mode:
                 keywords = search.get("keywords", [])
                 if keywords and not any(kw.lower() in title.lower() for kw in keywords):
+                    cnt_kw += 1
                     continue
 
             football_mode = search.get("football_mode", False)
@@ -1057,6 +1062,7 @@ def check_search(search, seen, market_price):
             )
 
             if not qualifies:
+                cnt_no_qualify += 1
                 continue
 
             # Ustal powód alertu
@@ -1104,6 +1110,9 @@ def check_search(search, seen, market_price):
 
     except Exception as e:
         print(f"Błąd check_search [{search['name']}]: {e}")
+
+    if cnt_seen or cnt_price or cnt_kw or cnt_no_qualify:
+        print(f"  📊 Odrzucono: już widziane={cnt_seen} brak_ceny={cnt_price} brak_słów={cnt_kw} nie_spełnia={cnt_no_qualify}")
 
     return found
 
