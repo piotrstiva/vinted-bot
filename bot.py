@@ -982,16 +982,21 @@ def check_search(search, seen, market_price):
             typo_brand, typo_found = detect_typo_brand(title)
             has_typo = typo_brand is not None
 
-            # ── Decyzja czy potrzebujemy szczegółów oferty ──
-            needs_details = (
-                hidden_gem_mode or football_mode or lego_sw_mode
-                or carhartt_mode or has_typo or is_steal_price or is_below_market
+            # ── Wstępna kwalifikacja (bez AI) ──
+            # Tylko oferty które przeszły wstępny filtr idą dalej do AI/szczegółów
+            pre_qualifies = (
+                is_steal_price or is_below_market or has_typo
+                or hidden_gem_mode or football_mode
+                or lego_sw_mode or carhartt_mode
             )
+            if not pre_qualifies:
+                cnt_no_qualify += 1
+                continue
 
-            # ── Pobierz szczegóły oferty (zdjęcie + opis) ──
+            # ── Pobierz szczegóły oferty TYLKO gdy potrzeba ──
             item_image_url   = None
             item_description = None
-            if needs_details and ANTHROPIC_KEY:
+            if ANTHROPIC_KEY and (hidden_gem_mode or football_mode or lego_sw_mode):
                 item_image_url, item_description = get_item_details(href)
 
             # ── AI analiza ──
@@ -1001,18 +1006,15 @@ def check_search(search, seen, market_price):
             ai_brand      = None
             mismatch      = False
 
-            if needs_details and ANTHROPIC_KEY:
-                print(f"  🤖 AI scan: {title[:50]}")
+            if ANTHROPIC_KEY and (hidden_gem_mode or has_typo or is_steal_price or is_below_market):
                 ai_result = analyze_with_ai(title, item_description, item_image_url)
                 time.sleep(1)
-
                 if ai_result:
                     is_hidden_gem = ai_result.get("is_hidden_gem", False)
                     ai_confidence = ai_result.get("confidence", 0)
                     ai_reason     = ai_result.get("reason", "")
                     ai_brand      = ai_result.get("detected_brand")
                     mismatch      = ai_result.get("mismatch", False)
-
                     if is_hidden_gem and ai_confidence < MIN_AI_CONFIDENCE:
                         is_hidden_gem = False
 
@@ -1023,42 +1025,33 @@ def check_search(search, seen, market_price):
             lego_set_info   = {}
             if lego_sw_mode:
                 lego_sw_valid, lego_sw_score, lego_sw_reasons, lego_set_info = validate_lego_sw(
-                    title, item_description, ai_result   # ← reużywa pobranego opisu
+                    title, item_description, ai_result
                 )
-                if not lego_sw_valid:
-                    print(f"  ⛔ odrzucono LEGO SW: {lego_sw_reasons[0] if lego_sw_reasons else ''}")
-                    continue
 
             # ── Walidacja koszulki retro ──
             football_valid   = False
             football_reasons = []
             if football_mode:
                 football_valid, football_reasons = validate_football_jersey(
-                    title, item_description, ai_result   # ← reużywa pobranego opisu
+                    title, item_description, ai_result
                 )
-                if not football_valid:
-                    print(f"  ⛔ odrzucono retro: {football_reasons[0] if football_reasons else ''}")
-                    continue
 
             # ── Walidacja Carhartt ──
             carhartt_valid   = False
             carhartt_reasons = []
             if carhartt_mode:
                 carhartt_valid, carhartt_reasons = validate_carhartt(
-                    title, item_description, search      # ← reużywa pobranego opisu
+                    title, item_description, search
                 )
-                if not carhartt_valid:
-                    print(f"  ⛔ odrzucono Carhartt: {carhartt_reasons[0] if carhartt_reasons else ''}")
-                    continue
 
             qualifies = (
                 is_steal_price
                 or is_below_market
                 or has_typo
                 or is_hidden_gem
-                or football_valid
-                or lego_sw_valid
-                or carhartt_valid
+                or (football_mode and football_valid)
+                or (lego_sw_mode and lego_sw_valid)
+                or (carhartt_mode and carhartt_valid)
             )
 
             if not qualifies:
