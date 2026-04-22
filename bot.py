@@ -571,8 +571,8 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
 ]
 
-VINTED_MIN_DELAY = 3.0
-VINTED_MAX_DELAY = 6.0
+VINTED_MIN_DELAY = 2.0
+VINTED_MAX_DELAY = 4.0
 VINTED_429_WAIT  = 180
 
 def get_headers():
@@ -1266,8 +1266,13 @@ while True:
 
         if cycle % 10 == 0:
             print("\n📊 Aktualizuję mediany rynkowe...")
-            for search in SEARCHES:
+            for i, search in enumerate(SEARCHES):
+                # Pomijamy hidden_gem_mode — nie mają sensu mediany
+                if search.get("hidden_gem_mode"):
+                    continue
+                print(f"  [{i+1}/{len(SEARCHES)}] {search['name']}...")
                 market_prices[search["name"]] = get_market_median(search)
+            print("📊 Mediany gotowe — startuje cykl")
 
         cycle += 1
         print(f"\n🔄 Cykl #{cycle}")
