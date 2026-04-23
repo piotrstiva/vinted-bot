@@ -417,6 +417,7 @@ def save_seen(seen):
 # ─────────────────────────────────────────
 def send_message(text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    # Najpierw próbuj HTML
     try:
         r = requests.post(url, data={
             "chat_id":                  CHAT_ID,
@@ -424,8 +425,19 @@ def send_message(text):
             "parse_mode":               "HTML",
             "disable_web_page_preview": False,
         }, timeout=10)
-        if r.status_code != 200:
-            print(f"Telegram error: {r.text}")
+        if r.status_code == 200:
+            return
+        # Jeśli HTML parsing error — wyślij jako plain text
+        if r.status_code == 400 and "parse entities" in r.text:
+            # Usuń tagi HTML i wyślij plain
+            clean = re.sub(r'<[^>]+>', '', text)
+            requests.post(url, data={
+                "chat_id": CHAT_ID,
+                "text":    clean,
+                "disable_web_page_preview": False,
+            }, timeout=10)
+            return
+        print(f"Telegram error: {r.text}")
     except Exception as e:
         print(f"Błąd wysyłania: {e}")
 
@@ -433,16 +445,43 @@ def send_message(text):
 #  💰 WYCIĄGANIE CENY
 # ─────────────────────────────────────────
 def extract_price(text):
-    nums = re.findall(r"\d+[\.,]?\d*", text.replace("\xa0", "").replace(" ", ""))
-    prices = []
+    """
+    Wyciąga cenę z tekstu.
+    Ignoruje liczby które wyglądają jak numery setów LEGO (4-5 cyfr w tytule)
+    oraz inne fałszywe ceny.
+    """
+    if not text:
+        return None
+
+    # Szukamy wzorca ceny: liczba po której następuje "zł" lub "PLN"
+    # albo liczba poprzedzona symbolem waluty
+    price_patterns = [
+        r'(\d+[.,]?\d*)\s*(?:zł|PLN|pln)',   # "150 zł" lub "150PLN"
+        r'(?:cena|price)[:\s]+(\d+[.,]?\d*)',  # "cena: 150"
+    ]
+
+    for pattern in price_patterns:
+        m = re.search(pattern, text, re.IGNORECASE)
+        if m:
+            try:
+                val = float(m.group(1).replace(",", "."))
+                if 1 < val < 5000:
+                    return val
+            except:
+                pass
+
+    # Fallback: ostatnia liczba w tekście jeśli jest sensowna
+    nums = re.findall(r'\b(\d+[.,]?\d*)\b', text.replace("\xa0", " "))
+    candidates = []
     for n in nums:
         try:
             val = float(n.replace(",", "."))
-            if 1 < val < 99999:
-                prices.append(val)
+            if 1 < val < 5000:   # max 5000 zł — eliminuje numery setów
+                candidates.append(val)
         except:
             pass
-    return prices[0] if prices else None
+
+    return candidates[-1] if candidates else None
 
 # ─────────────────────────────────────────
 #  🔤 DETEKCJA BŁĘDNEJ PISOWNI MARKI
@@ -1038,6 +1077,12 @@ def check_search(search, seen, market_price):
                 lego_sw_valid, lego_sw_score, lego_sw_reasons, lego_set_info = False, 0, [], {}
                 if lego_sw_mode:
                     lego_sw_valid, lego_sw_score, lego_sw_reasons, lego_set_info = validate_lego_sw(title, None, None)
+                    # Podnosimy minimalny próg — żeby odrzucić śmieci
+                    if lego_sw_score < 40:
+                        lego_sw_valid = False
+                    # Max cena dla LEGO SW
+                    if price > 100:
+                        lego_sw_valid = False
 
                 football_valid, football_reasons = False, []
                 if football_mode:
