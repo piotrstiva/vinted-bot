@@ -359,23 +359,25 @@ SEARCHES = [
         "carhartt_models": CARHARTT_PREMIUM_MODELS,
         "carhartt_max_price": CARHARTT_PREMIUM_MAX,
     },
-    # ── HIDDEN GEM — brak marki, niska cena ──
+    # ── HIDDEN GEM — tylko gdy mamy klucz AI ──
+    # Bez ANTHROPIC_KEY te wyszukiwania wysyłają wszystko bez filtracji
+    # Włączone tylko gdy ANTHROPIC_KEY jest ustawiony w Railway
     {
         "name":     "Buty bez marki (hidden gem)",
         "url":      "https://www.vinted.pl/catalog?catalog[]=1206&order=newest_first&currency=PLN&price_to=80",
         "category": "sneakers",
-        "keywords": [],        # celowo puste — bierzemy wszystko
+        "keywords": ["nike", "adidas", "jordan", "puma", "reebok", "new balance", "vans", "converse"],
         "brands":   [],
-        "min_price": 10,
-        "hidden_gem_mode": True,   # tryb AI scan
+        "min_price": 20,
+        "hidden_gem_mode": True,
     },
     {
         "name":     "Ubrania bez marki (hidden gem)",
         "url":      "https://www.vinted.pl/catalog?catalog[]=4&order=newest_first&currency=PLN&price_to=30",
         "category": "clothing",
-        "keywords": [],
+        "keywords": ["supreme", "stone island", "carhartt", "nike", "adidas", "ralph lauren", "tommy hilfiger", "lacoste"],
         "brands":   [],
-        "min_price": 5,
+        "min_price": 10,
         "hidden_gem_mode": True,
     },
 ]
@@ -427,44 +429,44 @@ def save_seen(seen):
 # ─────────────────────────────────────────
 #  📤 TELEGRAM
 # ─────────────────────────────────────────
-def send_message(text):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    # Konwertuj HTML na Markdown
-    # <b>tekst</b> → *tekst*
-    # <i>tekst</i> → _tekst_
-    # <a href="url">tekst</a> → [tekst](url)
-    def html_to_markdown(t):
-        t = re.sub(r'<b>(.*?)</b>', r'*\1*', t, flags=re.DOTALL)
-        t = re.sub(r'<i>(.*?)</i>', r'_\1_', t, flags=re.DOTALL)
-        t = re.sub(r'<a href="([^"]+)">([^<]+)</a>', r'[\2](\1)', t)
-        t = re.sub(r'<[^>]+>', '', t)  # usuń pozostałe tagi
-        # Escape znaków specjalnych Markdown V2
-        for ch in ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']:
-            # Nie escapuj w linkach i formatowaniu
-            pass
+def send_message(text, photo_url=None):
+    """Wysyła wiadomość — ze zdjęciem jeśli dostępne, bez jeśli nie."""
+    tg_base = f"https://api.telegram.org/bot{TOKEN}"
+
+    # Konwertuj HTML na plain text
+    def to_plain(t):
+        t = re.sub(r'<b>(.*?)</b>', r'\1', t, flags=re.DOTALL)
+        t = re.sub(r'<i>(.*?)</i>', r'\1', t, flags=re.DOTALL)
+        t = re.sub(r'<a href="[^"]+">([^<]+)</a>', r'\1', t)
+        t = re.sub(r'<[^>]+>', '', t)
         return t
 
-    md_text = html_to_markdown(text)
+    clean_text = to_plain(text)
 
     try:
-        r = requests.post(url, data={
+        if photo_url:
+            # Wyślij zdjęcie z podpisem (max 1024 znaki w caption)
+            caption = clean_text[:1024]
+            r = requests.post(f"{tg_base}/sendPhoto", data={
+                "chat_id":             CHAT_ID,
+                "photo":               photo_url,
+                "caption":             caption,
+                "disable_notification": False,
+            }, timeout=15)
+            if r.status_code == 200:
+                return
+            # Zdjęcie nie działa — wyślij sam tekst
+            print(f"  ⚠️ sendPhoto failed ({r.status_code}), sending text only")
+
+        # Wyślij sam tekst
+        r = requests.post(f"{tg_base}/sendMessage", data={
             "chat_id":                  CHAT_ID,
-            "text":                     md_text,
-            "parse_mode":               "Markdown",
+            "text":                     clean_text[:4096],
             "disable_web_page_preview": False,
         }, timeout=10)
-        if r.status_code == 200:
-            return
-        # Fallback — plain text bez formatowania
-        if r.status_code == 400:
-            plain = re.sub(r'<[^>]+>', '', text)
-            plain = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'\1: \2', plain)
-            requests.post(url, data={
-                "chat_id": CHAT_ID,
-                "text":    plain,
-            }, timeout=10)
-            return
-        print(f"Telegram error: {r.text}")
+        if r.status_code != 200:
+            print(f"Telegram error: {r.text[:100]}")
+
     except Exception as e:
         print(f"Błąd wysyłania: {e}")
 
@@ -760,12 +762,27 @@ def parse_items_from_html(html):
                         except:
                             pass
 
+                        # Zdjęcie — różne pola w zależności od wersji API
+                        photo_url = None
+                        photos = entry.get("photos") or entry.get("photo") or []
+                        if isinstance(photos, list) and photos:
+                            p = photos[0]
+                            if isinstance(p, dict):
+                                photo_url = (
+                                    p.get("url") or
+                                    p.get("full_size_url") or
+                                    p.get("thumbnails", [{}])[0].get("url") if p.get("thumbnails") else None
+                                )
+                        elif isinstance(photos, dict):
+                            photo_url = photos.get("url") or photos.get("full_size_url")
+
                         if title:
                             items.append({
                                 "id":    item_id,
                                 "title": title,
                                 "price": price,
                                 "url":   url,
+                                "photo": photo_url,
                             })
                     except:
                         continue
@@ -802,6 +819,7 @@ def parse_items_from_html(html):
                     "title": title or "",
                     "price": price,
                     "url":   href,
+                    "photo": None,
                 })
             except:
                 continue
@@ -1093,8 +1111,10 @@ def check_search(search, seen, market_price):
                     cnt_price += 1
                     continue
 
-                # filtr słów kluczowych (tryb normalny)
-                if not hidden_gem_mode and not lego_sw_mode and not carhartt_mode and not football_mode:
+                # filtr słów kluczowych
+                # hidden_gem_mode bez AI → używaj keywords jak normalny tryb
+                effective_hidden = hidden_gem_mode and bool(ANTHROPIC_KEY)
+                if not effective_hidden and not lego_sw_mode and not carhartt_mode and not football_mode:
                     keywords = search.get("keywords", [])
                     if keywords and not any(kw.lower() in title.lower() for kw in keywords):
                         cnt_kw += 1
@@ -1153,6 +1173,8 @@ def check_search(search, seen, market_price):
                     or (lego_sw_mode  and lego_sw_valid)
                     or (football_mode and football_valid)
                     or (carhartt_mode and carhartt_valid)
+                    # hidden gem bez AI — wysyłaj tylko przy steal price
+                    or (hidden_gem_mode and not ANTHROPIC_KEY and is_steal_price)
                 )
                 if not qualifies:
                     cnt_rejected += 1
@@ -1182,6 +1204,7 @@ def check_search(search, seen, market_price):
                     "carhartt_valid": carhartt_valid,
                     "carhartt_model": carhartt_model_name,
                     "carhartt_max": carhartt_max,
+                    "photo": item.get("photo"),
                 })
 
             except Exception as e:
@@ -1331,7 +1354,7 @@ while True:
 
             for item in new_items:
                 msg = format_message(search, item)
-                send_message(msg)
+                send_message(msg, photo_url=item.get("photo"))
                 seen[item["id"]] = now
                 tag = "💎" if item["is_hidden_gem"] else ("🔤" if item["has_typo"] else "✉️")
                 print(f"  {tag} {item['title'][:55]} | {item['price']:.0f} zł")
