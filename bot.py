@@ -29,6 +29,7 @@ HEADERS = {
 # ─────────────────────────────────────────
 MIN_DISCOUNT_PCT = 40      # % poniżej mediany → okazja
 MIN_AI_CONFIDENCE = 60     # % pewności AI że to ukryta okazja
+MIN_SAVING_PLN   = 6       # minimalna oszczędność w zł (odrzuć 1-5 zł różnicę)
 
 STEAL_PRICES = {
     "sneakers": 120,
@@ -39,6 +40,28 @@ STEAL_PRICES = {
     "lego_sw":   80,
     "carhartt": 250,
 }
+
+# ─────────────────────────────────────────
+#  🚫 SŁOWA KTÓRE ZAWSZE ODRZUCAMY
+# ─────────────────────────────────────────
+GLOBAL_EXCLUDE = [
+    # Ubrania dziecięce
+    "dziecięc", "dzieciec", "niemowl", "chłopięc", "chlopiec",
+    "dziewczęc", "dziewczec", "dla dzieci", "dla chłopca", "dla dziewcz",
+    "rozmiar 86", "rozmiar 92", "rozmiar 98", "rozmiar 104",
+    "rozmiar 110", "rozmiar 116", "rozmiar 122", "rozmiar 128",
+    "r.86", "r.92", "r.98", "r.104", "r.110", "r.116",
+    "duplo", "baby", "junior ", "kids ", " kid ", "toddler",
+    # Karty/albumy LEGO
+    "karta lego", "karty lego", "album lego", "naklejki lego",
+    "lego karta", "lego album", "lego naklejki", "lego card",
+    "trading card", "trading kart", "sticker", "naklejka",
+    # Minecraft
+    "minecraft",
+    # Gry video
+    "nintendo switch", "xbox", "playstation", "ps4", "ps5",
+    "gra lego", "lego gra", "lego game",
+]
 
 # ─────────────────────────────────────────
 #  🚫 MARKI KTÓRYCH NIE CHCEMY NIGDY
@@ -391,7 +414,7 @@ SEARCHES = [
 #  💾 PAMIĘĆ  (z automatycznym czyszczeniem)
 # ─────────────────────────────────────────
 SEEN_FILE      = "seen_items.json"
-SEEN_MAX_DAYS  = 1    # pamiętamy ID tylko przez 24h — potem oferta "nowa" znów
+SEEN_MAX_DAYS  = 30   # pamiętamy ID przez 30 dni — blokuje stare oferty
 
 def load_seen():
     """
@@ -760,10 +783,20 @@ def parse_items_from_html(html):
                             url = "https://www.vinted.pl" + url
 
                         # Filtr czasu — tylko oferty z ostatnich 24h
-                        created = entry.get("created_at_ts") or entry.get("created_at") or 0
+                        created = (
+                            entry.get("created_at_ts") or
+                            entry.get("created_at") or
+                            entry.get("last_push_up_at") or
+                            entry.get("updated_at_ts") or
+                            0
+                        )
                         if created:
                             try:
-                                age_hours = (time.time() - float(created)) / 3600
+                                ts = float(created)
+                                # Jeśli timestamp w milisekundach — przelicz
+                                if ts > 1e12:
+                                    ts = ts / 1000
+                                age_hours = (time.time() - ts) / 3600
                                 if age_hours > 24:
                                     continue
                             except:
@@ -1118,13 +1151,18 @@ def check_search(search, seen, market_price):
                 if not title or not href:
                     continue
 
-                # Odrzuć zablokowane marki (H&M, Zara, Bershka itp.)
-                if any(b in title.lower() for b in BLOCKED_BRANDS):
+                # Globalny filtr wykluczeń (dzieci, minecraft, karty, gry)
+                title_lower = title.lower()
+                if any(ex in title_lower for ex in GLOBAL_EXCLUDE):
                     continue
 
-                # Odrzuć wykluczone słowa kluczowe (polybag, bitty itp.)
+                # Odrzuć zablokowane marki (H&M, Zara, Bershka itp.)
+                if any(b in title_lower for b in BLOCKED_BRANDS):
+                    continue
+
+                # Odrzuć wykluczone słowa kluczowe z danego wyszukiwania
                 exclude_kw = search.get("exclude_keywords", [])
-                if exclude_kw and any(ek in title.lower() for ek in exclude_kw):
+                if exclude_kw and any(ek in title_lower for ek in exclude_kw):
                     continue
 
                 if not price or price < search.get("min_price", 1):
@@ -1147,7 +1185,12 @@ def check_search(search, seen, market_price):
                 discount_pct    = 0
                 if market_price and market_price > 0:
                     discount_pct    = (1 - price / market_price) * 100
-                    is_below_market = discount_pct >= MIN_DISCOUNT_PCT
+                    saving          = market_price - price
+                    # Odrzuć jeśli oszczędność mniejsza niż MIN_SAVING_PLN
+                    is_below_market = (
+                        discount_pct >= MIN_DISCOUNT_PCT
+                        and saving >= MIN_SAVING_PLN
+                    )
 
                 # typo
                 typo_brand, typo_found = detect_typo_brand(title)
