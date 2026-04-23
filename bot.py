@@ -273,6 +273,7 @@ SEARCHES = [
         "url":      "https://www.vinted.pl/catalog?search_text=lego+star+wars&order=newest_first&currency=PLN&price_to=100",
         "category": "lego_sw",
         "keywords": ["lego", "star wars"],
+        "exclude_keywords": ["polybag", "bitty", "keychain", "brelok", "kulcstart", "nyckelring", "mints", "saszetk"],
         "min_price": 15,
         "lego_sw_mode": True,
     },
@@ -281,6 +282,7 @@ SEARCHES = [
         "url":      "https://www.vinted.pl/catalog?search_text=lego+75&order=newest_first&currency=PLN&price_to=100",
         "category": "lego_sw",
         "keywords": ["lego", "75"],
+        "exclude_keywords": ["polybag", "bitty", "keychain", "brelok", "kulcstart", "nyckelring"],
         "min_price": 15,
         "lego_sw_mode": True,
     },
@@ -289,6 +291,7 @@ SEARCHES = [
         "url":      "https://www.vinted.pl/catalog?search_text=lego+x-wing+falcon+death+star&order=newest_first&currency=PLN&price_to=100",
         "category": "lego_sw",
         "keywords": ["lego"],
+        "exclude_keywords": ["polybag", "bitty", "keychain", "brelok"],
         "min_price": 15,
         "lego_sw_mode": True,
     },
@@ -297,6 +300,7 @@ SEARCHES = [
         "url":      "https://www.vinted.pl/catalog?search_text=lego&order=newest_first&currency=PLN",
         "category": "lego",
         "keywords": ["lego", "technic", "city", "ninjago", "harry potter", "creator"],
+        "exclude_keywords": ["polybag", "bitty", "keychain", "brelok"],
         "brands":   ["lego"],
         "min_price": 20,
     },
@@ -305,6 +309,7 @@ SEARCHES = [
         "url":      "https://www.vinted.pl/catalog?search_text=funko+pop&order=newest_first&currency=PLN",
         "category": "funko",
         "keywords": ["funko", "pop", "vinyl", "figurka"],
+        "exclude_keywords": ["bitty", "minis", "funko minis", "pocket pop"],
         "brands":   ["funko"],
         "min_price": 10,
     },
@@ -429,43 +434,53 @@ def save_seen(seen):
 # ─────────────────────────────────────────
 #  📤 TELEGRAM
 # ─────────────────────────────────────────
-def send_message(text, photo_url=None):
-    """Wysyła wiadomość — ze zdjęciem jeśli dostępne, bez jeśli nie."""
+def fetch_photo_url(item_link):
+    """Pobiera URL zdjęcia ze strony oferty przez og:image."""
+    try:
+        r = requests.get(item_link, headers=get_headers(), timeout=10)
+        if r.status_code != 200:
+            return None
+        # og:image jest zawsze obecne na stronie oferty
+        m = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', r.text)
+        if m:
+            return m.group(1)
+        # Alternatywna kolejność atrybutów
+        m = re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']', r.text)
+        if m:
+            return m.group(1)
+    except:
+        pass
+    return None
+
+
+def send_message(text, photo_url=None, item_link=None):
+    """Wysyła wiadomość ze zdjęciem jeśli dostępne."""
     tg_base = f"https://api.telegram.org/bot{TOKEN}"
 
-    # Konwertuj HTML na plain text
-    def to_plain(t):
-        t = re.sub(r'<b>(.*?)</b>', r'\1', t, flags=re.DOTALL)
-        t = re.sub(r'<i>(.*?)</i>', r'\1', t, flags=re.DOTALL)
-        t = re.sub(r'<a href="[^"]+">([^<]+)</a>', r'\1', t)
-        t = re.sub(r'<[^>]+>', '', t)
-        return t
+    # Usuń HTML tagi
+    clean = re.sub(r'<[^>]+>', '', text)
 
-    clean_text = to_plain(text)
+    # Jeśli nie mamy zdjęcia z JSON, spróbuj pobrać ze strony oferty
+    if not photo_url and item_link:
+        photo_url = fetch_photo_url(item_link)
 
     try:
         if photo_url:
-            # Wyślij zdjęcie z podpisem (max 1024 znaki w caption)
-            caption = clean_text[:1024]
             r = requests.post(f"{tg_base}/sendPhoto", data={
-                "chat_id":             CHAT_ID,
-                "photo":               photo_url,
-                "caption":             caption,
-                "disable_notification": False,
+                "chat_id": CHAT_ID,
+                "photo":   photo_url,
+                "caption": clean[:1024],
             }, timeout=15)
             if r.status_code == 200:
                 return
-            # Zdjęcie nie działa — wyślij sam tekst
-            print(f"  ⚠️ sendPhoto failed ({r.status_code}), sending text only")
+            print(f"  ⚠️ sendPhoto failed {r.status_code} — wysyłam tekst")
 
-        # Wyślij sam tekst
-        r = requests.post(f"{tg_base}/sendMessage", data={
+        # Fallback — plain text
+        requests.post(f"{tg_base}/sendMessage", data={
             "chat_id":                  CHAT_ID,
-            "text":                     clean_text[:4096],
+            "text":                     clean[:4096],
             "disable_web_page_preview": False,
         }, timeout=10)
-        if r.status_code != 200:
-            print(f"Telegram error: {r.text[:100]}")
 
     except Exception as e:
         print(f"Błąd wysyłania: {e}")
@@ -1107,6 +1122,11 @@ def check_search(search, seen, market_price):
                 if any(b in title.lower() for b in BLOCKED_BRANDS):
                     continue
 
+                # Odrzuć wykluczone słowa kluczowe (polybag, bitty itp.)
+                exclude_kw = search.get("exclude_keywords", [])
+                if exclude_kw and any(ek in title.lower() for ek in exclude_kw):
+                    continue
+
                 if not price or price < search.get("min_price", 1):
                     cnt_price += 1
                     continue
@@ -1354,7 +1374,7 @@ while True:
 
             for item in new_items:
                 msg = format_message(search, item)
-                send_message(msg, photo_url=item.get("photo"))
+                send_message(msg, photo_url=item.get("photo"), item_link=item.get("link"))
                 seen[item["id"]] = now
                 tag = "💎" if item["is_hidden_gem"] else ("🔤" if item["has_typo"] else "✉️")
                 print(f"  {tag} {item['title'][:55]} | {item['price']:.0f} zł")
