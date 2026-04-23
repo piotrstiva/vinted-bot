@@ -372,7 +372,7 @@ SEARCHES = [
 #  💾 PAMIĘĆ  (z automatycznym czyszczeniem)
 # ─────────────────────────────────────────
 SEEN_FILE      = "seen_items.json"
-SEEN_MAX_DAYS  = 30   # po ilu dniach zapominamy ID
+SEEN_MAX_DAYS  = 1    # pamiętamy ID tylko przez 24h — potem oferta "nowa" znów
 
 def load_seen():
     """
@@ -715,6 +715,16 @@ def parse_items_from_html(html):
                         if not url.startswith("http"):
                             url = "https://www.vinted.pl" + url
 
+                        # Filtr czasu — tylko oferty z ostatnich 24h
+                        created = entry.get("created_at_ts") or entry.get("created_at") or 0
+                        if created:
+                            try:
+                                age_hours = (time.time() - float(created)) / 3600
+                                if age_hours > 24:
+                                    continue
+                            except:
+                                pass
+
                         # cena — może być string lub float
                         raw_price = entry.get("price", "") or entry.get("price_numeric", "")
                         price = None
@@ -917,65 +927,47 @@ def validate_lego_sw(title, description, ai_result):
 #  ⚽ WALIDACJA KOSZULKI RETRO
 # ─────────────────────────────────────────
 def validate_football_jersey(title, description, ai_result):
-    """
-    Zwraca (is_valid, reasons) gdzie:
-      is_valid = True jeśli koszulka spełnia kryteria retro + oryginał
-      reasons  = lista powodów
-    """
     text = (title + " " + (description or "")).lower()
-    reasons = []
 
-    # 1. Odrzuć repliki od razu
+    # Odrzuć repliki
     for rep in REPLICA_KEYWORDS:
         if rep in text:
-            return False, [f"replika/kopia — odrzucono ({rep})"]
+            return False, ["replika — odrzucono"]
 
-    # 2. Sprawdź czy zawiera słowo sugerujące retro/vintage/rok
-    is_retro = any(decade in text for decade in RETRO_DECADES)
+    # Odrzuć śmieci niezwiązane z piłką nożną
+    NOISE = [
+        "swag", "y2k", "00s", "avant garde", "coquette", "drippy",
+        "gorset", "spódniczk", "bluzka na", "top na ramiac", "body ",
+        "koronkow", "halter", "babydoll", "cycling", "basketball",
+        "primark", "stradivarius", "bershka", "muślinow", "satynow",
+        "alt alternative", "japan style", "cropped top",
+    ]
+    for noise in NOISE:
+        if noise in text:
+            return False, [f"odrzucono: {noise.strip()}"]
 
-    # 3. Sprawdź markę oryginału
-    has_original_brand = any(brand in text for brand in FOOTBALL_ORIGINAL_BRANDS)
+    # Musi zawierać słowo koszulka/jersey/shirt
+    is_jersey = any(w in text for w in ["koszulka", "jersey", "shirt", "trikot", "maillot"])
+    if not is_jersey:
+        return False, ["brak słowa koszulka/jersey"]
 
-    # 4. Sprawdź klub lub reprezentację
-    has_club = any(club in text for club in FOOTBALL_CLUBS)
+    # Musi mieć oryginalną markę
+    has_brand = any(b in text for b in FOOTBALL_ORIGINAL_BRANDS)
+    if not has_brand:
+        return False, ["brak oryginalnej marki"]
 
-    # 5. Weź pod uwagę wynik AI
-    ai_confirms_retro = False
-    ai_confirms_original = False
-    if ai_result:
-        ai_reason = ai_result.get("reason", "").lower()
-        if any(w in ai_reason for w in ["retro", "vintage", "oryginał", "oryginal", "lata "]):
-            ai_confirms_retro = True
-        if ai_result.get("detected_brand") in FOOTBALL_ORIGINAL_BRANDS:
-            ai_confirms_original = True
+    # Musi mieć klub LUB słowo retro/vintage/rok
+    has_club  = any(c in text for c in FOOTBALL_CLUBS)
+    is_retro  = any(d in text for d in RETRO_DECADES)
+    if not has_club and not is_retro:
+        return False, ["brak klubu/reprezentacji i słowa retro"]
 
-    # Zbierz powody
-    if is_retro:
-        reasons.append("✅ vintage/retro w opisie")
-    if has_original_brand:
-        reasons.append("✅ oryginalna marka")
-    if has_club:
-        reasons.append("✅ rozpoznany klub/reprezentacja")
-    if ai_confirms_retro:
-        reasons.append("🤖 AI potwierdza: retro")
-    if ai_confirms_original:
-        reasons.append(f"🤖 AI marka: {ai_result.get('detected_brand')}")
+    reasons = []
+    if has_brand:  reasons.append("✅ oryginalna marka")
+    if has_club:   reasons.append("✅ klub/reprezentacja")
+    if is_retro:   reasons.append("✅ retro/vintage")
+    return True, reasons
 
-    # Warunek: retro (tekst LUB AI) + marka oryginału (tekst LUB AI)
-    retro_ok    = is_retro or ai_confirms_retro
-    original_ok = has_original_brand or ai_confirms_original
-
-    if retro_ok and original_ok:
-        return True, reasons
-    elif retro_ok and not original_ok:
-        return False, ["⚠️ brak oryginałowej marki w opisie"]
-    elif not retro_ok and original_ok:
-        # Jeśli jest oryginalna marka i klub — może być retro bez słowa "retro"
-        if has_club:
-            return True, reasons + ["ℹ️ brak słowa retro, ale marka+klub sugerują vintage"]
-        return False, ["⚠️ brak oznaczenia retro/vintage/roku"]
-    else:
-        return False, ["⚠️ nie spełnia kryteriów retro + oryginał"]
 
 
 # ─────────────────────────────────────────
