@@ -41,18 +41,16 @@ STEAL_PRICES = {
 }
 
 # ─────────────────────────────────────────
-#  🚫 ZABLOKOWANE MARKI
-#  Oferty zawierające te słowa w tytule są ignorowane
+#  🚫 MARKI KTÓRYCH NIE CHCEMY NIGDY
 # ─────────────────────────────────────────
 BLOCKED_BRANDS = [
-    "h&m", " hm ", "zara", "bershka", "stradivarius", "reserved",
-    "pull&bear", "pull and bear", "mango", "primark", "shein",
-    "sinsay", "cropp", "mohito", "house ", "orsay", "oysho",
-    "cubus", "vero moda", "only ", "pieces ", "vila ", "jack & jones",
-    "tom tailor", "s.oliver", "c&a", "takko", "pepco",
-    "medicine ", "diverse ", "promostars",
+    "h&m", "zara", "bershka", "sinsay", "reserved", "house",
+    "shein", "primark", "pepco", "c&a", "stradivarius",
+    "new yorker", "cropp", "new look", "boohoo", "asos",
+    "pull&bear", "mango", "vero moda", "only ", "jack&jones",
+    "terranova", "mohito", "medicine", "diverse", "carry",
+    "lager 157", "rainbow ", "iné", "amisu", "george ",
 ]
-
 
 # ─────────────────────────────────────────
 #  🧥 CARHARTT — konfiguracja modeli
@@ -386,7 +384,7 @@ SEARCHES = [
 #  💾 PAMIĘĆ  (z automatycznym czyszczeniem)
 # ─────────────────────────────────────────
 SEEN_FILE      = "seen_items.json"
-SEEN_MAX_DAYS  = 30   # po ilu dniach zapominamy ID
+SEEN_MAX_DAYS  = 1    # pamiętamy ID tylko przez 24h — potem oferta "nowa" znów
 
 def load_seen():
     """
@@ -431,15 +429,42 @@ def save_seen(seen):
 # ─────────────────────────────────────────
 def send_message(text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    # Konwertuj HTML na Markdown
+    # <b>tekst</b> → *tekst*
+    # <i>tekst</i> → _tekst_
+    # <a href="url">tekst</a> → [tekst](url)
+    def html_to_markdown(t):
+        t = re.sub(r'<b>(.*?)</b>', r'*\1*', t, flags=re.DOTALL)
+        t = re.sub(r'<i>(.*?)</i>', r'_\1_', t, flags=re.DOTALL)
+        t = re.sub(r'<a href="([^"]+)">([^<]+)</a>', r'[\2](\1)', t)
+        t = re.sub(r'<[^>]+>', '', t)  # usuń pozostałe tagi
+        # Escape znaków specjalnych Markdown V2
+        for ch in ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']:
+            # Nie escapuj w linkach i formatowaniu
+            pass
+        return t
+
+    md_text = html_to_markdown(text)
+
     try:
         r = requests.post(url, data={
             "chat_id":                  CHAT_ID,
-            "text":                     text,
-            "parse_mode":               "HTML",
+            "text":                     md_text,
+            "parse_mode":               "Markdown",
             "disable_web_page_preview": False,
         }, timeout=10)
-        if r.status_code != 200:
-            print(f"Telegram error: {r.text}")
+        if r.status_code == 200:
+            return
+        # Fallback — plain text bez formatowania
+        if r.status_code == 400:
+            plain = re.sub(r'<[^>]+>', '', text)
+            plain = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'\1: \2', plain)
+            requests.post(url, data={
+                "chat_id": CHAT_ID,
+                "text":    plain,
+            }, timeout=10)
+            return
+        print(f"Telegram error: {r.text}")
     except Exception as e:
         print(f"Błąd wysyłania: {e}")
 
@@ -447,16 +472,43 @@ def send_message(text):
 #  💰 WYCIĄGANIE CENY
 # ─────────────────────────────────────────
 def extract_price(text):
-    nums = re.findall(r"\d+[\.,]?\d*", text.replace("\xa0", "").replace(" ", ""))
-    prices = []
+    """
+    Wyciąga cenę z tekstu.
+    Ignoruje liczby które wyglądają jak numery setów LEGO (4-5 cyfr w tytule)
+    oraz inne fałszywe ceny.
+    """
+    if not text:
+        return None
+
+    # Szukamy wzorca ceny: liczba po której następuje "zł" lub "PLN"
+    # albo liczba poprzedzona symbolem waluty
+    price_patterns = [
+        r'(\d+[.,]?\d*)\s*(?:zł|PLN|pln)',   # "150 zł" lub "150PLN"
+        r'(?:cena|price)[:\s]+(\d+[.,]?\d*)',  # "cena: 150"
+    ]
+
+    for pattern in price_patterns:
+        m = re.search(pattern, text, re.IGNORECASE)
+        if m:
+            try:
+                val = float(m.group(1).replace(",", "."))
+                if 1 < val < 5000:
+                    return val
+            except:
+                pass
+
+    # Fallback: ostatnia liczba w tekście jeśli jest sensowna
+    nums = re.findall(r'\b(\d+[.,]?\d*)\b', text.replace("\xa0", " "))
+    candidates = []
     for n in nums:
         try:
             val = float(n.replace(",", "."))
-            if 1 < val < 99999:
-                prices.append(val)
+            if 1 < val < 5000:   # max 5000 zł — eliminuje numery setów
+                candidates.append(val)
         except:
             pass
-    return prices[0] if prices else None
+
+    return candidates[-1] if candidates else None
 
 # ─────────────────────────────────────────
 #  🔤 DETEKCJA BŁĘDNEJ PISOWNI MARKI
@@ -645,42 +697,114 @@ def refresh_session():
 
 def parse_items_from_html(html):
     """
-    Wyciąga linki do ofert z HTML strony katalogu Vinted.
+    Vinted renderuje przez JS — HTML nie zawiera treści ofert.
+    Zamiast tego wyciągamy dane z JSON osadzonego w stronie
+    (window.__PRELOADED_STATE__ lub podobny).
     Zwraca listę dictów: {id, title, price, url}
     """
-    soup  = BeautifulSoup(html, "html.parser")
-    items = []
+    items    = []
     seen_ids = set()
 
-    for tag in soup.find_all("a", href=True):
-        href = tag["href"]
-        if "/items/" not in href:
-            continue
+    # Vinted osadza dane jako JSON w tagu <script>
+    # Szukamy: "items":[{...}] lub "catalogItems":[{...}]
+    patterns = [
+        r'"items"\s*:\s*(\[.*?\])\s*[,}]',
+        r'"catalogItems"\s*:\s*(\[.*?\])\s*[,}]',
+        r'"data"\s*:\s*(\[.*?\])\s*[,}]',
+    ]
 
-        if not href.startswith("http"):
-            href = "https://www.vinted.pl" + href
+    import json as _json
 
-        # wyciągnij ID
-        try:
-            item_id = href.split("/items/")[1].split("-")[0].split("?")[0]
-            if not item_id.isdigit():
+    for pattern in patterns:
+        matches = re.findall(pattern, html, re.DOTALL)
+        for match in matches:
+            try:
+                data = _json.loads(match)
+                if not isinstance(data, list) or len(data) == 0:
+                    continue
+                if not isinstance(data[0], dict):
+                    continue
+                # Sprawdź czy to faktycznie lista ofert (musi mieć id i url/path)
+                if "id" not in data[0] and "url" not in data[0]:
+                    continue
+
+                for entry in data:
+                    try:
+                        item_id = str(entry.get("id", ""))
+                        if not item_id or not item_id.isdigit():
+                            continue
+                        if item_id in seen_ids:
+                            continue
+                        seen_ids.add(item_id)
+
+                        title = entry.get("title", "") or entry.get("name", "") or ""
+                        url   = entry.get("url", "") or f"https://www.vinted.pl/items/{item_id}"
+                        if not url.startswith("http"):
+                            url = "https://www.vinted.pl" + url
+
+                        # Filtr czasu — tylko oferty z ostatnich 24h
+                        created = entry.get("created_at_ts") or entry.get("created_at") or 0
+                        if created:
+                            try:
+                                age_hours = (time.time() - float(created)) / 3600
+                                if age_hours > 24:
+                                    continue
+                            except:
+                                pass
+
+                        # cena — może być string lub float
+                        raw_price = entry.get("price", "") or entry.get("price_numeric", "")
+                        price = None
+                        try:
+                            price = float(str(raw_price).replace(",", ".").replace(" ", ""))
+                        except:
+                            pass
+
+                        if title:
+                            items.append({
+                                "id":    item_id,
+                                "title": title,
+                                "price": price,
+                                "url":   url,
+                            })
+                    except:
+                        continue
+
+                if items:
+                    return items
+
+            except:
                 continue
-        except:
-            continue
 
-        if item_id in seen_ids:
-            continue
-        seen_ids.add(item_id)
-
-        title = tag.get_text(" ", strip=True)
-        price = extract_price(title)
-
-        items.append({
-            "id":    item_id,
-            "title": title,
-            "price": price,
-            "url":   href,
-        })
+    # Fallback: szukaj linków i tytułów przez og:title / meta
+    if not items:
+        soup = BeautifulSoup(html, "html.parser")
+        for tag in soup.find_all("a", href=True):
+            href = tag["href"]
+            if "/items/" not in href:
+                continue
+            if not href.startswith("http"):
+                href = "https://www.vinted.pl" + href
+            try:
+                item_id = href.split("/items/")[1].split("-")[0].split("?")[0]
+                if not item_id.isdigit() or item_id in seen_ids:
+                    continue
+                seen_ids.add(item_id)
+                # Tytuł z atrybutu title lub aria-label
+                title = (
+                    tag.get("title") or
+                    tag.get("aria-label") or
+                    tag.get_text(" ", strip=True)
+                )
+                price = extract_price(title) if title else None
+                items.append({
+                    "id":    item_id,
+                    "title": title or "",
+                    "price": price,
+                    "url":   href,
+                })
+            except:
+                continue
 
     return items
 
@@ -830,65 +954,47 @@ def validate_lego_sw(title, description, ai_result):
 #  ⚽ WALIDACJA KOSZULKI RETRO
 # ─────────────────────────────────────────
 def validate_football_jersey(title, description, ai_result):
-    """
-    Zwraca (is_valid, reasons) gdzie:
-      is_valid = True jeśli koszulka spełnia kryteria retro + oryginał
-      reasons  = lista powodów
-    """
     text = (title + " " + (description or "")).lower()
-    reasons = []
 
-    # 1. Odrzuć repliki od razu
+    # Odrzuć repliki
     for rep in REPLICA_KEYWORDS:
         if rep in text:
-            return False, [f"replika/kopia — odrzucono ({rep})"]
+            return False, ["replika — odrzucono"]
 
-    # 2. Sprawdź czy zawiera słowo sugerujące retro/vintage/rok
-    is_retro = any(decade in text for decade in RETRO_DECADES)
+    # Odrzuć śmieci niezwiązane z piłką nożną
+    NOISE = [
+        "swag", "y2k", "00s", "avant garde", "coquette", "drippy",
+        "gorset", "spódniczk", "bluzka na", "top na ramiac", "body ",
+        "koronkow", "halter", "babydoll", "cycling", "basketball",
+        "primark", "stradivarius", "bershka", "muślinow", "satynow",
+        "alt alternative", "japan style", "cropped top",
+    ]
+    for noise in NOISE:
+        if noise in text:
+            return False, [f"odrzucono: {noise.strip()}"]
 
-    # 3. Sprawdź markę oryginału
-    has_original_brand = any(brand in text for brand in FOOTBALL_ORIGINAL_BRANDS)
+    # Musi zawierać słowo koszulka/jersey/shirt
+    is_jersey = any(w in text for w in ["koszulka", "jersey", "shirt", "trikot", "maillot"])
+    if not is_jersey:
+        return False, ["brak słowa koszulka/jersey"]
 
-    # 4. Sprawdź klub lub reprezentację
-    has_club = any(club in text for club in FOOTBALL_CLUBS)
+    # Musi mieć oryginalną markę
+    has_brand = any(b in text for b in FOOTBALL_ORIGINAL_BRANDS)
+    if not has_brand:
+        return False, ["brak oryginalnej marki"]
 
-    # 5. Weź pod uwagę wynik AI
-    ai_confirms_retro = False
-    ai_confirms_original = False
-    if ai_result:
-        ai_reason = ai_result.get("reason", "").lower()
-        if any(w in ai_reason for w in ["retro", "vintage", "oryginał", "oryginal", "lata "]):
-            ai_confirms_retro = True
-        if ai_result.get("detected_brand") in FOOTBALL_ORIGINAL_BRANDS:
-            ai_confirms_original = True
+    # Musi mieć klub LUB słowo retro/vintage/rok
+    has_club  = any(c in text for c in FOOTBALL_CLUBS)
+    is_retro  = any(d in text for d in RETRO_DECADES)
+    if not has_club and not is_retro:
+        return False, ["brak klubu/reprezentacji i słowa retro"]
 
-    # Zbierz powody
-    if is_retro:
-        reasons.append("✅ vintage/retro w opisie")
-    if has_original_brand:
-        reasons.append("✅ oryginalna marka")
-    if has_club:
-        reasons.append("✅ rozpoznany klub/reprezentacja")
-    if ai_confirms_retro:
-        reasons.append("🤖 AI potwierdza: retro")
-    if ai_confirms_original:
-        reasons.append(f"🤖 AI marka: {ai_result.get('detected_brand')}")
+    reasons = []
+    if has_brand:  reasons.append("✅ oryginalna marka")
+    if has_club:   reasons.append("✅ klub/reprezentacja")
+    if is_retro:   reasons.append("✅ retro/vintage")
+    return True, reasons
 
-    # Warunek: retro (tekst LUB AI) + marka oryginału (tekst LUB AI)
-    retro_ok    = is_retro or ai_confirms_retro
-    original_ok = has_original_brand or ai_confirms_original
-
-    if retro_ok and original_ok:
-        return True, reasons
-    elif retro_ok and not original_ok:
-        return False, ["⚠️ brak oryginałowej marki w opisie"]
-    elif not retro_ok and original_ok:
-        # Jeśli jest oryginalna marka i klub — może być retro bez słowa "retro"
-        if has_club:
-            return True, reasons + ["ℹ️ brak słowa retro, ale marka+klub sugerują vintage"]
-        return False, ["⚠️ brak oznaczenia retro/vintage/roku"]
-    else:
-        return False, ["⚠️ nie spełnia kryteriów retro + oryginał"]
 
 
 # ─────────────────────────────────────────
@@ -929,198 +1035,147 @@ def validate_carhartt(title, description, search):
 # ─────────────────────────────────────────
 def check_search(search, seen, market_price):
     found    = []
-    seen_now = []   # wszystkie ID widziane w tym cyklu → zapisujemy do seen
+    all_ids  = []   # wszystkie ID widziane w tym cyklu
+    cnt_seen = cnt_price = cnt_kw = cnt_rejected = 0
+
     try:
         r = vinted_fetch(search["url"], label=search["name"])
         if not r:
-            return [], []
+            return []
 
         items = parse_items_from_html(r.text)
         print(f"[{search['name']}] Ofert na stronie: {len(items)}")
+        # Debug — pokaż pierwsze 2 tytuły żeby sprawdzić czy dane są poprawne
+        for dbg in items[:2]:
+            print(f"  🔍 '{dbg['title'][:60]}' | {dbg['price']} zł")
 
-        cnt_seen = cnt_price = cnt_kw = cnt_no_qualify = cnt_blocked = 0
+        hidden_gem_mode = search.get("hidden_gem_mode", False)
+        football_mode   = search.get("football_mode", False)
+        lego_sw_mode    = search.get("lego_sw_mode", False)
+        carhartt_mode   = search.get("carhartt_mode", False)
 
         for item in items:
             try:
-                item_id = item["id"]
-                if not item_id:
-                    continue
+                item_id = item.get("id", "")
+                title   = item.get("title", "")
+                href    = item.get("url", "")
+                price   = item.get("price")
 
-                # Zapisz każde widziane ID — po tym cyklu nie wróci jako "nowe"
-                seen_now.append(item_id)
-
-                if item_id in seen:
+                if not item_id or item_id in seen:
                     cnt_seen += 1
                     continue
-
-                title = item["title"]
-                if not title:
+                if not title or not href:
                     continue
 
-                href  = item["url"]
-                price = item["price"]
+                # Odrzuć zablokowane marki (H&M, Zara, Bershka itp.)
+                if any(b in title.lower() for b in BLOCKED_BRANDS):
+                    continue
 
                 if not price or price < search.get("min_price", 1):
                     cnt_price += 1
                     continue
 
-                # ── Filtr zablokowanych marek ──
-                title_low = title.lower()
-                if any(b in title_low for b in BLOCKED_BRANDS):
-                    cnt_blocked += 1
+                # filtr słów kluczowych (tryb normalny)
+                if not hidden_gem_mode and not lego_sw_mode and not carhartt_mode and not football_mode:
+                    keywords = search.get("keywords", [])
+                    if keywords and not any(kw.lower() in title.lower() for kw in keywords):
+                        cnt_kw += 1
+                        continue
+
+                # ocena cenowa
+                steal_threshold = STEAL_PRICES.get(search["category"], 9999)
+                is_steal_price  = price <= steal_threshold
+                is_below_market = False
+                discount_pct    = 0
+                if market_price and market_price > 0:
+                    discount_pct    = (1 - price / market_price) * 100
+                    is_below_market = discount_pct >= MIN_DISCOUNT_PCT
+
+                # typo
+                typo_brand, typo_found = detect_typo_brand(title)
+                has_typo = typo_brand is not None
+
+                # walidacje specjalne
+                lego_sw_valid, lego_sw_score, lego_sw_reasons, lego_set_info = False, 0, [], {}
+                if lego_sw_mode:
+                    lego_sw_valid, lego_sw_score, lego_sw_reasons, lego_set_info = validate_lego_sw(title, None, None)
+                    # Podnosimy minimalny próg — żeby odrzucić śmieci
+                    if lego_sw_score < 40:
+                        lego_sw_valid = False
+                    # Max cena dla LEGO SW
+                    if price > 100:
+                        lego_sw_valid = False
+
+                football_valid, football_reasons = False, []
+                if football_mode:
+                    football_valid, football_reasons = validate_football_jersey(title, None, None)
+
+                carhartt_valid, carhartt_reasons, carhartt_model_name, carhartt_max = False, [], None, 0
+                if carhartt_mode:
+                    cv, cm, cmax, cr = validate_carhartt(title, None, search.get("model"))
+                    if cv and price <= cmax:
+                        carhartt_valid, carhartt_model_name, carhartt_max, carhartt_reasons = True, cm, cmax, cr
+
+                # AI (tylko hidden gem)
+                is_hidden_gem, ai_brand, ai_reason, mismatch = False, None, "", False
+                if ANTHROPIC_KEY and hidden_gem_mode:
+                    img_url, desc = get_item_details(href)
+                    ai_res = analyze_with_ai(title, desc, img_url)
+                    if ai_res:
+                        is_hidden_gem = ai_res.get("is_hidden_gem", False)
+                        if ai_res.get("confidence", 0) < MIN_AI_CONFIDENCE:
+                            is_hidden_gem = False
+                        ai_brand  = ai_res.get("detected_brand")
+                        ai_reason = ai_res.get("reason", "")
+                        mismatch  = ai_res.get("mismatch", False)
+
+                # finalna decyzja
+                qualifies = (
+                    is_steal_price or is_below_market or has_typo or is_hidden_gem
+                    or (lego_sw_mode  and lego_sw_valid)
+                    or (football_mode and football_valid)
+                    or (carhartt_mode and carhartt_valid)
+                )
+                if not qualifies:
+                    cnt_rejected += 1
                     continue
+
+                reasons = []
+                if lego_sw_valid:      reasons += lego_sw_reasons[:3]
+                if football_valid:     reasons += football_reasons[:3]
+                if carhartt_valid:     reasons.append(f"✅ model: {carhartt_model_name} | próg ≤{carhartt_max} zł")
+                if has_typo:           reasons.append(f"błędna pisownia: '{typo_found}' → {typo_brand}")
+                if mismatch:           reasons.append("zdjęcie ≠ opis (AI)")
+                if is_below_market:    reasons.append(f"-{discount_pct:.0f}% od mediany")
+                if is_steal_price:     reasons.append(f"cena steal <{steal_threshold} zł")
+                if ai_reason:          reasons.append(ai_reason)
+
+                found.append({
+                    "id": item_id, "title": title, "link": href,
+                    "price": price, "market_price": market_price,
+                    "discount_pct": discount_pct,
+                    "is_steal": is_steal_price, "is_below": is_below_market,
+                    "has_typo": has_typo, "typo_brand": typo_brand if has_typo else None,
+                    "is_hidden_gem": is_hidden_gem, "mismatch": mismatch,
+                    "ai_brand": ai_brand, "reasons": reasons,
+                    "lego_sw_valid": lego_sw_valid, "lego_sw_score": lego_sw_score,
+                    "lego_set_info": lego_set_info,
+                    "football_valid": football_valid,
+                    "carhartt_valid": carhartt_valid,
+                    "carhartt_model": carhartt_model_name,
+                    "carhartt_max": carhartt_max,
+                })
 
             except Exception as e:
-                print(f"  ⚠️ Błąd parsowania itemu: {e}")
+                print(f"  ⚠️ item error: {e}")
                 continue
-
-            hidden_gem_mode = search.get("hidden_gem_mode", False)
-            football_mode   = search.get("football_mode", False)
-            lego_sw_mode    = search.get("lego_sw_mode", False)
-            carhartt_mode   = search.get("carhartt_mode", False)
-
-            # ── Tryb normalny: filtr słów kluczowych ──
-            if not hidden_gem_mode and not lego_sw_mode and not carhartt_mode:
-                keywords = search.get("keywords", [])
-                if keywords and not any(kw.lower() in title.lower() for kw in keywords):
-                    cnt_kw += 1
-                    continue
-
-            football_mode = search.get("football_mode", False)
-
-            # ── Tryb koszulek retro ──
-            if football_mode:
-                keywords = search.get("keywords", [])
-                if keywords and not any(kw.lower() in title.lower() for kw in keywords):
-                    continue
-                if any(rep in title.lower() for rep in REPLICA_KEYWORDS):
-                    continue
-
-            # ── Ocena okazji cenowej ──
-            steal_threshold = STEAL_PRICES.get(search["category"], 9999)
-            is_steal_price  = price <= steal_threshold
-            is_below_market = False
-            discount_pct    = 0
-            if market_price and market_price > 0:
-                discount_pct    = (1 - price / market_price) * 100
-                is_below_market = discount_pct >= MIN_DISCOUNT_PCT
-
-            # ── Detekcja błędnej pisowni ──
-            typo_brand, typo_found = detect_typo_brand(title)
-            has_typo = typo_brand is not None
-
-            # ── AI analiza (tylko hidden gem i typo) ──
-            ai_result     = None
-            is_hidden_gem = False
-            ai_reason     = ""
-            ai_brand      = None
-            mismatch      = False
-            item_image_url   = None
-            item_description = None
-
-            if ANTHROPIC_KEY and hidden_gem_mode:
-                item_image_url, item_description = get_item_details(href)
-                ai_result = analyze_with_ai(title, item_description, item_image_url)
-                if ai_result:
-                    is_hidden_gem = ai_result.get("is_hidden_gem", False)
-                    ai_confidence = ai_result.get("confidence", 0)
-                    ai_reason     = ai_result.get("reason", "")
-                    ai_brand      = ai_result.get("detected_brand")
-                    mismatch      = ai_result.get("mismatch", False)
-                    if is_hidden_gem and ai_confidence < MIN_AI_CONFIDENCE:
-                        is_hidden_gem = False
-
-            # ── Walidacja LEGO Star Wars ──
-            lego_sw_valid   = False
-            lego_sw_score   = 0
-            lego_sw_reasons = []
-            lego_set_info   = {}
-            if lego_sw_mode:
-                lego_sw_valid, lego_sw_score, lego_sw_reasons, lego_set_info = validate_lego_sw(
-                    title, item_description, ai_result
-                )
-
-            # ── Walidacja koszulki retro ──
-            football_valid   = False
-            football_reasons = []
-            if football_mode:
-                football_valid, football_reasons = validate_football_jersey(
-                    title, item_description, ai_result
-                )
-
-            # ── Walidacja Carhartt ──
-            carhartt_valid   = False
-            carhartt_reasons = []
-            if carhartt_mode:
-                carhartt_valid, carhartt_reasons = validate_carhartt(
-                    title, item_description, search
-                )
-
-            # ── Finalna decyzja ──
-            qualifies = (
-                is_steal_price
-                or is_below_market
-                or has_typo
-                or is_hidden_gem
-                or (lego_sw_mode and lego_sw_valid)
-                or (football_mode and football_valid)
-                or (carhartt_mode and carhartt_valid)
-            )
-
-            if not qualifies:
-                cnt_no_qualify += 1
-                continue
-
-            # Ustal powód alertu
-            reasons = []
-            if lego_sw_valid:
-                reasons += lego_sw_reasons[:4]
-            if football_valid:
-                reasons += football_reasons
-            if carhartt_valid:
-                reasons += carhartt_reasons
-            if has_typo:
-                reasons.append(f"błędna pisownia: '{typo_found}' → {typo_brand}")
-            if mismatch:
-                reasons.append("zdjęcie ≠ opis (AI)")
-            if ai_brand and ai_brand.lower() not in title.lower():
-                reasons.append(f"AI rozpoznało: {ai_brand}")
-            if is_below_market:
-                reasons.append(f"-{discount_pct:.0f}% od mediany")
-            if is_steal_price:
-                reasons.append(f"cena steal <{steal_threshold} zł")
-            if ai_reason:
-                reasons.append(ai_reason)
-
-            found.append({
-                "id":               item_id,
-                "title":            title,
-                "link":             href,
-                "price":            price,
-                "market_price":     market_price,
-                "discount_pct":     discount_pct,
-                "is_steal":         is_steal_price,
-                "is_below":         is_below_market,
-                "has_typo":         has_typo,
-                "typo_brand":       typo_brand,
-                "is_hidden_gem":    is_hidden_gem,
-                "mismatch":         mismatch,
-                "ai_brand":         ai_brand,
-                "reasons":          reasons,
-                "lego_sw_valid":    lego_sw_valid,
-                "lego_sw_score":    lego_sw_score,
-                "lego_set_info":    lego_set_info,
-                "football_valid":   football_valid,
-                "carhartt_valid":   carhartt_valid,
-            })
 
     except Exception as e:
         print(f"Błąd check_search [{search['name']}]: {e}")
 
-    if cnt_seen or cnt_price or cnt_kw or cnt_no_qualify:
-        print(f"  📊 Odrzucono: widziane={cnt_seen} brak_ceny={cnt_price} brak_słów={cnt_kw} nie_spełnia={cnt_no_qualify} zablokowane={cnt_blocked}")
+    print(f"  📊 widziane={cnt_seen} brak_ceny={cnt_price} brak_słów={cnt_kw} odrzucone={cnt_rejected} wysłane={len(found)}")
+    return found
 
-    return found, seen_now
 
 # ─────────────────────────────────────────
 #  ✉️ FORMAT WIADOMOŚCI
@@ -1136,112 +1191,63 @@ CATEGORY_EMOJI = {
 
 def format_message(search, item):
     emoji = CATEGORY_EMOJI.get(search["category"], "🛍")
-    lines = []
+    price = item["price"]
+    title = item["title"][:100]
+    link  = item["link"]
+    mp    = item.get("market_price")
+    disc  = item.get("discount_pct", 0)
 
-    # Nagłówek — LEGO Star Wars
+    # Nagłówek
     if search.get("lego_sw_mode"):
-        score = item.get("lego_sw_score", 0)
-        info  = item.get("lego_set_info", {})
-        if score >= 70:
-            lines.append("🚀 <b>LEGO STAR WARS — KULTOWY SET!</b>")
-        elif item["discount_pct"] >= 40:
-            lines.append(f"🧱 <b>LEGO SW OKAZJA! -{item['discount_pct']:.0f}% poniżej rynku</b>")
+        if item.get("lego_sw_score", 0) >= 70:
+            header = "🚀 LEGO STAR WARS — KULTOWY SET!"
+        elif disc >= 40:
+            header = f"🧱 LEGO SW OKAZJA! -{disc:.0f}% taniej"
         else:
-            lines.append("🧱 <b>LEGO Star Wars — kompletny zestaw</b>")
-
-        lines.append(f"⭐ <b>{search['name']}</b>")
-        lines.append("")
-        lines.append(f"📦 {item['title'][:120]}")
-        lines.append("")
-        lines.append(f"💰 Cena: <b>{item['price']:.0f} zł</b>")
-        if item["market_price"]:
-            lines.append(f"📊 Średnia: <i>{item['market_price']:.0f} zł</i>")
-            if item["discount_pct"] > 0:
-                lines.append(f"✂️ Oszczędzasz: <b>~{item['market_price'] - item['price']:.0f} zł</b>")
-        if info.get("set_number"):
-            lines.append(f"🔢 Set: <b>#{info['set_number']}</b>")
-        if info.get("vehicle"):
-            lines.append(f"🚀 Pojazd: <i>{info['vehicle']}</i>")
-        if info.get("character"):
-            lines.append(f"🧑‍🚀 Postać: <i>{info['character']}</i>")
-        if info.get("minifigs"):
-            lines.append("🟡 Minifigurki: <b>tak</b>")
-        if info.get("complete"):
-            lines.append("✅ Kompletność: <b>kompletny</b>")
-        if item["reasons"]:
-            lines.append("")
-            for r in item["reasons"][:3]:
-                lines.append(f"  • {r}")
-        lines.append("")
-        lines.append(f"🔗 <a href=\"{item['link']}\">Otwórz ofertę na Vinted</a>")
-        return "\n".join(lines)
-
-    # Nagłówek — Carhartt
-    if search.get("carhartt_mode"):
-        max_p = search.get("carhartt_max_price", 9999)
-        if item["discount_pct"] >= 40:
-            lines.append(f"🧥 <b>CARHARTT OKAZJA! -{item['discount_pct']:.0f}% poniżej rynku</b>")
+            header = "🧱 LEGO Star Wars — zestaw"
+    elif search.get("football_mode"):
+        if disc >= 40:
+            header = f"⚽ RETRO OKAZJA! -{disc:.0f}% taniej"
         else:
-            lines.append(f"🧥 <b>CARHARTT — model poniżej {max_p} zł!</b>")
-        lines.append(f"🧥 <b>{search['name']}</b>")
-        lines.append("")
-        lines.append(f"📦 {item['title'][:120]}")
-        lines.append("")
-        lines.append(f"💰 Cena: <b>{item['price']:.0f} zł</b>")
-        if item["market_price"]:
-            lines.append(f"📊 Średnia: <i>{item['market_price']:.0f} zł</i>")
-            if item["discount_pct"] > 0:
-                lines.append(f"✂️ Oszczędzasz: <b>~{item['market_price'] - item['price']:.0f} zł</b>")
-        if item["reasons"]:
-            lines.append("")
-            for r in item["reasons"][:3]:
-                lines.append(f"  • {r}")
-        lines.append("")
-        lines.append(f"🔗 <a href=\"{item['link']}\">Otwórz ofertę na Vinted</a>")
-        return "\n".join(lines)
-
-    # Nagłówek — koszulki retro mają własny styl
-    if search.get("football_mode"):
-        if item["discount_pct"] >= 40:
-            lines.append(f"⚽ <b>RETRO JERSEY OKAZJA! -{item['discount_pct']:.0f}% poniżej rynku</b>")
-        else:
-            lines.append("⚽ <b>KOSZULKA RETRO — oryginał!</b>")
-    elif item["mismatch"]:
-        lines.append("🔮 <b>HIDDEN GEM — zdjęcie ≠ opis!</b>")
-    elif item["has_typo"]:
-        lines.append(f"🔤 <b>BŁĘDNA PISOWNIA — może być {item['typo_brand'].upper()}!</b>")
-    elif item["is_hidden_gem"]:
-        lines.append("💎 <b>HIDDEN GEM wykryty przez AI!</b>")
-    elif item["discount_pct"] >= 60:
-        lines.append(f"🚨 <b>MEGA OKAZJA! -{item['discount_pct']:.0f}% poniżej rynku</b>")
-    elif item["is_below"]:
-        lines.append(f"🔥 <b>OKAZJA! -{item['discount_pct']:.0f}% poniżej rynku</b>")
+            header = "⚽ KOSZULKA RETRO — oryginal!"
+    elif search.get("carhartt_mode"):
+        model = (item.get("carhartt_model") or "").replace("_", " ").title()
+        header = f"🧥 CARHARTT {model}".strip()
+    elif item.get("mismatch"):
+        header = "🔮 HIDDEN GEM — zdjecie nie pasuje do opisu!"
+    elif item.get("has_typo"):
+        header = f"🔤 BLEDNA PISOWNIA -> moze byc {(item.get('typo_brand') or '').upper()}!"
+    elif item.get("is_hidden_gem"):
+        header = "💎 HIDDEN GEM wykryty przez AI!"
+    elif disc >= 60:
+        header = f"🚨 MEGA OKAZJA! -{disc:.0f}% ponizej rynku"
+    elif disc >= 40:
+        header = f"🔥 OKAZJA! -{disc:.0f}% ponizej rynku"
     else:
-        lines.append("💸 <b>NISKA CENA STEAL!</b>")
+        header = f"💸 {emoji} NISKA CENA!"
 
-    lines.append(f"{emoji} <b>{search['name']}</b>")
-    lines.append("")
-    lines.append(f"📦 {item['title'][:120]}")
-    lines.append("")
-    lines.append(f"💰 Cena: <b>{item['price']:.0f} zł</b>")
+    lines = [header, "", f"📦 {title}", "", f"💰 Cena: {price:.0f} zl"]
 
-    if item["market_price"]:
-        lines.append(f"📊 Średnia rynkowa: <i>{item['market_price']:.0f} zł</i>")
-        if item["discount_pct"] > 0:
-            saved = item["market_price"] - item["price"]
-            lines.append(f"✂️ Oszczędzasz: <b>~{saved:.0f} zł</b>")
+    if mp:
+        lines.append(f"📊 Srednia: {mp:.0f} zl")
+        if disc > 0:
+            lines.append(f"✂️ Oszczedzasz: ~{mp - price:.0f} zl")
 
-    if item["ai_brand"]:
-        lines.append(f"🤖 AI rozpoznało markę: <b>{item['ai_brand']}</b>")
+    if search.get("lego_sw_mode"):
+        info = item.get("lego_set_info", {})
+        if info.get("set_number"):  lines.append(f"🔢 Set: #{info['set_number']}")
+        if info.get("vehicle"):     lines.append(f"🚀 {info['vehicle']}")
+        if info.get("character"):   lines.append(f"👤 {info['character']}")
+        if info.get("minifigs"):    lines.append("🟡 Minifigurki: tak")
 
-    if item["reasons"]:
+    reasons = item.get("reasons", [])
+    if reasons:
         lines.append("")
-        lines.append("📋 <i>Powód alertu:</i>")
-        for r in item["reasons"][:3]:
-            lines.append(f"  • {r}")
+        for r in reasons[:2]:
+            lines.append(f"• {r}")
 
     lines.append("")
-    lines.append(f"🔗 <a href=\"{item['link']}\">Otwórz ofertę na Vinted</a>")
+    lines.append(f"🔗 {link}")
 
     return "\n".join(lines)
 
@@ -1295,18 +1301,20 @@ while True:
         for search in SEARCHES:
             print(f"  ⏳ Sprawdzam: {search['name']}")
             market_price = market_prices.get(search["name"])
-            new_items, seen_now = check_search(search, seen, market_price)
+            new_items, all_ids = check_search(search, seen, market_price)
             print(f"  ✔ Gotowe: {search['name']} — nowych: {len(new_items)}")
 
-            # Zapisz WSZYSTKIE widziane ID — stare oferty nie wrócą
+            # Zapisz WSZYSTKIE widziane ID — nie tylko wysłane
+            # Dzięki temu stare oferty nie będą się powtarzać
             now = time.time()
-            for sid in seen_now:
-                if sid not in seen:
-                    seen[sid] = now
+            for item_id in all_ids:
+                if item_id not in seen:
+                    seen[item_id] = now
 
             for item in new_items:
                 msg = format_message(search, item)
                 send_message(msg)
+                seen[item["id"]] = now
                 tag = "💎" if item["is_hidden_gem"] else ("🔤" if item["has_typo"] else "✉️")
                 print(f"  {tag} {item['title'][:55]} | {item['price']:.0f} zł")
 
