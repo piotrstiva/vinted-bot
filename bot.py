@@ -631,42 +631,104 @@ def refresh_session():
 
 def parse_items_from_html(html):
     """
-    Wyciąga linki do ofert z HTML strony katalogu Vinted.
+    Vinted renderuje przez JS — HTML nie zawiera treści ofert.
+    Zamiast tego wyciągamy dane z JSON osadzonego w stronie
+    (window.__PRELOADED_STATE__ lub podobny).
     Zwraca listę dictów: {id, title, price, url}
     """
-    soup  = BeautifulSoup(html, "html.parser")
-    items = []
+    items    = []
     seen_ids = set()
 
-    for tag in soup.find_all("a", href=True):
-        href = tag["href"]
-        if "/items/" not in href:
-            continue
+    # Vinted osadza dane jako JSON w tagu <script>
+    # Szukamy: "items":[{...}] lub "catalogItems":[{...}]
+    patterns = [
+        r'"items"\s*:\s*(\[.*?\])\s*[,}]',
+        r'"catalogItems"\s*:\s*(\[.*?\])\s*[,}]',
+        r'"data"\s*:\s*(\[.*?\])\s*[,}]',
+    ]
 
-        if not href.startswith("http"):
-            href = "https://www.vinted.pl" + href
+    import json as _json
 
-        # wyciągnij ID
-        try:
-            item_id = href.split("/items/")[1].split("-")[0].split("?")[0]
-            if not item_id.isdigit():
+    for pattern in patterns:
+        matches = re.findall(pattern, html, re.DOTALL)
+        for match in matches:
+            try:
+                data = _json.loads(match)
+                if not isinstance(data, list) or len(data) == 0:
+                    continue
+                if not isinstance(data[0], dict):
+                    continue
+                # Sprawdź czy to faktycznie lista ofert (musi mieć id i url/path)
+                if "id" not in data[0] and "url" not in data[0]:
+                    continue
+
+                for entry in data:
+                    try:
+                        item_id = str(entry.get("id", ""))
+                        if not item_id or not item_id.isdigit():
+                            continue
+                        if item_id in seen_ids:
+                            continue
+                        seen_ids.add(item_id)
+
+                        title = entry.get("title", "") or entry.get("name", "") or ""
+                        url   = entry.get("url", "") or f"https://www.vinted.pl/items/{item_id}"
+                        if not url.startswith("http"):
+                            url = "https://www.vinted.pl" + url
+
+                        # cena — może być string lub float
+                        raw_price = entry.get("price", "") or entry.get("price_numeric", "")
+                        price = None
+                        try:
+                            price = float(str(raw_price).replace(",", ".").replace(" ", ""))
+                        except:
+                            pass
+
+                        if title:
+                            items.append({
+                                "id":    item_id,
+                                "title": title,
+                                "price": price,
+                                "url":   url,
+                            })
+                    except:
+                        continue
+
+                if items:
+                    return items
+
+            except:
                 continue
-        except:
-            continue
 
-        if item_id in seen_ids:
-            continue
-        seen_ids.add(item_id)
-
-        title = tag.get_text(" ", strip=True)
-        price = extract_price(title)
-
-        items.append({
-            "id":    item_id,
-            "title": title,
-            "price": price,
-            "url":   href,
-        })
+    # Fallback: szukaj linków i tytułów przez og:title / meta
+    if not items:
+        soup = BeautifulSoup(html, "html.parser")
+        for tag in soup.find_all("a", href=True):
+            href = tag["href"]
+            if "/items/" not in href:
+                continue
+            if not href.startswith("http"):
+                href = "https://www.vinted.pl" + href
+            try:
+                item_id = href.split("/items/")[1].split("-")[0].split("?")[0]
+                if not item_id.isdigit() or item_id in seen_ids:
+                    continue
+                seen_ids.add(item_id)
+                # Tytuł z atrybutu title lub aria-label
+                title = (
+                    tag.get("title") or
+                    tag.get("aria-label") or
+                    tag.get_text(" ", strip=True)
+                )
+                price = extract_price(title) if title else None
+                items.append({
+                    "id":    item_id,
+                    "title": title or "",
+                    "price": price,
+                    "url":   href,
+                })
+            except:
+                continue
 
     return items
 
@@ -927,6 +989,9 @@ def check_search(search, seen, market_price):
 
         items = parse_items_from_html(r.text)
         print(f"[{search['name']}] Ofert na stronie: {len(items)}")
+        # Debug — pokaż pierwsze 2 tytuły żeby sprawdzić czy dane są poprawne
+        for dbg in items[:2]:
+            print(f"  🔍 '{dbg['title'][:60]}' | {dbg['price']} zł")
 
         hidden_gem_mode = search.get("hidden_gem_mode", False)
         football_mode   = search.get("football_mode", False)
