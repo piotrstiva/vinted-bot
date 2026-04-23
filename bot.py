@@ -1000,34 +1000,47 @@ def validate_football_jersey(title, description, ai_result):
 # ─────────────────────────────────────────
 #  🧥 WALIDACJA CARHARTT
 # ─────────────────────────────────────────
-def validate_carhartt(title, description, search):
+def validate_carhartt(title, description, search_model):
     """
-    Zwraca (is_valid, reasons)
-    Sprawdza czy oferta zawiera właściwy model i mieści się w progu cenowym.
+    Zwraca (is_valid, model_name, max_price, reasons)
     """
     text = (title + " " + (description or "")).lower()
-    reasons = []
 
-    # Musi być marka Carhartt
     if "carhartt" not in text:
-        return False, ["⛔ brak słowa 'carhartt' w ofercie"]
+        typo_brand, _ = detect_typo_brand(text)
+        if typo_brand != "carhartt":
+            return False, None, 0, ["brak marki Carhartt"]
 
-    # Sprawdź czy zawiera jeden z wymaganych modeli
-    models = search.get("carhartt_models", [])
-    found_model = next((m for m in models if m in text), None)
-    if not found_model:
-        model_names = ", ".join(dict.fromkeys(
-            m.split()[-1].title() for m in models   # unikalne nazwy modeli
-        ))
-        return False, [f"⛔ brak wymaganego modelu ({model_names})"]
+    # Wykryj model
+    detected_model = None
+    max_price      = 0
+    reasons        = []
 
-    reasons.append(f"✅ model: {found_model}")
+    for model_name, model_info in CARHARTT_MODELS.items():
+        if any(kw in text for kw in model_info["keywords"]):
+            detected_model = model_name
+            max_price      = model_info["max_price"]
+            reasons.append(f"✅ model: {model_name.replace('_',' ').title()}")
+            break
 
-    # Sprawdź próg cenowy (dodatkowe zabezpieczenie — URL już filtruje)
-    max_price = search.get("carhartt_max_price", 9999)
-    reasons.append(f"✅ cena ≤ {max_price} zł")
+    if not detected_model:
+        for other in CARHARTT_OTHER:
+            if other in text:
+                detected_model = "other"
+                max_price      = 200
+                reasons.append(f"✅ model: {other}")
+                break
 
-    return True, reasons
+    if not detected_model:
+        detected_model = "generic"
+        max_price      = 200
+        reasons.append("ℹ️ ogólna kurtka Carhartt")
+
+    # Sprawdź czy search wymaga konkretnego modelu
+    if search_model and search_model != "other" and detected_model != search_model:
+        return False, None, 0, [f"szukany: {search_model}, znaleziono: {detected_model}"]
+
+    return True, detected_model, max_price, reasons
 
 
 # ─────────────────────────────────────────
@@ -1041,7 +1054,7 @@ def check_search(search, seen, market_price):
     try:
         r = vinted_fetch(search["url"], label=search["name"])
         if not r:
-            return []
+            return [], []
 
         items = parse_items_from_html(r.text)
         print(f"[{search['name']}] Ofert na stronie: {len(items)}")
@@ -1055,6 +1068,8 @@ def check_search(search, seen, market_price):
         carhartt_mode   = search.get("carhartt_mode", False)
 
         for item in items:
+            if not item:
+                continue
             try:
                 item_id = item.get("id", "")
                 title   = item.get("title", "")
