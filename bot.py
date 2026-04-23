@@ -417,24 +417,39 @@ def save_seen(seen):
 # ─────────────────────────────────────────
 def send_message(text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    # Najpierw próbuj HTML
+    # Konwertuj HTML na Markdown
+    # <b>tekst</b> → *tekst*
+    # <i>tekst</i> → _tekst_
+    # <a href="url">tekst</a> → [tekst](url)
+    def html_to_markdown(t):
+        t = re.sub(r'<b>(.*?)</b>', r'*\1*', t, flags=re.DOTALL)
+        t = re.sub(r'<i>(.*?)</i>', r'_\1_', t, flags=re.DOTALL)
+        t = re.sub(r'<a href="([^"]+)">([^<]+)</a>', r'[\2](\1)', t)
+        t = re.sub(r'<[^>]+>', '', t)  # usuń pozostałe tagi
+        # Escape znaków specjalnych Markdown V2
+        for ch in ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']:
+            # Nie escapuj w linkach i formatowaniu
+            pass
+        return t
+
+    md_text = html_to_markdown(text)
+
     try:
         r = requests.post(url, data={
             "chat_id":                  CHAT_ID,
-            "text":                     text,
-            "parse_mode":               "HTML",
+            "text":                     md_text,
+            "parse_mode":               "Markdown",
             "disable_web_page_preview": False,
         }, timeout=10)
         if r.status_code == 200:
             return
-        # Jeśli HTML parsing error — wyślij jako plain text
-        if r.status_code == 400 and "parse entities" in r.text:
-            # Usuń tagi HTML i wyślij plain
-            clean = re.sub(r'<[^>]+>', '', text)
+        # Fallback — plain text bez formatowania
+        if r.status_code == 400:
+            plain = re.sub(r'<[^>]+>', '', text)
+            plain = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'\1: \2', plain)
             requests.post(url, data={
                 "chat_id": CHAT_ID,
-                "text":    clean,
-                "disable_web_page_preview": False,
+                "text":    plain,
             }, timeout=10)
             return
         print(f"Telegram error: {r.text}")
@@ -1161,112 +1176,63 @@ CATEGORY_EMOJI = {
 
 def format_message(search, item):
     emoji = CATEGORY_EMOJI.get(search["category"], "🛍")
-    lines = []
+    price = item["price"]
+    title = item["title"][:100]
+    link  = item["link"]
+    mp    = item.get("market_price")
+    disc  = item.get("discount_pct", 0)
 
-    # Nagłówek — LEGO Star Wars
+    # Nagłówek
     if search.get("lego_sw_mode"):
-        score = item.get("lego_sw_score", 0)
-        info  = item.get("lego_set_info", {})
-        if score >= 70:
-            lines.append("🚀 <b>LEGO STAR WARS — KULTOWY SET!</b>")
-        elif item["discount_pct"] >= 40:
-            lines.append(f"🧱 <b>LEGO SW OKAZJA! -{item['discount_pct']:.0f}% poniżej rynku</b>")
+        if item.get("lego_sw_score", 0) >= 70:
+            header = "🚀 LEGO STAR WARS — KULTOWY SET!"
+        elif disc >= 40:
+            header = f"🧱 LEGO SW OKAZJA! -{disc:.0f}% taniej"
         else:
-            lines.append("🧱 <b>LEGO Star Wars — kompletny zestaw</b>")
-
-        lines.append(f"⭐ <b>{search['name']}</b>")
-        lines.append("")
-        lines.append(f"📦 {item['title'][:120]}")
-        lines.append("")
-        lines.append(f"💰 Cena: <b>{item['price']:.0f} zł</b>")
-        if item["market_price"]:
-            lines.append(f"📊 Średnia: <i>{item['market_price']:.0f} zł</i>")
-            if item["discount_pct"] > 0:
-                lines.append(f"✂️ Oszczędzasz: <b>~{item['market_price'] - item['price']:.0f} zł</b>")
-        if info.get("set_number"):
-            lines.append(f"🔢 Set: <b>#{info['set_number']}</b>")
-        if info.get("vehicle"):
-            lines.append(f"🚀 Pojazd: <i>{info['vehicle']}</i>")
-        if info.get("character"):
-            lines.append(f"🧑‍🚀 Postać: <i>{info['character']}</i>")
-        if info.get("minifigs"):
-            lines.append("🟡 Minifigurki: <b>tak</b>")
-        if info.get("complete"):
-            lines.append("✅ Kompletność: <b>kompletny</b>")
-        if item["reasons"]:
-            lines.append("")
-            for r in item["reasons"][:3]:
-                lines.append(f"  • {r}")
-        lines.append("")
-        lines.append(f"🔗 <a href=\"{item['link']}\">Otwórz ofertę na Vinted</a>")
-        return "\n".join(lines)
-
-    # Nagłówek — Carhartt
-    if search.get("carhartt_mode"):
-        max_p = search.get("carhartt_max_price", 9999)
-        if item["discount_pct"] >= 40:
-            lines.append(f"🧥 <b>CARHARTT OKAZJA! -{item['discount_pct']:.0f}% poniżej rynku</b>")
+            header = "🧱 LEGO Star Wars — zestaw"
+    elif search.get("football_mode"):
+        if disc >= 40:
+            header = f"⚽ RETRO OKAZJA! -{disc:.0f}% taniej"
         else:
-            lines.append(f"🧥 <b>CARHARTT — model poniżej {max_p} zł!</b>")
-        lines.append(f"🧥 <b>{search['name']}</b>")
-        lines.append("")
-        lines.append(f"📦 {item['title'][:120]}")
-        lines.append("")
-        lines.append(f"💰 Cena: <b>{item['price']:.0f} zł</b>")
-        if item["market_price"]:
-            lines.append(f"📊 Średnia: <i>{item['market_price']:.0f} zł</i>")
-            if item["discount_pct"] > 0:
-                lines.append(f"✂️ Oszczędzasz: <b>~{item['market_price'] - item['price']:.0f} zł</b>")
-        if item["reasons"]:
-            lines.append("")
-            for r in item["reasons"][:3]:
-                lines.append(f"  • {r}")
-        lines.append("")
-        lines.append(f"🔗 <a href=\"{item['link']}\">Otwórz ofertę na Vinted</a>")
-        return "\n".join(lines)
-
-    # Nagłówek — koszulki retro mają własny styl
-    if search.get("football_mode"):
-        if item["discount_pct"] >= 40:
-            lines.append(f"⚽ <b>RETRO JERSEY OKAZJA! -{item['discount_pct']:.0f}% poniżej rynku</b>")
-        else:
-            lines.append("⚽ <b>KOSZULKA RETRO — oryginał!</b>")
-    elif item["mismatch"]:
-        lines.append("🔮 <b>HIDDEN GEM — zdjęcie ≠ opis!</b>")
-    elif item["has_typo"]:
-        lines.append(f"🔤 <b>BŁĘDNA PISOWNIA — może być {item['typo_brand'].upper()}!</b>")
-    elif item["is_hidden_gem"]:
-        lines.append("💎 <b>HIDDEN GEM wykryty przez AI!</b>")
-    elif item["discount_pct"] >= 60:
-        lines.append(f"🚨 <b>MEGA OKAZJA! -{item['discount_pct']:.0f}% poniżej rynku</b>")
-    elif item["is_below"]:
-        lines.append(f"🔥 <b>OKAZJA! -{item['discount_pct']:.0f}% poniżej rynku</b>")
+            header = "⚽ KOSZULKA RETRO — oryginal!"
+    elif search.get("carhartt_mode"):
+        model = (item.get("carhartt_model") or "").replace("_", " ").title()
+        header = f"🧥 CARHARTT {model}".strip()
+    elif item.get("mismatch"):
+        header = "🔮 HIDDEN GEM — zdjecie nie pasuje do opisu!"
+    elif item.get("has_typo"):
+        header = f"🔤 BLEDNA PISOWNIA -> moze byc {(item.get('typo_brand') or '').upper()}!"
+    elif item.get("is_hidden_gem"):
+        header = "💎 HIDDEN GEM wykryty przez AI!"
+    elif disc >= 60:
+        header = f"🚨 MEGA OKAZJA! -{disc:.0f}% ponizej rynku"
+    elif disc >= 40:
+        header = f"🔥 OKAZJA! -{disc:.0f}% ponizej rynku"
     else:
-        lines.append("💸 <b>NISKA CENA STEAL!</b>")
+        header = f"💸 {emoji} NISKA CENA!"
 
-    lines.append(f"{emoji} <b>{search['name']}</b>")
-    lines.append("")
-    lines.append(f"📦 {item['title'][:120]}")
-    lines.append("")
-    lines.append(f"💰 Cena: <b>{item['price']:.0f} zł</b>")
+    lines = [header, "", f"📦 {title}", "", f"💰 Cena: {price:.0f} zl"]
 
-    if item["market_price"]:
-        lines.append(f"📊 Średnia rynkowa: <i>{item['market_price']:.0f} zł</i>")
-        if item["discount_pct"] > 0:
-            saved = item["market_price"] - item["price"]
-            lines.append(f"✂️ Oszczędzasz: <b>~{saved:.0f} zł</b>")
+    if mp:
+        lines.append(f"📊 Srednia: {mp:.0f} zl")
+        if disc > 0:
+            lines.append(f"✂️ Oszczedzasz: ~{mp - price:.0f} zl")
 
-    if item["ai_brand"]:
-        lines.append(f"🤖 AI rozpoznało markę: <b>{item['ai_brand']}</b>")
+    if search.get("lego_sw_mode"):
+        info = item.get("lego_set_info", {})
+        if info.get("set_number"):  lines.append(f"🔢 Set: #{info['set_number']}")
+        if info.get("vehicle"):     lines.append(f"🚀 {info['vehicle']}")
+        if info.get("character"):   lines.append(f"👤 {info['character']}")
+        if info.get("minifigs"):    lines.append("🟡 Minifigurki: tak")
 
-    if item["reasons"]:
+    reasons = item.get("reasons", [])
+    if reasons:
         lines.append("")
-        lines.append("📋 <i>Powód alertu:</i>")
-        for r in item["reasons"][:3]:
-            lines.append(f"  • {r}")
+        for r in reasons[:2]:
+            lines.append(f"• {r}")
 
     lines.append("")
-    lines.append(f"🔗 <a href=\"{item['link']}\">Otwórz ofertę na Vinted</a>")
+    lines.append(f"🔗 {link}")
 
     return "\n".join(lines)
 
