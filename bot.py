@@ -41,18 +41,6 @@ STEAL_PRICES = {
 }
 
 # ─────────────────────────────────────────
-#  🚫 MARKI KTÓRYCH NIE CHCEMY NIGDY
-# ─────────────────────────────────────────
-BLOCKED_BRANDS = [
-    "h&m", "zara", "bershka", "sinsay", "reserved", "house",
-    "shein", "primark", "pepco", "c&a", "stradivarius",
-    "new yorker", "cropp", "new look", "boohoo", "asos",
-    "pull&bear", "mango", "vero moda", "only ", "jack&jones",
-    "terranova", "mohito", "medicine", "diverse", "carry",
-    "lager 157", "rainbow ", "iné", "amisu", "george ",
-]
-
-# ─────────────────────────────────────────
 #  🧥 CARHARTT — konfiguracja modeli
 # ─────────────────────────────────────────
 
@@ -1034,9 +1022,11 @@ def validate_carhartt(title, description, search):
 #  🕵️ SPRAWDZANIE OFERT (HTML scraping)
 # ─────────────────────────────────────────
 def check_search(search, seen, market_price):
-    found    = []
-    all_ids  = []   # wszystkie ID widziane w tym cyklu
-    cnt_seen = cnt_price = cnt_kw = cnt_rejected = 0
+    found        = []
+    cnt_seen     = 0
+    cnt_price    = 0
+    cnt_kw       = 0
+    cnt_rejected = 0
 
     try:
         r = vinted_fetch(search["url"], label=search["name"])
@@ -1066,11 +1056,6 @@ def check_search(search, seen, market_price):
                     continue
                 if not title or not href:
                     continue
-
-                # Odrzuć zablokowane marki (H&M, Zara, Bershka itp.)
-                if any(b in title.lower() for b in BLOCKED_BRANDS):
-                    continue
-
                 if not price or price < search.get("min_price", 1):
                     cnt_price += 1
                     continue
@@ -1301,20 +1286,13 @@ while True:
         for search in SEARCHES:
             print(f"  ⏳ Sprawdzam: {search['name']}")
             market_price = market_prices.get(search["name"])
-            new_items, all_ids = check_search(search, seen, market_price)
+            new_items    = check_search(search, seen, market_price)
             print(f"  ✔ Gotowe: {search['name']} — nowych: {len(new_items)}")
-
-            # Zapisz WSZYSTKIE widziane ID — nie tylko wysłane
-            # Dzięki temu stare oferty nie będą się powtarzać
-            now = time.time()
-            for item_id in all_ids:
-                if item_id not in seen:
-                    seen[item_id] = now
 
             for item in new_items:
                 msg = format_message(search, item)
                 send_message(msg)
-                seen[item["id"]] = now
+                seen[item["id"]] = time.time()
                 tag = "💎" if item["is_hidden_gem"] else ("🔤" if item["has_typo"] else "✉️")
                 print(f"  {tag} {item['title'][:55]} | {item['price']:.0f} zł")
 
