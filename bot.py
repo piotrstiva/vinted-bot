@@ -914,7 +914,12 @@ def validate_carhartt(title, description, search):
 #  🕵️ SPRAWDZANIE OFERT (HTML scraping)
 # ─────────────────────────────────────────
 def check_search(search, seen, market_price):
-    found = []
+    found        = []
+    cnt_seen     = 0
+    cnt_price    = 0
+    cnt_kw       = 0
+    cnt_rejected = 0
+
     try:
         r = vinted_fetch(search["url"], label=search["name"])
         if not r:
@@ -923,177 +928,122 @@ def check_search(search, seen, market_price):
         items = parse_items_from_html(r.text)
         print(f"[{search['name']}] Ofert na stronie: {len(items)}")
 
-        cnt_seen = cnt_price = cnt_kw = cnt_no_qualify = 0
+        hidden_gem_mode = search.get("hidden_gem_mode", False)
+        football_mode   = search.get("football_mode", False)
+        lego_sw_mode    = search.get("lego_sw_mode", False)
+        carhartt_mode   = search.get("carhartt_mode", False)
 
         for item in items:
             try:
-                item_id = item["id"]
+                item_id = item.get("id", "")
+                title   = item.get("title", "")
+                href    = item.get("url", "")
+                price   = item.get("price")
+
                 if not item_id or item_id in seen:
                     cnt_seen += 1
                     continue
-
-                title = item["title"]
-                if not title:
+                if not title or not href:
                     continue
-
-                href  = item["url"]
-                price = item["price"]
-
                 if not price or price < search.get("min_price", 1):
                     cnt_price += 1
                     continue
 
+                # filtr słów kluczowych (tryb normalny)
+                if not hidden_gem_mode and not lego_sw_mode and not carhartt_mode and not football_mode:
+                    keywords = search.get("keywords", [])
+                    if keywords and not any(kw.lower() in title.lower() for kw in keywords):
+                        cnt_kw += 1
+                        continue
+
+                # ocena cenowa
+                steal_threshold = STEAL_PRICES.get(search["category"], 9999)
+                is_steal_price  = price <= steal_threshold
+                is_below_market = False
+                discount_pct    = 0
+                if market_price and market_price > 0:
+                    discount_pct    = (1 - price / market_price) * 100
+                    is_below_market = discount_pct >= MIN_DISCOUNT_PCT
+
+                # typo
+                typo_brand, typo_found = detect_typo_brand(title)
+                has_typo = typo_brand is not None
+
+                # walidacje specjalne
+                lego_sw_valid, lego_sw_score, lego_sw_reasons, lego_set_info = False, 0, [], {}
+                if lego_sw_mode:
+                    lego_sw_valid, lego_sw_score, lego_sw_reasons, lego_set_info = validate_lego_sw(title, None, None)
+
+                football_valid, football_reasons = False, []
+                if football_mode:
+                    football_valid, football_reasons = validate_football_jersey(title, None, None)
+
+                carhartt_valid, carhartt_reasons, carhartt_model_name, carhartt_max = False, [], None, 0
+                if carhartt_mode:
+                    cv, cm, cmax, cr = validate_carhartt(title, None, search.get("model"))
+                    if cv and price <= cmax:
+                        carhartt_valid, carhartt_model_name, carhartt_max, carhartt_reasons = True, cm, cmax, cr
+
+                # AI (tylko hidden gem)
+                is_hidden_gem, ai_brand, ai_reason, mismatch = False, None, "", False
+                if ANTHROPIC_KEY and hidden_gem_mode:
+                    img_url, desc = get_item_details(href)
+                    ai_res = analyze_with_ai(title, desc, img_url)
+                    if ai_res:
+                        is_hidden_gem = ai_res.get("is_hidden_gem", False)
+                        if ai_res.get("confidence", 0) < MIN_AI_CONFIDENCE:
+                            is_hidden_gem = False
+                        ai_brand  = ai_res.get("detected_brand")
+                        ai_reason = ai_res.get("reason", "")
+                        mismatch  = ai_res.get("mismatch", False)
+
+                # finalna decyzja
+                qualifies = (
+                    is_steal_price or is_below_market or has_typo or is_hidden_gem
+                    or (lego_sw_mode  and lego_sw_valid)
+                    or (football_mode and football_valid)
+                    or (carhartt_mode and carhartt_valid)
+                )
+                if not qualifies:
+                    cnt_rejected += 1
+                    continue
+
+                reasons = []
+                if lego_sw_valid:      reasons += lego_sw_reasons[:3]
+                if football_valid:     reasons += football_reasons[:3]
+                if carhartt_valid:     reasons.append(f"✅ model: {carhartt_model_name} | próg ≤{carhartt_max} zł")
+                if has_typo:           reasons.append(f"błędna pisownia: '{typo_found}' → {typo_brand}")
+                if mismatch:           reasons.append("zdjęcie ≠ opis (AI)")
+                if is_below_market:    reasons.append(f"-{discount_pct:.0f}% od mediany")
+                if is_steal_price:     reasons.append(f"cena steal <{steal_threshold} zł")
+                if ai_reason:          reasons.append(ai_reason)
+
+                found.append({
+                    "id": item_id, "title": title, "link": href,
+                    "price": price, "market_price": market_price,
+                    "discount_pct": discount_pct,
+                    "is_steal": is_steal_price, "is_below": is_below_market,
+                    "has_typo": has_typo, "typo_brand": typo_brand if has_typo else None,
+                    "is_hidden_gem": is_hidden_gem, "mismatch": mismatch,
+                    "ai_brand": ai_brand, "reasons": reasons,
+                    "lego_sw_valid": lego_sw_valid, "lego_sw_score": lego_sw_score,
+                    "lego_set_info": lego_set_info,
+                    "football_valid": football_valid,
+                    "carhartt_valid": carhartt_valid,
+                    "carhartt_model": carhartt_model_name,
+                    "carhartt_max": carhartt_max,
+                })
+
             except Exception as e:
-                print(f"  ⚠️ Błąd parsowania itemu: {e}")
+                print(f"  ⚠️ item error: {e}")
                 continue
-
-            hidden_gem_mode = search.get("hidden_gem_mode", False)
-            football_mode   = search.get("football_mode", False)
-            lego_sw_mode    = search.get("lego_sw_mode", False)
-            carhartt_mode   = search.get("carhartt_mode", False)
-
-            # ── Tryb normalny: filtr słów kluczowych ──
-            if not hidden_gem_mode and not lego_sw_mode and not carhartt_mode:
-                keywords = search.get("keywords", [])
-                if keywords and not any(kw.lower() in title.lower() for kw in keywords):
-                    cnt_kw += 1
-                    continue
-
-            football_mode = search.get("football_mode", False)
-
-            # ── Tryb koszulek retro ──
-            if football_mode:
-                keywords = search.get("keywords", [])
-                if keywords and not any(kw.lower() in title.lower() for kw in keywords):
-                    continue
-                if any(rep in title.lower() for rep in REPLICA_KEYWORDS):
-                    continue
-
-            # ── Ocena okazji cenowej ──
-            steal_threshold = STEAL_PRICES.get(search["category"], 9999)
-            is_steal_price  = price <= steal_threshold
-            is_below_market = False
-            discount_pct    = 0
-            if market_price and market_price > 0:
-                discount_pct    = (1 - price / market_price) * 100
-                is_below_market = discount_pct >= MIN_DISCOUNT_PCT
-
-            # ── Detekcja błędnej pisowni ──
-            typo_brand, typo_found = detect_typo_brand(title)
-            has_typo = typo_brand is not None
-
-            # ── AI analiza (tylko hidden gem i typo) ──
-            ai_result     = None
-            is_hidden_gem = False
-            ai_reason     = ""
-            ai_brand      = None
-            mismatch      = False
-            item_image_url   = None
-            item_description = None
-
-            if ANTHROPIC_KEY and hidden_gem_mode:
-                item_image_url, item_description = get_item_details(href)
-                ai_result = analyze_with_ai(title, item_description, item_image_url)
-                if ai_result:
-                    is_hidden_gem = ai_result.get("is_hidden_gem", False)
-                    ai_confidence = ai_result.get("confidence", 0)
-                    ai_reason     = ai_result.get("reason", "")
-                    ai_brand      = ai_result.get("detected_brand")
-                    mismatch      = ai_result.get("mismatch", False)
-                    if is_hidden_gem and ai_confidence < MIN_AI_CONFIDENCE:
-                        is_hidden_gem = False
-
-            # ── Walidacja LEGO Star Wars ──
-            lego_sw_valid   = False
-            lego_sw_score   = 0
-            lego_sw_reasons = []
-            lego_set_info   = {}
-            if lego_sw_mode:
-                lego_sw_valid, lego_sw_score, lego_sw_reasons, lego_set_info = validate_lego_sw(
-                    title, item_description, ai_result
-                )
-
-            # ── Walidacja koszulki retro ──
-            football_valid   = False
-            football_reasons = []
-            if football_mode:
-                football_valid, football_reasons = validate_football_jersey(
-                    title, item_description, ai_result
-                )
-
-            # ── Walidacja Carhartt ──
-            carhartt_valid   = False
-            carhartt_reasons = []
-            if carhartt_mode:
-                carhartt_valid, carhartt_reasons = validate_carhartt(
-                    title, item_description, search
-                )
-
-            # ── Finalna decyzja ──
-            qualifies = (
-                is_steal_price
-                or is_below_market
-                or has_typo
-                or is_hidden_gem
-                or (lego_sw_mode and lego_sw_valid)
-                or (football_mode and football_valid)
-                or (carhartt_mode and carhartt_valid)
-            )
-
-            if not qualifies:
-                cnt_no_qualify += 1
-                continue
-
-            # Ustal powód alertu
-            reasons = []
-            if lego_sw_valid:
-                reasons += lego_sw_reasons[:4]
-            if football_valid:
-                reasons += football_reasons
-            if carhartt_valid:
-                reasons += carhartt_reasons
-            if has_typo:
-                reasons.append(f"błędna pisownia: '{typo_found}' → {typo_brand}")
-            if mismatch:
-                reasons.append("zdjęcie ≠ opis (AI)")
-            if ai_brand and ai_brand.lower() not in title.lower():
-                reasons.append(f"AI rozpoznało: {ai_brand}")
-            if is_below_market:
-                reasons.append(f"-{discount_pct:.0f}% od mediany")
-            if is_steal_price:
-                reasons.append(f"cena steal <{steal_threshold} zł")
-            if ai_reason:
-                reasons.append(ai_reason)
-
-            found.append({
-                "id":               item_id,
-                "title":            title,
-                "link":             href,
-                "price":            price,
-                "market_price":     market_price,
-                "discount_pct":     discount_pct,
-                "is_steal":         is_steal_price,
-                "is_below":         is_below_market,
-                "has_typo":         has_typo,
-                "typo_brand":       typo_brand,
-                "is_hidden_gem":    is_hidden_gem,
-                "mismatch":         mismatch,
-                "ai_brand":         ai_brand,
-                "reasons":          reasons,
-                "lego_sw_valid":    lego_sw_valid,
-                "lego_sw_score":    lego_sw_score,
-                "lego_set_info":    lego_set_info,
-                "football_valid":   football_valid,
-                "carhartt_valid":   carhartt_valid,
-            })
 
     except Exception as e:
         print(f"Błąd check_search [{search['name']}]: {e}")
 
-    if cnt_seen or cnt_price or cnt_kw or cnt_no_qualify:
-        print(f"  📊 Odrzucono: już widziane={cnt_seen} brak_ceny={cnt_price} brak_słów={cnt_kw} nie_spełnia={cnt_no_qualify}")
-
+    print(f"  📊 widziane={cnt_seen} brak_ceny={cnt_price} brak_słów={cnt_kw} odrzucone={cnt_rejected} wysłane={len(found)}")
     return found
+
 
 # ─────────────────────────────────────────
 #  ✉️ FORMAT WIADOMOŚCI
