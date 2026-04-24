@@ -1,4 +1,3 @@
-
 import requests
 import time
 import os
@@ -199,51 +198,314 @@ SW_INCOMPLETE_KEYWORDS = [
 # ─────────────────────────────────────────
 
 # Lata które uznajemy za "retro"
-RETRO_DECADES = ["70", "80", "90", "1970", "1980", "1990",
-                 "1991", "1992", "1993", "1994", "1995",
-                 "1996", "1997", "1998", "1999", "2000",
-                 "2001", "2002", "2003", "vintage", "retro",
-                 "stara", "klasyk", "klasyczna", "kolekcjonerska"]
+RETRO_DECADES = [
+    # Lata jako ciągi (pasuje do "1994/95", "94-95" itp.)
+    "1970", "1971", "1972", "1973", "1974", "1975", "1976", "1977", "1978", "1979",
+    "1980", "1981", "1982", "1983", "1984", "1985", "1986", "1987", "1988", "1989",
+    "1990", "1991", "1992", "1993", "1994", "1995", "1996", "1997", "1998", "1999",
+    "2000", "2001", "2002", "2003",
+    # Skróty dekad
+    "70s", "80s", "90s", "00s", "70'", "80'", "90'",
+    # Słowa kluczowe
+    "vintage", "retro", "classic", "klasyczna", "klasyk",
+    "stara", "kolekcjonerska", "historyczna", "archival",
+    "throwback", "heritage", "old school",
+]
 
-# Marki oryginałów (repliki odrzucamy)
+# ─────────────────────────────────────────
+#  ⚽ PRODUCENCI KITÓW — oryginalne marki
+# ─────────────────────────────────────────
 FOOTBALL_ORIGINAL_BRANDS = [
-    "adidas", "nike", "umbro", "lotto", "kappa", "puma",
-    "reebok", "diadora", "le coq sportif", "hummel",
-    "errea", "patrick", "uhlsport",
+    # Wielka trójka
+    "adidas", "nike", "puma",
+    # Klasyczne marki retro
+    "umbro", "lotto", "kappa", "reebok",
+    "diadora", "le coq sportif", "hummel",
+    "errea", "uhlsport", "patrick",
+    # Inne autentyczne
+    "score draw", "admiral", "bukta",
+    "ribero", "hafnia", "uhlsport",
+    "fila", "asics", "mizuno",
+    "new balance", "macron", "joma",
+    "castore", "warrior", "burrda",
 ]
 
 # Słowa sugerujące replikę → odrzucamy
 REPLICA_KEYWORDS = [
     "replika", "replica", "kopia", "podróbka", "nieoryginalna",
-    "chiński", "chińska", "fakes", "fake", "inspired",
+    "chiński", "chińska", "fakes", "fake", "inspired", "bootleg",
 ]
 
-# Kluby i reprezentacje których szukamy
-FOOTBALL_CLUBS = [
-    # Serie A
-    "ac milan", "milan", "inter milan", "inter", "juventus", "juve",
-    "as roma", "roma", "napoli", "lazio", "fiorentina", "parma",
-    # La Liga
-    "real madryt", "real madrid", "barcelona", "barca", "atletico",
-    "sevilla", "valencia", "deportivo",
-    # Premier League
-    "manchester united", "man utd", "liverpool", "arsenal",
-    "chelsea", "tottenham", "spurs", "newcastle", "leeds",
-    "aston villa", "everton", "blackburn",
-    # Bundesliga
-    "borussia", "dortmund", "bvb", "bayern", "schalke",
-    # Francja
-    "paris saint germain", "psg", "marseille", "om",
-    # Polska
-    "legia", "lech", "wisla", "wisła", "górnik", "gornik",
-    # Reprezentacje
-    "polska", "poland", "niemcy", "niemiec", "germany",
-    "włochy", "wlochy", "italia", "italy",
-    "francja", "france", "brazylia", "brazil", "brasil",
-    "argentyna", "argentina", "anglia", "england",
-    "hiszpania", "spain", "holandia", "netherlands",
-    "portugalia", "portugal", "chorwacja", "croatia",
+# ─────────────────────────────────────────
+#  ⚽ BAZA KLUBÓW I REPREZENTACJI
+#  Każdy wpis = jedna forma nazwy jaką
+#  sprzedający może wpisać na Vinted
+# ─────────────────────────────────────────
+
+# ── SERIE A / WŁOCHY ─────────────────────
+_SERIE_A = [
+    "ac milan", "milan", "rossoneri",
+    "inter milan", "inter", "internazionale", "nerazzurri",
+    "juventus", "juve", "bianconeri",
+    "as roma", "roma", "giallorossi",
+    "napoli", "partenopei",
+    "lazio", "biancocelesti",
+    "fiorentina", "viola",
+    "parma", "crociati",
+    "sampdoria", "samp",
+    "atalanta", "bergamo",
+    "torino",
+    "udinese",
+    "bologna",
+    "genoa",
+    "cagliari",
+    "palermo",
+    "bari",
+    "reggiana",
+    "piacenza",
+    "venezia",
+    "brescia",
+    "lecce",
 ]
+
+# ── LA LIGA / HISZPANIA ───────────────────
+_LA_LIGA = [
+    "real madrid", "real madryt", "madrytu", "los blancos", "merengues",
+    "barcelona", "barca", "blaugrana", "barca",
+    "atletico madrid", "atletico", "atletico de madrid", "colchoneros",
+    "sevilla", "sevillistas",
+    "valencia", "che",
+    "deportivo", "deportivo la coruna", "galicia",
+    "real sociedad",
+    "athletic bilbao", "athletic club", "leones",
+    "villarreal", "submarino amarillo",
+    "betis", "real betis",
+    "celta vigo", "celta",
+    "rayo vallecano", "rayo",
+    "racing santander",
+    "real zaragoza", "zaragoza",
+    "mallorca",
+    "osasuna",
+    "alaves",
+    "espanyol",
+]
+
+# ── PREMIER LEAGUE / ANGLIA ───────────────
+_PREMIER_LEAGUE = [
+    "manchester united", "man utd", "man united", "red devils", "united",
+    "liverpool", "reds", "anfield",
+    "arsenal", "gunners",
+    "chelsea", "blues",
+    "tottenham", "spurs", "tottenham hotspur",
+    "manchester city", "man city", "citizens",
+    "newcastle", "newcastle united", "magpies",
+    "leeds", "leeds united", "whites",
+    "aston villa", "villa",
+    "everton", "toffees",
+    "blackburn", "blackburn rovers",
+    "west ham", "hammers",
+    "nottingham forest", "forest",
+    "leicester", "leicester city", "foxes",
+    "coventry", "coventry city",
+    "sheffield wednesday", "sheffield united",
+    "bolton", "bolton wanderers",
+    "ipswich",
+    "sunderland",
+    "middlesbrough",
+    "derby", "derby county",
+    "southampton", "saints",
+    "wimbledon",
+    "crystal palace",
+    "charlton",
+    "bradford",
+    "watford",
+    "fulham",
+]
+
+# ── BUNDESLIGA / NIEMCY ───────────────────
+_BUNDESLIGA = [
+    "bayern", "bayern munich", "bayern münchen", "fcb", "rekordmeister",
+    "borussia dortmund", "dortmund", "bvb",
+    "borussia monchengladbach", "gladbach", "fohlen",
+    "schalke", "schalke 04", "knappen",
+    "werder bremen", "werder", "bremen",
+    "hamburger sv", "hsv", "hamburg",
+    "bayer leverkusen", "leverkusen",
+    "vfb stuttgart", "stuttgart",
+    "eintracht frankfurt", "frankfurt",
+    "kaiserslautern", "lautern",
+    "1860 münchen", "1860 munich",
+    "karlsruher sc",
+    "vfl wolfsburg", "wolfsburg",
+    "rb leipzig", "leipzig",
+    "hertha berlin", "hertha",
+    "fc köln", "koln", "cologne",
+    "fortuna düsseldorf",
+    "mönchengladbach",
+]
+
+# ── LIGUE 1 / FRANCJA ────────────────────
+_LIGUE_1 = [
+    "paris saint-germain", "paris saint germain", "psg",
+    "marseille", "om", "olympique marseille",
+    "monaco", "as monaco",
+    "lyon", "olympique lyonnais", "ol",
+    "bordeaux",
+    "lens",
+    "lille", "losc",
+    "nantes", "fc nantes",
+    "saint-etienne", "saint etienne", "asse",
+    "rennes", "stade rennais",
+    "auxerre", "aja",
+    "metz",
+    "nice", "ogc nice",
+    "strasbourg",
+    "toulouse",
+    "montpellier",
+    "reims",
+    "gueugnon",
+    "troyes",
+]
+
+# ── HOLANDIA / EREDIVISIE ─────────────────
+_EREDIVISIE = [
+    "ajax", "ajax amsterdam", "ajacieden",
+    "psv", "psv eindhoven",
+    "feyenoord", "feyenoord rotterdam",
+    "vitesse",
+    "az alkmaar", "az",
+    "fc twente", "twente",
+    "utrecht", "fc utrecht",
+]
+
+# ── SZKOCJA ───────────────────────────────
+_SCOTLAND = [
+    "celtic", "bhoys",
+    "rangers", "gers",
+    "aberdeen",
+    "hearts",
+    "hibernian", "hibs",
+    "dundee united",
+    "motherwell",
+]
+
+# ── PORTUGALIA ────────────────────────────
+_PORTUGAL = [
+    "benfica", "sl benfica", "aguias",
+    "porto", "fc porto", "dragoes",
+    "sporting", "sporting cp", "sporting lisbon", "leoes",
+    "boavista",
+    "braga",
+]
+
+# ── BELGIA ────────────────────────────────
+_BELGIUM = [
+    "anderlecht", "rsc anderlecht",
+    "club brugge", "brugge",
+    "standard liege", "standard",
+]
+
+# ── POLSKA ────────────────────────────────
+_POLAND_CLUBS = [
+    "legia", "legia warszawa",
+    "lech", "lech poznan", "kolejorz",
+    "wisla", "wisła", "wisla krakow",
+    "gornik", "górnik", "gornik zabrze",
+    "cracovia",
+    "ruch chorzow", "ruch",
+    "zaglebie", "zagłębie",
+    "slask", "śląsk", "slask wroclaw",
+    "widzew", "widzew lodz",
+    "gks katowice", "gks",
+    "arka gdynia", "arka",
+    "jagiellonia",
+]
+
+# ── REPREZENTACJE NARODOWE ────────────────
+_NATIONAL_TEAMS = [
+    # Polska
+    "polska", "poland", "reprezentacja polski",
+    # Niemcy
+    "niemcy", "niemiec", "germany", "deutschland", "mannschaft",
+    # Włochy
+    "włochy", "wlochy", "italia", "italy", "azzurri",
+    # Francja
+    "francja", "france", "les bleus",
+    # Brazylia
+    "brazylia", "brazil", "brasil", "selecao", "seleção",
+    # Argentyna
+    "argentyna", "argentina", "albiceleste",
+    # Anglia
+    "anglia", "england", "three lions",
+    # Hiszpania
+    "hiszpania", "spain", "espana", "españa", "la roja",
+    # Holandia
+    "holandia", "netherlands", "holland", "oranje",
+    # Portugalia
+    "portugalia", "portugal",
+    # Chorwacja
+    "chorwacja", "croatia", "hrvatska",
+    # Czechy
+    "czechy", "czech republic", "czechia",
+    # Belgia
+    "belgia", "belgium", "red devils",
+    # Dania
+    "dania", "denmark",
+    # Szwecja
+    "szwecja", "sweden",
+    # Norwegia
+    "norwegia", "norway",
+    # Rumunia
+    "rumunia", "romania",
+    # Rosja
+    "rosja", "russia",
+    # Turcja
+    "turcja", "turkey",
+    # Meksyk
+    "meksyk", "mexico",
+    # USA
+    "usa", "united states", "usmnt",
+    # Japonia
+    "japonia", "japan",
+    # Korea
+    "korea", "south korea",
+    # Kamerun
+    "kamerun", "cameroon",
+    # Nigeria
+    "nigeria",
+    # Senegal
+    "senegal",
+    # Wybrzeże Kości Słoniowej
+    "ivory coast", "cote d'ivoire",
+    # Urugwaj
+    "urugwaj", "uruguay",
+    # Kolumbia
+    "kolumbia", "colombia",
+    # Chile
+    "chile",
+    # Szkocja
+    "szkocja", "scotland",
+    # Irlandia
+    "irlandia", "ireland", "republic of ireland",
+    # Walia
+    "walia", "wales",
+]
+
+# ── PUCHARY / TURNIEJE ────────────────────
+_TOURNAMENTS = [
+    "world cup", "mistrzostwa swiata", "mistrzostwa świata",
+    "euro", "mistrzostwa europy",
+    "champions league", "liga mistrzow", "liga mistrzów",
+    "copa america",
+    "africa cup", "afcon",
+]
+
+# ── ŁĄCZYMY WSZYSTKO ─────────────────────
+FOOTBALL_CLUBS = (
+    _SERIE_A + _LA_LIGA + _PREMIER_LEAGUE + _BUNDESLIGA +
+    _LIGUE_1 + _EREDIVISIE + _SCOTLAND + _PORTUGAL +
+    _BELGIUM + _POLAND_CLUBS + _NATIONAL_TEAMS + _TOURNAMENTS
+)
 
 # ─────────────────────────────────────────
 #  🔤 SŁOWNIK BŁĘDNYCH PISOWNI
@@ -356,11 +618,18 @@ SEARCHES = [
     },
     # ── KOSZULKI PIŁKARSKIE RETRO ────────────
     {
-        "name":     "Koszulki retro — kluby (Serie A / La Liga / PL)",
+        "name":     "Koszulki retro — Serie A / La Liga",
         "url":      "https://www.vinted.pl/catalog?search_text=koszulka+pilkarska+vintage&catalog[]=4&order=newest_first&currency=PLN&price_to=150",
         "category": "football",
         "keywords": ["koszulka", "jersey", "shirt"],
-        "brands":   FOOTBALL_ORIGINAL_BRANDS,
+        "min_price": 20,
+        "football_mode": True,
+    },
+    {
+        "name":     "Koszulki retro — Premier League",
+        "url":      "https://www.vinted.pl/catalog?search_text=football+shirt+retro+vintage&catalog[]=4&order=newest_first&currency=PLN&price_to=150",
+        "category": "football",
+        "keywords": ["shirt", "jersey", "koszulka"],
         "min_price": 20,
         "football_mode": True,
     },
@@ -368,8 +637,7 @@ SEARCHES = [
         "name":     "Koszulki retro — reprezentacje",
         "url":      "https://www.vinted.pl/catalog?search_text=koszulka+reprezentacja+retro&catalog[]=4&order=newest_first&currency=PLN&price_to=150",
         "category": "football",
-        "keywords": ["reprezentacja", "national", "koszulka"],
-        "brands":   FOOTBALL_ORIGINAL_BRANDS,
+        "keywords": ["koszulka", "jersey", "shirt", "reprezentacja"],
         "min_price": 20,
         "football_mode": True,
     },
@@ -377,8 +645,7 @@ SEARCHES = [
         "name":     "Umbro / Lotto / Kappa retro",
         "url":      "https://www.vinted.pl/catalog?search_text=umbro+koszulka+pilkarska&catalog[]=4&order=newest_first&currency=PLN&price_to=150",
         "category": "football",
-        "keywords": ["umbro", "lotto", "kappa", "koszulka"],
-        "brands":   FOOTBALL_ORIGINAL_BRANDS,
+        "keywords": ["umbro", "lotto", "kappa", "koszulka", "jersey"],
         "min_price": 15,
         "football_mode": True,
     },
