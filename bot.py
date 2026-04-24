@@ -458,42 +458,33 @@ def save_seen(seen):
 # ─────────────────────────────────────────
 #  📤 TELEGRAM
 # ─────────────────────────────────────────
-def fetch_photo_url(item_link):
-    """Pobiera URL zdjęcia ze strony oferty przez og:image."""
+def get_vinted_thumb(item_url, item_id):
+    """
+    Buduje URL miniaturki Vinted na podstawie item_id.
+    Vinted serwuje zdjęcia pod stałym wzorcem URL.
+    Zwraca URL lub None.
+    """
+    # Próbuj wyciągnąć numer zdjęcia z URL oferty
+    # Format: /items/1234567890-nazwa → ID = 1234567890
     try:
-        r = requests.get(item_link, headers=get_headers(), timeout=10)
-        if r.status_code != 200:
-            return None
-        # og:image jest zawsze obecne na stronie oferty
-        m = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', r.text)
-        if m:
-            return m.group(1)
-        # Alternatywna kolejność atrybutów
-        m = re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']', r.text)
-        if m:
-            return m.group(1)
+        # Vinted CDN — standardowy wzorzec
+        # https://images1.vinted.net/t/03_XXXXX/f800/TIMESTAMP_ITEMID_HASH.jpeg
+        # Nie da się przewidzieć bez API, więc zwracamy None
+        return None
     except:
-        pass
-    return None
+        return None
 
-
-_last_tg_send = 0.0
-TG_MIN_INTERVAL = 2.0   # min 2 sekundy między wiadomościami
 
 def send_message(text, photo_url=None, item_link=None):
-    """Wysyła wiadomość ze zdjęciem jeśli dostępne."""
+    """Wysyła wiadomość — ze zdjęciem jeśli dostępne."""
     global _last_tg_send
     tg_base = f"https://api.telegram.org/bot{TOKEN}"
 
-    # Rate limiting — nie wysyłaj częściej niż co 2 sekundy
     elapsed = time.time() - _last_tg_send
     if elapsed < TG_MIN_INTERVAL:
         time.sleep(TG_MIN_INTERVAL - elapsed)
 
     clean = re.sub(r'<[^>]+>', '', text)
-
-    # Nie pobieramy zdjęcia przez fetch — to powoduje 403 na Vinted
-    # Używamy tylko photo_url z JSON (jeśli Vinted je zwróci)
 
     try:
         if photo_url:
@@ -506,22 +497,21 @@ def send_message(text, photo_url=None, item_link=None):
                 _last_tg_send = time.time()
                 return
             if r.status_code == 429:
-                # Poczekaj i wyślij tekst
                 time.sleep(5)
-            # Fallthrough do tekstu
 
-        # Tekst
+        # Tekst z linkiem — Telegram auto-preview pokaże zdjęcie z og:image
         r = requests.post(f"{tg_base}/sendMessage", data={
             "chat_id":                  CHAT_ID,
             "text":                     clean[:4096],
-            "disable_web_page_preview": False,
+            "disable_web_page_preview": False,  # False = pokaż preview ze zdjęciem
         }, timeout=10)
 
         if r.status_code == 429:
             time.sleep(5)
             requests.post(f"{tg_base}/sendMessage", data={
-                "chat_id": CHAT_ID,
-                "text":    clean[:4096],
+                "chat_id":                  CHAT_ID,
+                "text":                     clean[:4096],
+                "disable_web_page_preview": False,
             }, timeout=10)
 
         _last_tg_send = time.time()
@@ -1213,46 +1203,41 @@ def validate_football_jersey(title, description, ai_result):
 # ─────────────────────────────────────────
 #  🧥 WALIDACJA CARHARTT
 # ─────────────────────────────────────────
-def validate_carhartt(title, description, search_model):
+def validate_carhartt(title, description, search):
     """
     Zwraca (is_valid, model_name, max_price, reasons)
+    search = słownik wyszukiwania z carhartt_models i carhartt_max_price
     """
     text = (title + " " + (description or "")).lower()
 
+    # Musi zawierać Carhartt (lub typo)
     if "carhartt" not in text:
         typo_brand, _ = detect_typo_brand(text)
         if typo_brand != "carhartt":
             return False, None, 0, ["brak marki Carhartt"]
 
-    # Wykryj model
-    detected_model = None
-    max_price      = 0
-    reasons        = []
+    # Pobierz listę modeli i próg cenowy z wyszukiwania
+    required_models = search.get("carhartt_models", [])
+    max_price       = search.get("carhartt_max_price", 250)
 
-    for model_name, model_info in CARHARTT_MODELS.items():
-        if any(kw in text for kw in model_info["keywords"]):
-            detected_model = model_name
-            max_price      = model_info["max_price"]
-            reasons.append(f"✅ model: {model_name.replace('_',' ').title()}")
+    # Sprawdź czy oferta zawiera jeden z wymaganych modeli
+    detected_model = None
+    for model_kw in required_models:
+        if model_kw in text:
+            detected_model = model_kw
             break
 
     if not detected_model:
-        for other in CARHARTT_OTHER:
-            if other in text:
-                detected_model = "other"
-                max_price      = 200
-                reasons.append(f"✅ model: {other}")
-                break
+        if required_models:
+            # Wyszukiwanie wymaga konkretnego modelu — odrzuć
+            return False, None, 0, [f"brak modelu ({', '.join(required_models[:3])})"]
+        else:
+            detected_model = "carhartt"
 
-    if not detected_model:
-        detected_model = "generic"
-        max_price      = 200
-        reasons.append("ℹ️ ogólna kurtka Carhartt")
-
-    # Sprawdź czy search wymaga konkretnego modelu
-    if search_model and search_model != "other" and detected_model != search_model:
-        return False, None, 0, [f"szukany: {search_model}, znaleziono: {detected_model}"]
-
+    reasons = [
+        f"✅ Carhartt {detected_model}",
+        f"✅ cena ≤ {max_price} zł",
+    ]
     return True, detected_model, max_price, reasons
 
 
@@ -1360,7 +1345,7 @@ def check_search(search, seen, market_price):
 
                 carhartt_valid, carhartt_reasons, carhartt_model_name, carhartt_max = False, [], None, 0
                 if carhartt_mode:
-                    cv, cm, cmax, cr = validate_carhartt(title, None, search.get("model"))
+                    cv, cm, cmax, cr = validate_carhartt(title, None, search)
                     if cv and price <= cmax:
                         carhartt_valid, carhartt_model_name, carhartt_max, carhartt_reasons = True, cm, cmax, cr
 
