@@ -459,20 +459,11 @@ def save_seen(seen):
 #  📤 TELEGRAM
 # ─────────────────────────────────────────
 def get_vinted_thumb(item_url, item_id):
-    """
-    Buduje URL miniaturki Vinted na podstawie item_id.
-    Vinted serwuje zdjęcia pod stałym wzorcem URL.
-    Zwraca URL lub None.
-    """
-    # Próbuj wyciągnąć numer zdjęcia z URL oferty
-    # Format: /items/1234567890-nazwa → ID = 1234567890
-    try:
-        # Vinted CDN — standardowy wzorzec
-        # https://images1.vinted.net/t/03_XXXXX/f800/TIMESTAMP_ITEMID_HASH.jpeg
-        # Nie da się przewidzieć bez API, więc zwracamy None
-        return None
-    except:
-        return None
+    return None
+
+
+_last_tg_send   = 0.0
+TG_MIN_INTERVAL = 2.0
 
 
 def send_message(text, photo_url=None, item_link=None):
