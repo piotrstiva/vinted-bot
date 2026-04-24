@@ -1,3 +1,4 @@
+
 import requests
 import time
 import os
@@ -901,8 +902,31 @@ def parse_items_from_html(html):
 # ─────────────────────────────────────────
 #  🖼️ POBIERANIE SZCZEGÓŁÓW OFERTY (HTML)
 # ─────────────────────────────────────────
-def get_item_details(item_url):
-    """Zwraca (image_url, description) ze strony HTML oferty."""
+def get_item_photo(item_id, item_url):
+    """
+    Pobiera URL zdjęcia oferty przez Vinted API.
+    Zwraca URL zdjęcia lub None.
+    """
+    try:
+        api_url = f"https://www.vinted.pl/api/v2/items/{item_id}"
+        r = requests.get(api_url, headers={
+            **get_headers(),
+            "Accept": "application/json, text/plain, */*",
+            "X-Requested-With": "XMLHttpRequest",
+        }, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            item = data.get("item", {})
+            photos = item.get("photos", [])
+            if photos:
+                # Weź pierwsze zdjęcie, preferuj full_size_url
+                p = photos[0]
+                url = p.get("full_size_url") or p.get("url") or p.get("thumb_url")
+                if url:
+                    return url
+    except:
+        pass
+    return None
     try:
         r = vinted_fetch(item_url, label="item_details")
         if not r:
@@ -1513,34 +1537,102 @@ def format_message(search, item):
         for r in reasons[:2]:
             lines.append(f"• {r}")
 
-    lines.append("")
-    lines.append(f"🔗 {link}")
+    # ── Separator i nagłówek kategorii ──
+    CAT_LABEL = {
+        "sneakers": "👟 Sneakersy",
+        "clothing": "👕 Ubrania",
+        "lego":     "🧱 LEGO",
+        "lego_sw":  "⭐ LEGO Star Wars",
+        "funko":    "🎭 Funko Pop",
+        "football": "⚽ Koszulka Retro",
+        "carhartt": "🧥 Carhartt",
+    }
+    cat_label = CAT_LABEL.get(search["category"], "🛍")
+
+    # ── Typ alertu ──
+    if disc >= 60:
+        alert = f"🚨 MEGA OKAZJA  •  -{disc:.0f}% taniej"
+    elif disc >= 40:
+        alert = f"🔥 OKAZJA  •  -{disc:.0f}% taniej"
+    elif item.get("has_typo"):
+        alert = f"🔤 Błędna pisownia → {(item.get('typo_brand') or '').upper()}"
+    elif item.get("is_hidden_gem"):
+        alert = "💎 Hidden Gem"
+    elif search.get("lego_sw_mode") and item.get("lego_sw_score", 0) >= 70:
+        alert = "🚀 Kultowy set!"
+    elif search.get("football_mode"):
+        alert = "⚽ Oryginał retro"
+    elif search.get("carhartt_mode"):
+        model = (item.get("carhartt_model") or "").replace("_", " ").title()
+        alert = f"🧥 Carhartt {model}".strip()
+    else:
+        alert = "💸 Niska cena"
+
+    # ── Tytuł oferty — usuń "marka: X, stan: Y, rozmiar: Z" ──
+    clean_title = re.sub(r',?\s*(marka|stan|rozmiar):.*', '', title, flags=re.IGNORECASE).strip()
+    if not clean_title:
+        clean_title = title[:80]
+
+    # ── Składaj wiadomość ──
+    lines = [
+        f"{'─'*30}",
+        f"{alert}",
+        f"{cat_label}",
+        f"{'─'*30}",
+        f"",
+        f"📦  {clean_title}",
+        f"",
+        f"💰  Cena:       {price:.0f} zł",
+    ]
+
+    if mp and mp > price:
+        lines.append(f"📊  Śr. rynkowa: {mp:.0f} zł")
+        lines.append(f"✂️   Oszczędzasz: ~{mp - price:.0f} zł")
+
+    # LEGO SW szczegóły
+    if search.get("lego_sw_mode"):
+        info = item.get("lego_set_info", {})
+        if info.get("set_number"):
+            lines.append(f"🔢  Set:         #{info['set_number']}")
+        if info.get("vehicle"):
+            lines.append(f"🚀  Pojazd:      {info['vehicle']}")
+        if info.get("character"):
+            lines.append(f"👤  Postać:      {info['character']}")
+        if info.get("minifigs"):
+            lines.append(f"🟡  Minifigurki: tak")
+        bl = info.get("bl_price_pln")
+        if bl and bl > price:
+            lines.append(f"🧱  BrickLink:   ~{bl:.0f} zł")
+            lines.append(f"💚  vs BL:       ~{bl - price:.0f} zł taniej")
 
     return "\n".join(lines)
+
 
 # ─────────────────────────────────────────
 #  🚀 GŁÓWNA PĘTLA
 # ─────────────────────────────────────────
 print("✅ BOT HIDDEN GEM FINDER URUCHOMIONY")
 
-# Wczytaj cache BrickLink i seen
 load_bricklink_cache()
 refresh_session()
 
 send_message(
-    "✅ <b>Vinted Hidden Gem Finder uruchomiony!</b>\n\n"
-    f"🔍 Monitoruję {len(SEARCHES)} wyszukiwań\n"
-    f"🤖 AI analiza: {'✅ aktywna' if ANTHROPIC_KEY else '⚠️ brak klucza'}\n"
-    f"🎯 Progi: -{MIN_DISCOUNT_PCT}% od mediany | ceny steal\n\n"
-    "📦 Kategorie:\n"
-    "  👟 Sneakersy | 👕 Ubrania\n"
-    "  🧱 LEGO ogólne | 🎭 Funko Pop\n"
-    "  ⭐ LEGO Star Wars (kompletne zestawy)\n"
-    "  ⚽ Koszulki retro 70s/80s/90s/2000s\n"
-    "  🧥 Carhartt: Trucker ≤150 zł | Santa Fe/Detroit/Active ≤250 zł\n"
-    "  💎 Hidden Gem (AI scan)\n\n"
-    "🔤 Detekcja typo: Nike/Adidas/Supreme/Carhartt...\n"
-    "⚽ Retro: tylko oryginały, bez replik"
+    "━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "🤖  VINTED BOT  •  ONLINE\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "\n"
+    f"📡  Monitoruję {len(SEARCHES)} wyszukiwań\n"
+    f"🎯  Próg okazji: -{MIN_DISCOUNT_PCT}% od mediany\n"
+    "\n"
+    "📦  Kategorie:\n"
+    "    👟  Nike / Adidas\n"
+    "    🧥  Carhartt (Trucker / Santa Fe / Detroit)\n"
+    "    🧱  LEGO  •  ⭐ LEGO Star Wars\n"
+    "    🎭  Funko Pop  •  🎭⭐ Funko Star Wars\n"
+    "    ⚽  Koszulki Retro 70s – 2003\n"
+    "    💎  Hidden Gem\n"
+    "\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━"
 )
 
 seen          = load_seen()
@@ -1575,7 +1667,11 @@ while True:
             now = time.time()
             for item in new_items[:MAX_ALERTS_PER_SEARCH]:
                 msg = format_message(search, item)
-                send_message(msg, photo_url=item.get("photo"), item_link=item.get("link"))
+                # Spróbuj pobrać zdjęcie przez API
+                photo = item.get("photo")
+                if not photo:
+                    photo = get_item_photo(item["id"], item["link"])
+                send_message(msg, photo_url=photo, item_link=item.get("link"))
                 seen[item["id"]] = now
                 tag = "💎" if item.get("is_hidden_gem") else ("🔤" if item.get("has_typo") else "✉️")
                 print(f"  {tag} {item['title'][:55]} | {item['price']:.0f} zł")
