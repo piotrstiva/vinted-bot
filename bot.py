@@ -1116,12 +1116,21 @@ def validate_lego_sw(title, description, ai_result):
             score   += 15
             reasons.append("🤖 AI potwierdza: Star Wars LEGO")
 
-    # Wymagamy: Star Wars w tekście + cokolwiek rozpoznane
-    has_sw = "star wars" in text or "starwars" in text or "gwiezdne wojny" in text
+    # Wymagamy WSZYSTKICH: Star Wars + LEGO + cokolwiek rozpoznane
+    has_sw   = "star wars" in text or "starwars" in text or "gwiezdne wojny" in text
+    has_lego = "lego" in text
     has_anything = found_set or found_vehicle or found_char
 
-    if not has_sw and not has_anything:
-        return False, 0, ["⛔ brak oznak Star Wars"], {}
+    if not has_sw:
+        return False, 0, ["⛔ brak 'star wars' w tytule"], {}
+    if not has_lego:
+        return False, 0, ["⛔ brak 'lego' w tytule"], {}
+    if not has_anything:
+        return False, 0, ["⛔ brak rozpoznanego setu/pojazdu/postaci"], {}
+
+    # Gry video — odrzuć
+    if any(g in text for g in ["nintendo", "xbox", "playstation", "ps4", "ps5", "nintendo ds", "nintendo switch", "pc game", "gra na "]):
+        return False, 0, ["⛔ gra video — odrzucono"], {}
 
     set_info = {
         "set_number":   found_set,
@@ -1129,7 +1138,7 @@ def validate_lego_sw(title, description, ai_result):
         "character":    found_char,
         "complete":     is_complete,
         "minifigs":     has_minifigs,
-        "bl_price_pln": None,  # wypełniane później w check_search
+        "bl_price_pln": None,
     }
 
     # Pobierz cenę BrickLink jeśli znamy numer setu
@@ -1138,10 +1147,10 @@ def validate_lego_sw(title, description, ai_result):
         if bl_price:
             set_info["bl_price_pln"] = bl_price
             reasons.append(f"🧱 BrickLink: ~{bl_price:.0f} zł")
-            score += 10  # bonus za potwierdzenie z BrickLink
+            score += 10
 
-    # Minimalne score żeby wysłać alert
-    is_valid = score >= 25
+    # Podnosimy próg — minimum 35 punktów
+    is_valid = score >= 35
     return is_valid, score, reasons, set_info
 
 
@@ -1369,14 +1378,23 @@ def check_search(search, seen, market_price):
                         mismatch  = ai_res.get("mismatch", False)
 
                 # finalna decyzja
-                qualifies = (
-                    is_steal_price or is_below_market or has_typo or is_hidden_gem
-                    or (lego_sw_mode  and lego_sw_valid)
-                    or (football_mode and football_valid)
-                    or (carhartt_mode and carhartt_valid)
-                    # hidden gem bez AI — wysyłaj tylko przy steal price
-                    or (hidden_gem_mode and not ANTHROPIC_KEY and is_steal_price)
-                )
+                if lego_sw_mode:
+                    # LEGO SW — tylko przez walidator, cena nie wystarczy
+                    qualifies = lego_sw_valid
+                elif football_mode:
+                    # Koszulki — tylko przez walidator
+                    qualifies = football_valid
+                elif carhartt_mode:
+                    qualifies = carhartt_valid
+                elif hidden_gem_mode and not ANTHROPIC_KEY:
+                    # Hidden gem bez AI — tylko steal price z keywords
+                    qualifies = is_steal_price or is_below_market
+                else:
+                    # Tryb normalny — cena + typo + AI
+                    qualifies = (
+                        is_steal_price or is_below_market
+                        or has_typo or is_hidden_gem
+                    )
                 if not qualifies:
                     cnt_rejected += 1
                     continue
