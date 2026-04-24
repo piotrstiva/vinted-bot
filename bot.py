@@ -483,8 +483,8 @@ TG_MIN_INTERVAL = 2.0
 
 
 def send_message(text, photo_url=None, item_link=None):
-    """Wysyła wiadomość — ze zdjęciem jeśli dostępne."""
     global _last_tg_send
+    import json as _json
     tg_base = f"https://api.telegram.org/bot{TOKEN}"
 
     elapsed = time.time() - _last_tg_send
@@ -493,33 +493,38 @@ def send_message(text, photo_url=None, item_link=None):
 
     clean = re.sub(r'<[^>]+>', '', text)
 
+    # Klikalny przycisk z linkiem do oferty
+    reply_markup = None
+    if item_link:
+        reply_markup = _json.dumps({
+            "inline_keyboard": [[{"text": "🔗 Otwórz na Vinted", "url": item_link}]]
+        })
+
     try:
+        sent = False
+
         if photo_url:
-            r = requests.post(f"{tg_base}/sendPhoto", data={
-                "chat_id": CHAT_ID,
-                "photo":   photo_url,
-                "caption": clean[:1024],
-            }, timeout=15)
+            data = {"chat_id": CHAT_ID, "photo": photo_url, "caption": clean[:1024]}
+            if reply_markup:
+                data["reply_markup"] = reply_markup
+            r = requests.post(f"{tg_base}/sendPhoto", data=data, timeout=15)
             if r.status_code == 200:
-                _last_tg_send = time.time()
-                return
-            if r.status_code == 429:
+                sent = True
+            elif r.status_code == 429:
                 time.sleep(5)
 
-        # Tekst z linkiem — Telegram auto-preview pokaże zdjęcie z og:image
-        r = requests.post(f"{tg_base}/sendMessage", data={
-            "chat_id":                  CHAT_ID,
-            "text":                     clean[:4096],
-            "disable_web_page_preview": False,  # False = pokaż preview ze zdjęciem
-        }, timeout=10)
-
-        if r.status_code == 429:
-            time.sleep(5)
-            requests.post(f"{tg_base}/sendMessage", data={
+        if not sent:
+            data = {
                 "chat_id":                  CHAT_ID,
                 "text":                     clean[:4096],
-                "disable_web_page_preview": False,
-            }, timeout=10)
+                "disable_web_page_preview": True,
+            }
+            if reply_markup:
+                data["reply_markup"] = reply_markup
+            r = requests.post(f"{tg_base}/sendMessage", data=data, timeout=10)
+            if r.status_code == 429:
+                time.sleep(5)
+                requests.post(f"{tg_base}/sendMessage", data=data, timeout=10)
 
         _last_tg_send = time.time()
 
@@ -1568,17 +1573,12 @@ while True:
             print(f"  ✔ Gotowe: {search['name']} — nowych: {len(new_items)}")
 
             now = time.time()
-            football_mode = search.get("football_mode", False)
-
-            if football_mode:
-                # Koszulki — zapisuj tylko wysłane do seen
-                # (strona katalogowa zmienia się często, nie blokuj wszystkich)
-                pass
-            else:
-                # Pozostałe — zapisuj wszystkie widziane żeby nie wracały stare
-                for item_id in all_ids:
-                    if item_id not in seen:
-                        seen[item_id] = now
+            for item in new_items[:MAX_ALERTS_PER_SEARCH]:
+                msg = format_message(search, item)
+                send_message(msg, photo_url=item.get("photo"), item_link=item.get("link"))
+                seen[item["id"]] = now
+                tag = "💎" if item.get("is_hidden_gem") else ("🔤" if item.get("has_typo") else "✉️")
+                print(f"  {tag} {item['title'][:55]} | {item['price']:.0f} zł")
 
             for item in new_items[:MAX_ALERTS_PER_SEARCH]:
                 msg = format_message(search, item)
