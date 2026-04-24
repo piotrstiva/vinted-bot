@@ -30,6 +30,7 @@ HEADERS = {
 MIN_DISCOUNT_PCT = 40      # % poniżej mediany → okazja
 MIN_AI_CONFIDENCE = 60     # % pewności AI że to ukryta okazja
 MIN_SAVING_PLN   = 6       # minimalna oszczędność w zł (odrzuć 1-5 zł różnicę)
+MAX_ALERTS_PER_SEARCH = 5  # max powiadomień per wyszukiwanie per cykl
 
 STEAL_PRICES = {
     "sneakers": 120,
@@ -476,16 +477,23 @@ def fetch_photo_url(item_link):
     return None
 
 
+_last_tg_send = 0.0
+TG_MIN_INTERVAL = 2.0   # min 2 sekundy między wiadomościami
+
 def send_message(text, photo_url=None, item_link=None):
     """Wysyła wiadomość ze zdjęciem jeśli dostępne."""
+    global _last_tg_send
     tg_base = f"https://api.telegram.org/bot{TOKEN}"
 
-    # Usuń HTML tagi
+    # Rate limiting — nie wysyłaj częściej niż co 2 sekundy
+    elapsed = time.time() - _last_tg_send
+    if elapsed < TG_MIN_INTERVAL:
+        time.sleep(TG_MIN_INTERVAL - elapsed)
+
     clean = re.sub(r'<[^>]+>', '', text)
 
-    # Jeśli nie mamy zdjęcia z JSON, spróbuj pobrać ze strony oferty
-    if not photo_url and item_link:
-        photo_url = fetch_photo_url(item_link)
+    # Nie pobieramy zdjęcia przez fetch — to powoduje 403 na Vinted
+    # Używamy tylko photo_url z JSON (jeśli Vinted je zwróci)
 
     try:
         if photo_url:
@@ -495,15 +503,28 @@ def send_message(text, photo_url=None, item_link=None):
                 "caption": clean[:1024],
             }, timeout=15)
             if r.status_code == 200:
+                _last_tg_send = time.time()
                 return
-            print(f"  ⚠️ sendPhoto failed {r.status_code} — wysyłam tekst")
+            if r.status_code == 429:
+                # Poczekaj i wyślij tekst
+                time.sleep(5)
+            # Fallthrough do tekstu
 
-        # Fallback — plain text
-        requests.post(f"{tg_base}/sendMessage", data={
+        # Tekst
+        r = requests.post(f"{tg_base}/sendMessage", data={
             "chat_id":                  CHAT_ID,
             "text":                     clean[:4096],
             "disable_web_page_preview": False,
         }, timeout=10)
+
+        if r.status_code == 429:
+            time.sleep(5)
+            requests.post(f"{tg_base}/sendMessage", data={
+                "chat_id": CHAT_ID,
+                "text":    clean[:4096],
+            }, timeout=10)
+
+        _last_tg_send = time.time()
 
     except Exception as e:
         print(f"Błąd wysyłania: {e}")
@@ -924,6 +945,105 @@ def get_market_median(search):
     return None
 
 # ─────────────────────────────────────────
+#  🧱 BRICKLINK — ceny rynkowe LEGO
+#  Cache zapisywany do pliku JSON
+#  Odświeżamy ceny raz na 24h per set
+# ─────────────────────────────────────────
+BRICKLINK_CACHE_FILE = "bricklink_prices.json"
+BRICKLINK_CACHE_TTL  = 24 * 3600  # 24h
+
+_bl_cache = {}
+
+def load_bricklink_cache():
+    global _bl_cache
+    try:
+        if os.path.exists(BRICKLINK_CACHE_FILE):
+            with open(BRICKLINK_CACHE_FILE) as f:
+                _bl_cache = json.load(f)
+    except:
+        _bl_cache = {}
+
+def save_bricklink_cache():
+    try:
+        with open(BRICKLINK_CACHE_FILE, "w") as f:
+            json.dump(_bl_cache, f)
+    except:
+        pass
+
+def get_bricklink_price(set_number):
+    """
+    Pobiera średnią cenę sprzedaży setu z BrickLink (używane).
+    Zwraca cenę w PLN lub None.
+    Cache 24h — nie odpytujemy za każdym razem.
+    """
+    global _bl_cache
+    now = time.time()
+
+    # Sprawdź cache
+    if set_number in _bl_cache:
+        entry = _bl_cache[set_number]
+        if now - entry.get("ts", 0) < BRICKLINK_CACHE_TTL:
+            return entry.get("price_pln")
+
+    try:
+        # BrickLink price guide — publiczna strona bez logowania
+        # Używamy strony z cenami "used" (odpowiada Vinted)
+        url = f"https://www.bricklink.com/v2/catalog/catalogitem.page?S={set_number}-1"
+        r = requests.get(url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+        }, timeout=15)
+
+        if r.status_code != 200:
+            return None
+
+        # Szukamy ceny average w HTML — BrickLink pokazuje ją jako
+        # "Avg Price: $XX.XX" lub w meta tagach
+        text = r.text
+
+        # Szukaj average price dla "Used" (U) condition
+        avg_usd = None
+
+        # Format: pewne fragmenty HTML z ceną
+        patterns = [
+            r'avg_price["\s:]+\$?([\d,\.]+)',
+            r'Avg Price.*?\$([\d,\.]+)',
+            r'"avg_price":"([\d\.]+)"',
+            r'id="val_used_qty"[^>]*>.*?Avg.*?\$([\d\.]+)',
+        ]
+        for pat in patterns:
+            m = re.search(pat, text, re.IGNORECASE | re.DOTALL)
+            if m:
+                try:
+                    avg_usd = float(m.group(1).replace(",", ""))
+                    if avg_usd > 0:
+                        break
+                except:
+                    pass
+
+        # Alternatywnie — szukaj w JSON osadzonym w stronie
+        if not avg_usd:
+            json_match = re.search(r'"avg_price"\s*:\s*"?([\d\.]+)"?', text)
+            if json_match:
+                try:
+                    avg_usd = float(json_match.group(1))
+                except:
+                    pass
+
+        if avg_usd:
+            # Przelicz USD → PLN (kurs ~4.0)
+            price_pln = avg_usd * 4.0
+            _bl_cache[set_number] = {"price_pln": price_pln, "ts": now}
+            save_bricklink_cache()
+            print(f"  🧱 BrickLink #{set_number}: ${avg_usd:.2f} → {price_pln:.0f} zł")
+            return price_pln
+
+    except Exception as e:
+        print(f"  ⚠️ BrickLink error #{set_number}: {e}")
+
+    return None
+
+# ─────────────────────────────────────────
 #  🧱 WALIDACJA LEGO STAR WARS
 # ─────────────────────────────────────────
 def validate_lego_sw(title, description, ai_result):
@@ -1004,12 +1124,21 @@ def validate_lego_sw(title, description, ai_result):
         return False, 0, ["⛔ brak oznak Star Wars"], {}
 
     set_info = {
-        "set_number": found_set,
-        "vehicle":    found_vehicle,
-        "character":  found_char,
-        "complete":   is_complete,
-        "minifigs":   has_minifigs,
+        "set_number":   found_set,
+        "vehicle":      found_vehicle,
+        "character":    found_char,
+        "complete":     is_complete,
+        "minifigs":     has_minifigs,
+        "bl_price_pln": None,  # wypełniane później w check_search
     }
+
+    # Pobierz cenę BrickLink jeśli znamy numer setu
+    if found_set:
+        bl_price = get_bricklink_price(found_set)
+        if bl_price:
+            set_info["bl_price_pln"] = bl_price
+            reasons.append(f"🧱 BrickLink: ~{bl_price:.0f} zł")
+            score += 10  # bonus za potwierdzenie z BrickLink
 
     # Minimalne score żeby wysłać alert
     is_valid = score >= 25
@@ -1022,38 +1151,47 @@ def validate_lego_sw(title, description, ai_result):
 def validate_football_jersey(title, description, ai_result):
     text = (title + " " + (description or "")).lower()
 
-    # Odrzuć repliki
+    # 1. Odrzuć repliki
     for rep in REPLICA_KEYWORDS:
         if rep in text:
             return False, ["replika — odrzucono"]
 
-    # Odrzuć śmieci niezwiązane z piłką nożną
+    # 2. Odrzuć śmieci — ROZSZERZONA lista
     NOISE = [
-        "swag", "y2k", "00s", "avant garde", "coquette", "drippy",
+        "swag", "y2k", "00s ", "avant garde", "coquette", "drippy",
         "gorset", "spódniczk", "bluzka na", "top na ramiac", "body ",
         "koronkow", "halter", "babydoll", "cycling", "basketball",
         "primark", "stradivarius", "bershka", "muślinow", "satynow",
-        "alt alternative", "japan style", "cropped top",
+        "alt alternative", "japan style", "cropped top", "tank top",
+        "pinterest", "taliow", "wiązan", "ażurow", "prześwituj",
+        "goth", "aesthetic", "streetwear archive", "hip hop",
+        "longsleeve vintage", "bluza vintage", "t-shirt vintage",
+        "damsk", "damsk", "girl", "women", "woman",
+        " top ", "bluzka", "sukienk", "spodnie", "kurtka jeans",
     ]
     for noise in NOISE:
         if noise in text:
             return False, [f"odrzucono: {noise.strip()}"]
 
-    # Musi zawierać słowo koszulka/jersey/shirt
+    # 3. Musi zawierać "koszulka" lub "jersey" lub "shirt"
     is_jersey = any(w in text for w in ["koszulka", "jersey", "shirt", "trikot", "maillot"])
     if not is_jersey:
         return False, ["brak słowa koszulka/jersey"]
 
-    # Musi mieć oryginalną markę
+    # 4. Musi mieć oryginalną markę piłkarską
     has_brand = any(b in text for b in FOOTBALL_ORIGINAL_BRANDS)
     if not has_brand:
         return False, ["brak oryginalnej marki"]
 
-    # Musi mieć klub LUB słowo retro/vintage/rok
-    has_club  = any(c in text for c in FOOTBALL_CLUBS)
-    is_retro  = any(d in text for d in RETRO_DECADES)
-    if not has_club and not is_retro:
-        return False, ["brak klubu/reprezentacji i słowa retro"]
+    # 5. Musi mieć klub LUB reprezentację — WYMAGANE
+    has_club = any(c in text for c in FOOTBALL_CLUBS)
+    if not has_club:
+        return False, ["brak klubu/reprezentacji"]
+
+    # 6. Musi mieć słowo retro/vintage LUB rok z okresu 1970-2003
+    is_retro = any(d in text for d in RETRO_DECADES)
+    if not is_retro:
+        return False, ["brak słowa retro/vintage lub roku 70s-2003"]
 
     reasons = []
     if has_brand:  reasons.append("✅ oryginalna marka")
@@ -1339,10 +1477,20 @@ def format_message(search, item):
 
     if search.get("lego_sw_mode"):
         info = item.get("lego_set_info", {})
-        if info.get("set_number"):  lines.append(f"🔢 Set: #{info['set_number']}")
-        if info.get("vehicle"):     lines.append(f"🚀 {info['vehicle']}")
-        if info.get("character"):   lines.append(f"👤 {info['character']}")
-        if info.get("minifigs"):    lines.append("🟡 Minifigurki: tak")
+        if info.get("set_number"):
+            lines.append(f"🔢 Set: #{info['set_number']}")
+        if info.get("vehicle"):
+            lines.append(f"🚀 {info['vehicle']}")
+        if info.get("character"):
+            lines.append(f"👤 {info['character']}")
+        if info.get("minifigs"):
+            lines.append("🟡 Minifigurki: tak")
+        # Cena BrickLink jako referencja rynkowa
+        bl_price = info.get("bl_price_pln")
+        if bl_price and bl_price > price:
+            saving_bl = bl_price - price
+            lines.append(f"🧱 BrickLink used: ~{bl_price:.0f} zl")
+            lines.append(f"💚 Oszczedzasz vs BrickLink: ~{saving_bl:.0f} zl")
 
     reasons = item.get("reasons", [])
     if reasons:
@@ -1360,7 +1508,8 @@ def format_message(search, item):
 # ─────────────────────────────────────────
 print("✅ BOT HIDDEN GEM FINDER URUCHOMIONY")
 
-# Pobierz sesję Vinted przed startem
+# Wczytaj cache BrickLink i seen
+load_bricklink_cache()
 refresh_session()
 
 send_message(
@@ -1415,7 +1564,7 @@ while True:
                 if item_id not in seen:
                     seen[item_id] = now
 
-            for item in new_items:
+            for item in new_items[:MAX_ALERTS_PER_SEARCH]:
                 msg = format_message(search, item)
                 send_message(msg, photo_url=item.get("photo"), item_link=item.get("link"))
                 seen[item["id"]] = now
