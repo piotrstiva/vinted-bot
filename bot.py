@@ -68,12 +68,20 @@ GLOBAL_EXCLUDE = [
 #  🚫 MARKI KTÓRYCH NIE CHCEMY NIGDY
 # ─────────────────────────────────────────
 BLOCKED_BRANDS = [
+    # Fast fashion
     "h&m", "zara", "bershka", "sinsay", "reserved", "house",
     "shein", "primark", "pepco", "c&a", "stradivarius",
     "new yorker", "cropp", "new look", "boohoo", "asos",
     "pull&bear", "mango", "vero moda", "only ", "jack&jones",
     "terranova", "mohito", "medicine", "diverse", "carry",
     "lager 157", "rainbow ", "iné", "amisu", "george ",
+    # Premium marki których nie chcemy
+    "tommy hilfiger", "tommy jeans", "calvin klein", "ralph lauren",
+    "lacoste", "hugo boss", "boss ", "michael kors", "guess ",
+    "armani exchange", "emporio armani",
+    # Sportowe masowe
+    "under armour", "columbia ", "quechua", "decathlon",
+    "jack wolfskin", "the north face", "regatta",
 ]
 
 # ─────────────────────────────────────────
@@ -336,6 +344,14 @@ SEARCHES = [
         "exclude_keywords": ["bitty", "minis", "funko minis", "pocket pop"],
         "brands":   ["funko"],
         "min_price": 10,
+    },
+    {
+        "name":     "Funko Pop Star Wars (do 30 zł)",
+        "url":      "https://www.vinted.pl/catalog?search_text=funko+pop+star+wars&order=newest_first&currency=PLN&price_to=30",
+        "category": "funko",
+        "keywords": ["funko", "star wars"],
+        "exclude_keywords": ["bitty", "minis", "pocket pop"],
+        "min_price": 5,
     },
     # ── KOSZULKI PIŁKARSKIE RETRO ────────────
     {
@@ -1551,12 +1567,18 @@ while True:
             new_items, all_ids = check_search(search, seen, market_price)
             print(f"  ✔ Gotowe: {search['name']} — nowych: {len(new_items)}")
 
-            # Zapisz WSZYSTKIE widziane ID — nie tylko wysłane
-            # Dzięki temu stare oferty nie będą się powtarzać
             now = time.time()
-            for item_id in all_ids:
-                if item_id not in seen:
-                    seen[item_id] = now
+            football_mode = search.get("football_mode", False)
+
+            if football_mode:
+                # Koszulki — zapisuj tylko wysłane do seen
+                # (strona katalogowa zmienia się często, nie blokuj wszystkich)
+                pass
+            else:
+                # Pozostałe — zapisuj wszystkie widziane żeby nie wracały stare
+                for item_id in all_ids:
+                    if item_id not in seen:
+                        seen[item_id] = now
 
             for item in new_items[:MAX_ALERTS_PER_SEARCH]:
                 msg = format_message(search, item)
