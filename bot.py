@@ -70,6 +70,21 @@ GLOBAL_EXCLUDE = [
     # Gry video
     "nintendo switch", "xbox", "playstation", "ps4", "ps5",
     "gra lego", "lego gra", "lego game",
+    # FIX #1 — LEGO clothing / akcesoria które nie są zestawami
+    # (Vinted taguje je marką LEGO bo mają logo)
+    "bluza lego", "lego bluza", "kurtka lego", "lego kurtka",
+    "piżama lego", "lego piżama", "t-shirt lego", "lego t-shirt",
+    "czapka lego", "lego czapka", "buty lego", "lego buty",
+    "plecak lego", "lego plecak", "torba lego", "lego torba",
+    "aparat lego", "lego aparat", "zegarek lego", "lego zegarek",
+    "lego 128", "lego 92", "lego 98", "lego 104", "lego 116",  # rozmiary odzieży
+    # FIX #1 — luzem klocki (nie kompletne zestawy)
+    "luzem", "bulk", "loose", "mixed", "random klocki",
+    "worek klocków", "klocki luzem", "mix klocków", "klocki mix",
+    # FIX #1 — drukarki 3D / podstawki / akcesoria display
+    "3d print", "3d druk", "druk 3d", "display stand", "display dla",
+    "podstawka pod", "podstawka lego", "stand lego", "stand dla lego",
+    "uchwyt lego", "ramka lego", "gablotka",
 ]
 
 # ─────────────────────────────────────────
@@ -194,11 +209,26 @@ SW_COMPLETE_KEYWORDS = [
     "używany", "używane", "second hand",   # używane są OK
 ]
 
-# Słowa które dyskwalifikują ofertę (niekompletna)
+# Słowa które dyskwalifikują ofertę (niekompletna / nie-zestaw)
 SW_INCOMPLETE_KEYWORDS = [
     "niekompletny", "brakuje", "bez figurek", "bez minifigurek",
     "niepełny", "części", "uszkodzony", "incomplete",
     "only parts", "spare parts", "zamienię",
+    # FIX #2 — druk 3D / podstawki / gablotki (nie zestawy LEGO)
+    "3d print", "3d druk", "druk 3d", "printed", "display stand",
+    "display dla", "podstawka", "stand dla", "uchwyt", "ramka",
+    "gablotka", "diorama",
+    # FIX #4 — sama instrukcja bez zestawu
+    "instrukcja", "instrukcje", "manual", "booklet", "instruction",
+    "tylko instrukcja", "sam instrukcja",
+    # FIX #5 — pojedyncza minifigurka (nie zestaw) — ale ostrożnie:
+    # "minifigurka" w tytule BEZ numeru setu = prawdopodobnie luzem
+    # (validate_lego_sw sprawdza ten warunek przez brak found_set)
+    "pojedyncza figurka", "single minifig", "jedna figurka",
+    "figurka luzem", "minifig luzem",
+    # Kluczbrelok / gadżet
+    "brelok", "keychain", "key chain", "kulcstartó", "nyckelring",
+    "magnes", "magnet",
 ]
 
 # ─────────────────────────────────────────
@@ -691,6 +721,13 @@ SEARCHES = [
         "brands":   [],
         "min_price": 20,
         "hidden_gem_mode": True,
+        # FIX #4 — Vinted zwraca kurtki Nike/Adidas mimo catalog=sneakers
+        "exclude_keywords": [
+            "kurtka", "jacket", "windbreaker", "wiatrówka", "wiatrowka",
+            "bluza", "hoodie", "sweatshirt", "dzseki", "vindjacka",
+            "anorak", "parka", "softshell", "fleece", "pullover",
+            "hanorac", "dzseki", "cazadora", "veste",
+        ],
     },
     {
         "name":     "Ubrania bez marki (hidden gem)",
