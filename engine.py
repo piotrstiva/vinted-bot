@@ -65,6 +65,8 @@ HYPE_BRANDS = {
     "kaws", "travis scott", "yeezy", "jordan", "dunk",
     "nike sb", "sacai", "fragment", "fear of god", "essentials",
     "carhartt wip", "dickies", "wtaps",
+    # FIX: Funko jako hype brand (kolekcjonerski)
+    "funko", "funko pop",
 }
 
 CATEGORY_MAP = {
@@ -75,6 +77,14 @@ CATEGORY_MAP = {
     "lego": ["lego", "star wars", "technic", "ninjago", "creator"],
     "funko": ["funko", "pop!", "vinyl figure"],
     "football": ["koszulka", "jersey", "shirt", "football", "soccer"],
+}
+
+# FIX #5 — marki mainstream (Nike/Adidas ogólnie) — nie są w HYPE_BRANDS
+# ale warto je traktować łagodniej w spam filter gdy brakuje danych DB
+MAINSTREAM_BRANDS = {
+    "nike", "adidas", "puma", "reebok", "new balance",
+    "vans", "converse", "asics", "carhartt", "levi",
+    "lego", "funko",
 }
 
 # ─────────────────────────────────────────────────────
@@ -727,6 +737,9 @@ class Engine:
         self.ai_cache       = AICache()
         self.learner        = FeedbackLearner()
         self._raw_count_at_last_build = len(self.raw.items)
+        # FIX #2 — deduplicacja alertów: ten sam item_id nie dostanie
+        # alertu dwa razy w tej samej sesji (np. gdy pojawia się w kilku wyszukiwaniach)
+        self._alerted_ids: set[str] = set()
         print(f"🧠 Engine zainicjowany | DB: {len(self.db.db)} grup | AI: {'✅' if anthropic_key else '❌'}")
 
     # ── GŁÓWNA METODA ────────────────────────
@@ -828,8 +841,20 @@ class Engine:
             confidence >= 6.5
             or ai_decision == "BUY"
             or (db_data is not None and price < db_data["avg"] * 0.50)
+            # FIX #5: mainstream brand bez DB → obniż próg do 5.5
+            # (nie do zera — wciąż filtrujemy śmieci)
+            or (brand in MAINSTREAM_BRANDS and confidence >= 5.5)
         )
-        send_alert = raw_send and spam_filtered
+
+        # FIX #2 — deduplicacja: nie wysyłaj alertu dwa razy dla tego samego item_id
+        item_id = str(item.get("id", ""))
+        already_alerted = item_id and item_id in self._alerted_ids
+        send_alert = raw_send and spam_filtered and not already_alerted
+        if send_alert and item_id:
+            self._alerted_ids.add(item_id)
+            # Trzymaj max 10 000 ID w pamięci (ochrona przed wyciekiem)
+            if len(self._alerted_ids) > 10_000:
+                self._alerted_ids = set(list(self._alerted_ids)[-5_000:])
 
         return {
             "send_alert":  send_alert,
@@ -854,14 +879,32 @@ class Engine:
         brand: str | None,
         category: str,
     ) -> dict:
-        """Prosta heurystyka gdy brak klucza AI."""
+        """Prosta heurystyka gdy brak klucza AI.
+        FIX: wyższy bazowy score dla znanych brandów — żeby conf=5.6
+        nie blokowało wszystkiego przy pustej bazie DB.
+        """
         t = title.lower()
         hype = 8 if brand in HYPE_BRANDS else (6 if brand in LUXURY_BRANDS else 3)
         rarity = 7 if any(w in t for w in ["rare", "rzadka", "kolekcjoner", "limited", "deadstock"]) else 3
+
+        # FIX #1 — bazowy score zależny od rozpoznania brandu
+        # Bez tego każdy item bez DB dostaje score=5 → conf≈5.6 → spam filter blokuje
+        if brand in HYPE_BRANDS:
+            base = 6.5   # hype brand bez DB → przekracza spam filter 6.5
+        elif brand in LUXURY_BRANDS:
+            base = 6.0   # luxury → wymaga jeszcze sygnału żeby przejść
+        elif brand in MAINSTREAM_BRANDS:
+            base = 5.8   # Nike, Adidas itd. → przejdą obniżony próg 5.5
+        elif category in ("sneakers", "funko", "lego"):
+            base = 5.8   # znana kategoria kolekcjonerska
+        else:
+            base = 5.0   # bez marki / nieznana kategoria
+
         avg = db_data["avg"] if db_data else price * 1.5
         underpriced = price < avg * 0.70
         estimated = avg * 1.1 if db_data else price * 1.5
-        score = 5.0
+
+        score = base
         if underpriced:
             score += 2.0
         if hype >= 8:
@@ -869,12 +912,14 @@ class Engine:
         if rarity >= 7:
             score += 1.0
         score = min(score, 10.0)
+
         if score >= 8:
             decision = "BUY"
         elif score >= 6:
             decision = "WATCH"
         else:
             decision = "SKIP"
+
         return {
             "brand": brand,
             "category": category,
