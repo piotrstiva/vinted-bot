@@ -1800,45 +1800,47 @@ def validate_football_jersey(title, description, ai_result):
         if rep in text:
             return False, ["replika — odrzucono"]
 
-    # 2. Odrzuć śmieci — ROZSZERZONA lista
+    # 2. Odrzuć oczywiste śmieci (tylko to co NA PEWNO nie jest koszulką piłkarską)
     NOISE = [
-        "swag", "y2k", "00s ", "avant garde", "coquette", "drippy",
-        "gorset", "spódniczk", "bluzka na", "top na ramiac", "body ",
-        "koronkow", "halter", "babydoll", "cycling", "basketball",
-        "primark", "stradivarius", "bershka", "muślinow", "satynow",
-        "alt alternative", "japan style", "cropped top", "tank top",
-        "pinterest", "taliow", "wiązan", "ażurow", "prześwituj",
-        "goth", "aesthetic", "streetwear archive", "hip hop",
-        "longsleeve vintage", "bluza vintage", "t-shirt vintage",
-        "damsk", "damsk", "girl", "women", "woman",
-        " top ", "bluzka", "sukienk", "spodnie", "kurtka jeans",
+        "swag", "avant garde", "coquette", "drippy",
+        "gorset", "spódniczk", "koronkow", "halter", "babydoll",
+        "alt alternative", "japan style",
+        "sukienk", "kurtka jeans",
+        "racing", "motocycl", "moto ",   # koszulki motosportowe
+        "baseball cap", "czapka",
     ]
     for noise in NOISE:
         if noise in text:
             return False, [f"odrzucono: {noise.strip()}"]
 
-    # 3. Musi zawierać "koszulka" lub "jersey" lub "shirt"
-    is_jersey = any(w in text for w in ["koszulka", "jersey", "shirt", "trikot", "maillot"])
+    # 3. Musi zawierać słowo związane z koszulką/jerseyem
+    JERSEY_WORDS = [
+        "koszulka", "jersey", "shirt", "trikot", "maillot",
+        "fodboldtrøje", "voetbalshirt", "mez ", " mez",
+        "tricou", "trøje", "tröja", "dres ", " kit",
+        "football top", "soccer top", "piłkarska", "pilkarska",
+        "fotbal", "fútbol", "calcio",
+    ]
+    is_jersey = any(w in text for w in JERSEY_WORDS)
     if not is_jersey:
-        return False, ["brak słowa koszulka/jersey"]
+        return False, ["brak słowa koszulka/jersey/shirt"]
 
-    # 4. Musi mieć oryginalną markę piłkarską
+    # 4. Musi mieć markę LUB klub/reprezentację
     has_brand = any(b in text for b in FOOTBALL_ORIGINAL_BRANDS)
-    if not has_brand:
-        return False, ["brak oryginalnej marki"]
+    has_club  = any(c in text for c in FOOTBALL_CLUBS)
 
-    # 5. Musi mieć klub LUB reprezentację — WYMAGANE
-    has_club = any(c in text for c in FOOTBALL_CLUBS)
-    if not has_club:
-        return False, ["brak klubu/reprezentacji"]
+    if not has_brand and not has_club:
+        return False, ["brak marki piłkarskiej i klubu"]
 
-    # 6. Musi mieć słowo retro/vintage LUB rok z okresu 1970-2003
+    # 5. Retro LUB klub — jedno z dwóch wystarczy
     is_retro = any(d in text for d in RETRO_DECADES)
-    if not is_retro:
-        return False, ["brak słowa retro/vintage lub roku 70s-2003"]
+
+    # Jeśli ma konkretny klub → akceptuj nawet bez słowa "retro"
+    if not is_retro and not has_club:
+        return False, ["brak retro/vintage i brak konkretnego klubu"]
 
     reasons = []
-    if has_brand:  reasons.append("✅ oryginalna marka")
+    if has_brand:  reasons.append("✅ marka")
     if has_club:   reasons.append("✅ klub/reprezentacja")
     if is_retro:   reasons.append("✅ retro/vintage")
     return True, reasons
@@ -2291,7 +2293,7 @@ while True:
         cycle += 1
         print(f"\n🔄 Cykl #{cycle}")
 
-        # Step 6 — zbieramy wyniki wszystkich wyszukiwań, sortujemy i wysyłamy top 5
+        # Step 6 — zbieramy wyniki wszystkich wyszukiwań, sortujemy i wysyłamy top
         cycle_candidates = []   # (confidence, search, item, eval_result)
 
         for search in SEARCHES:
@@ -2301,34 +2303,33 @@ while True:
             print(f"  ✔ Gotowe: {search['name']} — nowych: {len(new_items)}")
 
             now = time.time()
+
+            is_special = (
+                search.get("football_mode") or
+                search.get("lego_sw_mode") or
+                search.get("carhartt_mode")
+            )
+
             for item in new_items[:MAX_ALERTS_PER_SEARCH]:
+
+                # Tryby specjalne — bypass engine, od razu do wysyłki
+                if is_special:
+                    cycle_candidates.append((10.0, search, item, None, now))
+                    continue
 
                 # ── Engine evaluation ─────────────────
                 if engine:
                     eval_result = engine.evaluate(item, search, market_price)
+                    conf     = eval_result["confidence"]
+                    has_db   = eval_result.get("db_data") is not None
 
-                    is_special = (
-                        search.get("football_mode") or
-                        search.get("lego_sw_mode") or
-                        search.get("carhartt_mode")
-                    )
-                    if not is_special and not eval_result["send_alert"]:
-                        print(f"  ⏭  Engine skip: conf={eval_result['confidence']:.1f} | {item['title'][:40]}")
+                    # Skip tylko gdy mamy dane DB i conf < 6.5
+                    if has_db and conf < 6.5:
+                        print(f"  ⏭  Engine skip: conf={conf:.1f} | {item['title'][:40]}")
                         seen[item["id"]] = now
                         continue
 
-                    # Step 5 — hard confidence floor
-                    if eval_result["confidence"] < 6.5 and not is_special:
-                        seen[item["id"]] = now
-                        continue
-
-                    cycle_candidates.append((
-                        eval_result["confidence"],
-                        search,
-                        item,
-                        eval_result,
-                        now,
-                    ))
+                    cycle_candidates.append((conf, search, item, eval_result, now))
                 else:
                     # Bez engine — stary fallback
                     msg = format_message(search, item)
@@ -2337,27 +2338,37 @@ while True:
                     seen[item["id"]] = now
                     print(f"  ✉️ {item['title'][:55]} | {item['price']:.0f} zł")
 
-        # Step 6 — sortuj DESC po confidence, wyślij max 5 najlepszych
+        # Step 6 — sortuj DESC po confidence, wyślij max 10 per cykl
         cycle_candidates.sort(key=lambda x: x[0], reverse=True)
         sent_this_cycle = 0
+        MAX_PER_CYCLE   = 10
 
         for conf, search, item, eval_result, now in cycle_candidates:
-            if sent_this_cycle >= 5:
-                # Oznacz pozostałe jako widziane bez wysyłania
+            if sent_this_cycle >= MAX_PER_CYCLE:
                 seen[item["id"]] = now
+                continue
+
+            photo = item.get("photo") or get_item_photo(item["id"], item["link"])
+
+            # Tryby specjalne (football/lego_sw/carhartt) — zawsze standardowy format
+            if eval_result is None:
+                msg = format_message(search, item)
+                send_message(msg, photo_url=photo, item_link=item.get("link"))
+                seen[item["id"]] = now
+                sent_this_cycle += 1
+                tag = "⚽" if search.get("football_mode") else "🧱"
+                print(f"  {tag} {item['title'][:55]} | {item['price']:.0f} zł")
                 continue
 
             if eval_result["tier"] in ("INSANE", "GOOD"):
                 engine_msg = engine.format_alert(eval_result)
-                photo = item.get("photo") or get_item_photo(item["id"], item["link"])
                 send_message(engine_msg, photo_url=photo, item_link=item.get("link"))
                 seen[item["id"]] = now
                 sent_this_cycle += 1
                 tier_tag = "🔴" if eval_result["tier"] == "INSANE" else "🟡"
                 print(f"  {tier_tag} Engine [{eval_result['tier']}] conf={conf:.1f} | {item['title'][:40]}")
-            elif eval_result.get("send_alert") or search.get("lego_sw_mode") or search.get("football_mode") or search.get("carhartt_mode"):
+            elif eval_result.get("send_alert"):
                 msg = format_message(search, item)
-                photo = item.get("photo") or get_item_photo(item["id"], item["link"])
                 send_message(msg, photo_url=photo, item_link=item.get("link"))
                 seen[item["id"]] = now
                 sent_this_cycle += 1
