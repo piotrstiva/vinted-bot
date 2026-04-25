@@ -6,6 +6,14 @@ import re
 import base64
 from statistics import median
 
+# ── Intelligence Engine ──────────────────
+try:
+    from engine import Engine
+    _ENGINE_AVAILABLE = True
+except ImportError:
+    _ENGINE_AVAILABLE = False
+    print("⚠️  engine.py nie znaleziony — tryb podstawowy")
+
 # ─────────────────────────────────────────
 #  🔑 USTAWIENIA — Railway Variables
 #  Dodaj w Railway:
@@ -1906,6 +1914,12 @@ seen          = load_seen()
 market_prices = {}
 cycle         = 0
 
+# Inicjalizacja silnika inteligencji
+engine = None
+if _ENGINE_AVAILABLE:
+    engine = Engine(anthropic_key=ANTHROPIC_KEY)
+    print(engine.stats())
+
 while True:
     try:
         # Co 50 cykli (~50 min) odśwież sesję Vinted
@@ -1933,21 +1947,39 @@ while True:
 
             now = time.time()
             for item in new_items[:MAX_ALERTS_PER_SEARCH]:
+
+                # ── Engine evaluation ─────────────────
+                if engine:
+                    eval_result = engine.evaluate(item, search, market_price)
+
+                    # Jeśli engine decyduje żeby nie wysyłać — pomiń
+                    # (tylko dla trybów normalnych, nie dla football/lego_sw)
+                    is_special = (
+                        search.get("football_mode") or
+                        search.get("lego_sw_mode") or
+                        search.get("carhartt_mode")
+                    )
+                    if not is_special and not eval_result["send_alert"]:
+                        print(f"  ⏭  Engine skip: conf={eval_result['confidence']:.1f} | {item['title'][:40]}")
+                        seen[item["id"]] = now
+                        continue
+
+                    # Użyj formatu engine dla dobrych deali
+                    if eval_result["tier"] in ("INSANE", "GOOD"):
+                        engine_msg = engine.format_alert(eval_result)
+                        photo = item.get("photo") or get_item_photo(item["id"], item["link"])
+                        send_message(engine_msg, photo_url=photo, item_link=item.get("link"))
+                        seen[item["id"]] = now
+                        tier_tag = "🔴" if eval_result["tier"] == "INSANE" else "🟡"
+                        print(f"  {tier_tag} Engine [{eval_result['tier']}] conf={eval_result['confidence']:.1f} | {item['title'][:40]}")
+                        continue
+
+                # ── Fallback: standardowy format ──────
                 msg = format_message(search, item)
-                # Spróbuj pobrać zdjęcie przez API
-                photo = item.get("photo")
-                if not photo:
-                    photo = get_item_photo(item["id"], item["link"])
+                photo = item.get("photo") or get_item_photo(item["id"], item["link"])
                 send_message(msg, photo_url=photo, item_link=item.get("link"))
                 seen[item["id"]] = now
                 tag = "💎" if item.get("is_hidden_gem") else ("🔤" if item.get("has_typo") else "✉️")
-                print(f"  {tag} {item['title'][:55]} | {item['price']:.0f} zł")
-
-            for item in new_items[:MAX_ALERTS_PER_SEARCH]:
-                msg = format_message(search, item)
-                send_message(msg, photo_url=item.get("photo"), item_link=item.get("link"))
-                seen[item["id"]] = now
-                tag = "💎" if item["is_hidden_gem"] else ("🔤" if item["has_typo"] else "✉️")
                 print(f"  {tag} {item['title'][:55]} | {item['price']:.0f} zł")
 
         save_seen(seen)
