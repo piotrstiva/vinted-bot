@@ -706,15 +706,20 @@ def calculate_confidence(
 def get_alert_tier(confidence: float, ai_decision: str) -> str | None:
     """
     Zwraca tier alertu lub None jeśli nie wysyłać.
-    BOT FIX #3: ai_decision==BUY bez minimalnego conf nie może dawać INSANE
-    — wcześniej conf=5.9 + BUY = INSANE (sprzeczność widoczna w logach).
+    FIX #3: doprecyzowane progi — BUY bez solidnego conf nie awansuje do GOOD.
+    Skala:
+      INSANE = conf >= 8.5 LUB (BUY + conf >= 7.0)
+      GOOD   = conf >= 7.0 LUB (BUY + conf >= 6.2)  ← podniesiony z 5.5
+      WATCH  = conf >= 5.5
+    Funko bez DB: base=6.0 → score≈8.0 → BUY, conf≈6.1 → WATCH (nie GOOD)
     """
     if confidence >= CONFIDENCE_INSANE:
         return "INSANE"
-    # BUY od AI podnosi tier, ale tylko gdy conf jest sensowny (≥ GOOD)
     if ai_decision == "BUY" and confidence >= CONFIDENCE_GOOD:
         return "INSANE"
-    if confidence >= CONFIDENCE_GOOD or (ai_decision == "BUY" and confidence >= CONFIDENCE_WATCH):
+    if confidence >= CONFIDENCE_GOOD:
+        return "GOOD"
+    if ai_decision == "BUY" and confidence >= 6.2:   # podniesiony próg BUY→GOOD
         return "GOOD"
     if confidence >= CONFIDENCE_WATCH:
         return "WATCH"
@@ -893,17 +898,30 @@ class Engine:
         rarity = 7 if any(w in t for w in ["rare", "rzadka", "kolekcjoner", "limited", "deadstock"]) else 3
 
         # FIX #1 — bazowy score zależny od rozpoznania brandu
-        # Bez tego każdy item bez DB dostaje score=5 → conf≈5.6 → spam filter blokuje
-        if brand in HYPE_BRANDS:
-            base = 6.5   # hype brand bez DB → przekracza spam filter 6.5
+        # FIX #3 — Funko bez DB dostawało base=6.5 → score=8.0 → BUY → GOOD/INSANE
+        # mimo braku jakichkolwiek danych rynkowych. Rozróżniamy:
+        # - Supreme/Palace/Jordan (streetwear hype) → 6.5 (mają realny rynek wtórny)
+        # - Funko/LEGO (kolekcjonerskie ale zmienne) → 6.0 (potrzebują potwierdzenia ceną)
+        # - Luxury → 6.0 (wymaga sygnału fake-risk)
+        # - Mainstream (Nike/Adidas ogólnie) → 5.8
+        # - Znana kategoria bez marki → 5.5
+        STREETWEAR_HYPE = {"supreme", "palace", "stussy", "bape", "a bathing ape",
+                           "kaws", "travis scott", "yeezy", "jordan", "nike sb",
+                           "sacai", "fragment", "fear of god", "wtaps"}
+        COLLECTOR_HYPE  = {"funko", "funko pop", "lego"}
+
+        if brand in STREETWEAR_HYPE:
+            base = 6.5   # mocny hype streetwear — rynek wtórny pewny
+        elif brand in COLLECTOR_HYPE or brand in (HYPE_BRANDS - STREETWEAR_HYPE):
+            base = 6.0   # kolekcjonerskie — potrzebują ceny rynkowej do pewności
         elif brand in LUXURY_BRANDS:
-            base = 6.0   # luxury → wymaga jeszcze sygnału żeby przejść
+            base = 6.0
         elif brand in MAINSTREAM_BRANDS:
-            base = 5.8   # Nike, Adidas itd. → przejdą obniżony próg 5.5
+            base = 5.8
         elif category in ("sneakers", "funko", "lego"):
-            base = 5.8   # znana kategoria kolekcjonerska
+            base = 5.5   # znana kategoria ale bez marki
         else:
-            base = 5.0   # bez marki / nieznana kategoria
+            base = 5.0
 
         avg = db_data["avg"] if db_data else price * 1.5
         underpriced = price < avg * 0.70
