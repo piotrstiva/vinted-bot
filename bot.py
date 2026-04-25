@@ -582,9 +582,9 @@ SEARCHES = [
     },
     {
         "name":     "LEGO Star Wars — numery setów",
-        "url":      "https://www.vinted.pl/catalog?search_text=lego+75&order=newest_first&currency=PLN&price_to=100",
+        "url":      "https://www.vinted.pl/catalog?search_text=lego+star+wars+75&order=newest_first&currency=PLN&price_to=100",
         "category": "lego_sw",
-        "keywords": ["lego", "75"],
+        "keywords": ["lego", "star wars"],
         "exclude_keywords": ["polybag", "bitty", "keychain", "brelok", "kulcstart", "nyckelring"],
         "min_price": 15,
         "lego_sw_mode": True,
@@ -980,6 +980,11 @@ VINTED_MIN_DELAY = 2.0
 VINTED_MAX_DELAY = 4.0
 VINTED_429_WAIT  = 180
 
+# BOT #5 — globalny licznik 403 — gdy Vinted blokuje, zwiększamy pauzę
+_consecutive_403 = 0
+_403_BACKOFF_THRESHOLD = 3    # po ilu 403 z rzędu → długa pauza
+_403_BACKOFF_SECONDS   = 300  # 5 minut pauzy po serii 403
+
 def get_headers():
     """Zwraca losowy zestaw nagłówków naśladujący przeglądarkę."""
     return {
@@ -1001,13 +1006,16 @@ def vinted_fetch(url, label=""):
     Pobiera stronę Vinted (HTML).
     Zwraca obiekt requests.Response lub None.
     Obsługuje 429 z retry i losowy jitter.
+    BOT #5: śledzi serię 403 i wstrzymuje bota po kilku z rzędu.
     """
+    global _consecutive_403
     for attempt in range(1, 4):
         try:
             time.sleep(random.uniform(VINTED_MIN_DELAY, VINTED_MAX_DELAY))
             r = requests.get(url, headers=get_headers(), timeout=10)
 
             if r.status_code == 200:
+                _consecutive_403 = 0  # reset licznika po sukcesie
                 return r
 
             if r.status_code == 429:
@@ -1017,8 +1025,16 @@ def vinted_fetch(url, label=""):
                 continue
 
             if r.status_code in (403, 401):
-                print(f"  ⚠️ HTTP {r.status_code} [{label}] — próba {attempt}/3")
-                time.sleep(5 * attempt)
+                _consecutive_403 += 1
+                print(f"  ⚠️ HTTP {r.status_code} [{label}] — próba {attempt}/3 (seria 403: {_consecutive_403})")
+                # BOT #5 — po serii 403 rób długą pauzę i odśwież sesję
+                if _consecutive_403 >= _403_BACKOFF_THRESHOLD:
+                    print(f"  🛑 Seria {_consecutive_403}x 403 — pauza {_403_BACKOFF_SECONDS}s i odświeżam sesję...")
+                    time.sleep(_403_BACKOFF_SECONDS)
+                    refresh_session()
+                    _consecutive_403 = 0
+                else:
+                    time.sleep(5 * attempt)
                 continue
 
             print(f"  ⚠️ HTTP {r.status_code} [{label}]")
@@ -1194,7 +1210,6 @@ def get_item_photo(item_id, item_url):
             item = data.get("item", {})
             photos = item.get("photos", [])
             if photos:
-                # Weź pierwsze zdjęcie, preferuj full_size_url
                 p = photos[0]
                 url = p.get("full_size_url") or p.get("url") or p.get("thumb_url")
                 if url:
@@ -1202,21 +1217,25 @@ def get_item_photo(item_id, item_url):
     except:
         pass
     return None
+
+
+def get_item_details(item_url):
+    """
+    Pobiera (photo_url, description) dla oferty.
+    Używane w hidden_gem_mode do analizy AI.
+    Zwraca (None, None) przy błędzie.
+    """
     try:
         r = vinted_fetch(item_url, label="item_details")
         if not r:
             return None, None
-
-        soup = BeautifulSoup(r.text, "html.parser")
-
+        from bs4 import BeautifulSoup as _BS
+        soup = _BS(r.text, "html.parser")
         og_img    = soup.find("meta", property="og:image")
         image_url = og_img["content"] if og_img else None
-
         desc_tag    = soup.find("meta", attrs={"name": "description"})
         description = desc_tag["content"] if desc_tag else ""
-
         return image_url, description
-
     except Exception as e:
         print(f"Błąd get_item_details: {e}")
         return None, None
@@ -1559,6 +1578,12 @@ def check_search(search, seen, market_price):
     found    = []
     all_ids  = []   # wszystkie ID widziane w tym cyklu
     cnt_seen = cnt_price = cnt_kw = cnt_rejected = 0
+    # BOT #1 — limit znalezionych wewnątrz check_search (nie tylko w głównej pętli)
+    # MAX_ALERTS_PER_SEARCH w głównej pętli przycina DO wysyłki, ale found=20
+    # powoduje że engine ocenia 20 itemów niepotrzebnie
+    MAX_FOUND = MAX_ALERTS_PER_SEARCH * 2  # 10 — bufor na engine skip
+    # BOT #3 — dedup po title+price (Vinted zwraca ten sam item przez kilka wyszukiwań)
+    _seen_title_price: set[str] = set()
 
     try:
         r = vinted_fetch(search["url"], label=search["name"])
@@ -1593,6 +1618,14 @@ def check_search(search, seen, market_price):
 
                 if not title or not href:
                     continue
+
+                # BOT #3 — odrzuć duplikaty tego samego tytułu+ceny w tym cyklu
+                # (ten sam item może trafić przez 2 wyszukiwania)
+                _dedup_key = f"{title.lower().strip()}_{int(price or 0)}"
+                if _dedup_key in _seen_title_price:
+                    cnt_seen += 1
+                    continue
+                _seen_title_price.add(_dedup_key)
 
                 # Globalny filtr wykluczeń (dzieci, minecraft, karty, gry)
                 title_lower = title.lower()
@@ -1721,6 +1754,10 @@ def check_search(search, seen, market_price):
                     "carhartt_max": carhartt_max,
                     "photo": item.get("photo"),
                 })
+
+                # BOT #1 — stop early gdy mamy wystarczająco dużo itemów
+                if len(found) >= MAX_FOUND:
+                    break
 
             except Exception as e:
                 print(f"  ⚠️ item error: {e}")
