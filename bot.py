@@ -41,12 +41,12 @@ MIN_SAVING_PLN   = 6       # minimalna oszczędność w zł (odrzuć 1-5 zł ró
 MAX_ALERTS_PER_SEARCH = 5  # max powiadomień per wyszukiwanie per cykl
 
 STEAL_PRICES = {
-    "sneakers": 80,    # buty markowe poniżej 80 zł → steal
-    "clothing":  20,   # ubrania poniżej 20 zł → steal (było 30 — za dużo false)
-    "lego":      40,   # LEGO poniżej 40 zł → steal
-    "funko":     15,   # Funko poniżej 15 zł → steal
-    "football":  35,   # koszulka retro poniżej 35 zł → steal
-    "lego_sw":   50,   # LEGO SW poniżej 50 zł → steal
+    "sneakers": 120,
+    "clothing":  30,
+    "lego":      60,
+    "funko":     25,
+    "football":  50,
+    "lego_sw":   80,
     "carhartt": 250,
 }
 
@@ -568,39 +568,414 @@ BRAND_TYPOS = {
 # ─────────────────────────────────────────
 #  🔍 WYSZUKIWANIA
 # ─────────────────────────────────────────
+# ─────────────────────────────────────────
+#  🔍 WYSZUKIWANIA — 4-warstwowy Flip Engine
+#  🥇 WIDE BRAND   — dane rynkowe, szerokie siatki
+#  🥈 CATEGORY     — trendy, kategorie
+#  🥉 TARGETED     — wysokiej wartości itemy
+#  🧨 CHAOS/VINTAGE — ukryte okazje
+#  ⚽ FOOTBALL     — vintage koszulki
+# ─────────────────────────────────────────
 SEARCHES = [
+
+    # ══════════════════════════════════════
+    #  🥇 LAYER 1 — WIDE BRAND (Core Data)
+    # ══════════════════════════════════════
     {
-        "name":     "Nike Dunk / Air Force",
-        "url":      "https://www.vinted.pl/catalog?catalog[]=1206&brand_ids[]=14&brand_ids[]=362&order=newest_first&currency=PLN",
-        "category": "sneakers",
-        "keywords": ["dunk", "air force", "jordan", "nike"],
-        "brands":   ["nike", "jordan", "air force"],
-        "min_price": 30,
-    },
-    {
-        "name":     "Adidas Yeezy / Samba",
-        "url":      "https://www.vinted.pl/catalog?catalog[]=1206&brand_ids[]=7&order=newest_first&currency=PLN",
-        "category": "sneakers",
-        "keywords": ["yeezy", "samba", "gazelle", "stan smith"],
-        "brands":   ["adidas", "yeezy"],
-        "min_price": 30,
-    },
-    {
-        "name":     "Supreme / Off-White",
-        "url":      "https://www.vinted.pl/catalog?catalog[]=4&brand_ids[]=2161&brand_ids[]=3946&order=newest_first&currency=PLN",
+        "name":     "Corteiz",
+        "url":      "https://www.vinted.pl/catalog?search_text=corteiz&order=newest_first&currency=PLN&price_to=800",
         "category": "clothing",
-        "keywords": ["supreme", "off-white", "hoodie", "tee"],
-        "brands":   ["supreme", "off-white"],
-        "min_price": 20,
+        "keywords": ["corteiz", "crtz"],
+        "min_price": 50,
+        "layer": "wide_brand",
     },
     {
-        "name":     "Stone Island / CP Company",
-        "url":      "https://www.vinted.pl/catalog?catalog[]=4&brand_ids[]=2163&brand_ids[]=2305&order=newest_first&currency=PLN",
+        "name":     "Broken Planet",
+        "url":      "https://www.vinted.pl/catalog?search_text=broken+planet&order=newest_first&currency=PLN&price_to=600",
         "category": "clothing",
-        "keywords": ["stone island", "cp company", "kurtka", "bluza"],
-        "brands":   ["stone island", "cp company"],
+        "keywords": ["broken planet"],
+        "min_price": 50,
+        "layer": "wide_brand",
+    },
+    {
+        "name":     "Denim Tears",
+        "url":      "https://www.vinted.pl/catalog?search_text=denim+tears&order=newest_first&currency=PLN&price_to=1000",
+        "category": "clothing",
+        "keywords": ["denim tears"],
+        "min_price": 50,
+        "layer": "wide_brand",
+    },
+    {
+        "name":     "Represent",
+        "url":      "https://www.vinted.pl/catalog?search_text=represent+clothing&order=newest_first&currency=PLN&price_to=800",
+        "category": "clothing",
+        "keywords": ["represent"],
+        "min_price": 50,
+        "layer": "wide_brand",
+    },
+    {
+        "name":     "Essentials Fear of God",
+        "url":      "https://www.vinted.pl/catalog?search_text=essentials+fear+of+god&order=newest_first&currency=PLN&price_to=600",
+        "category": "clothing",
+        "keywords": ["essentials", "fear of god", "fog"],
+        "min_price": 50,
+        "layer": "wide_brand",
+    },
+    {
+        "name":     "Stussy",
+        "url":      "https://www.vinted.pl/catalog?search_text=stussy&order=newest_first&currency=PLN&price_to=500",
+        "category": "clothing",
+        "keywords": ["stussy"],
+        "min_price": 30,
+        "layer": "wide_brand",
+    },
+    {
+        "name":     "Carhartt WIP",
+        "url":      "https://www.vinted.pl/catalog?search_text=carhartt+wip&order=newest_first&currency=PLN&price_to=500",
+        "category": "carhartt",
+        "keywords": ["carhartt", "wip"],
+        "brands":   ["carhartt"],
         "min_price": 40,
+        "layer": "wide_brand",
+        "carhartt_mode": True,
+        "carhartt_models": CARHARTT_PREMIUM_MODELS,
+        "carhartt_max_price": CARHARTT_PREMIUM_MAX,
     },
+    {
+        "name":     "Arc'teryx",
+        "url":      "https://www.vinted.pl/catalog?search_text=arcteryx&order=newest_first&currency=PLN&price_to=1500",
+        "category": "clothing",
+        "keywords": ["arcteryx", "arc'teryx", "arc teryx"],
+        "min_price": 100,
+        "layer": "wide_brand",
+    },
+    {
+        "name":     "Salomon",
+        "url":      "https://www.vinted.pl/catalog?search_text=salomon&order=newest_first&currency=PLN&price_to=600",
+        "category": "sneakers",
+        "keywords": ["salomon"],
+        "min_price": 50,
+        "layer": "wide_brand",
+    },
+    {
+        "name":     "New Balance",
+        "url":      "https://www.vinted.pl/catalog?search_text=new+balance&catalog[]=1206&order=newest_first&currency=PLN&price_to=600",
+        "category": "sneakers",
+        "keywords": ["new balance"],
+        "min_price": 40,
+        "layer": "wide_brand",
+    },
+    {
+        "name":     "ASICS",
+        "url":      "https://www.vinted.pl/catalog?search_text=asics&catalog[]=1206&order=newest_first&currency=PLN&price_to=500",
+        "category": "sneakers",
+        "keywords": ["asics", "gel"],
+        "min_price": 40,
+        "layer": "wide_brand",
+    },
+
+    # ══════════════════════════════════════
+    #  🥈 LAYER 2 — CATEGORY (Trend Capture)
+    # ══════════════════════════════════════
+    {
+        "name":     "Cargo Pants",
+        "url":      "https://www.vinted.pl/catalog?search_text=cargo+pants&catalog[]=4&order=newest_first&currency=PLN&price_to=400",
+        "category": "clothing",
+        "keywords": ["cargo", "pants", "spodnie"],
+        "min_price": 30,
+        "layer": "category",
+        "exclude_keywords": [
+            "dziecięc", "dzieciec", "dla dzieci", "kids",
+        ],
+    },
+    {
+        "name":     "Baggy Jeans",
+        "url":      "https://www.vinted.pl/catalog?search_text=baggy+jeans&catalog[]=4&order=newest_first&currency=PLN&price_to=400",
+        "category": "clothing",
+        "keywords": ["baggy", "jeans", "wide leg"],
+        "min_price": 30,
+        "layer": "category",
+    },
+    {
+        "name":     "Designer Sunglasses",
+        "url":      "https://www.vinted.pl/catalog?search_text=designer+sunglasses&order=newest_first&currency=PLN&price_to=600",
+        "category": "clothing",
+        "keywords": ["oakley", "ray-ban", "gucci", "prada", "dior", "versace", "carrera"],
+        "min_price": 40,
+        "layer": "category",
+    },
+    {
+        "name":     "Vintage Nike",
+        "url":      "https://www.vinted.pl/catalog?search_text=vintage+nike&order=newest_first&currency=PLN&price_to=300",
+        "category": "clothing",
+        "keywords": ["nike", "vintage"],
+        "min_price": 20,
+        "layer": "category",
+        "vintage_mode": True,
+    },
+    {
+        "name":     "Football Jersey",
+        "url":      "https://www.vinted.pl/catalog?search_text=football+jersey&catalog[]=4&order=newest_first&currency=PLN&price_to=300",
+        "category": "football",
+        "keywords": ["jersey", "shirt", "football"],
+        "min_price": 15,
+        "layer": "category",
+        "football_mode": True,
+    },
+
+    # ══════════════════════════════════════
+    #  🥉 LAYER 3 — TARGETED (High Value)
+    # ══════════════════════════════════════
+    {
+        "name":     "Arc'teryx Beta",
+        "url":      "https://www.vinted.pl/catalog?search_text=arcteryx+beta&order=newest_first&currency=PLN&price_to=1500",
+        "category": "clothing",
+        "keywords": ["arcteryx", "beta"],
+        "min_price": 200,
+        "layer": "targeted",
+    },
+    {
+        "name":     "Salomon XT-6",
+        "url":      "https://www.vinted.pl/catalog?search_text=salomon+xt+6&catalog[]=1206&order=newest_first&currency=PLN&price_to=600",
+        "category": "sneakers",
+        "keywords": ["salomon", "xt"],
+        "min_price": 80,
+        "layer": "targeted",
+    },
+    {
+        "name":     "New Balance 1906R",
+        "url":      "https://www.vinted.pl/catalog?search_text=new+balance+1906&catalog[]=1206&order=newest_first&currency=PLN&price_to=500",
+        "category": "sneakers",
+        "keywords": ["new balance", "1906"],
+        "min_price": 80,
+        "layer": "targeted",
+    },
+
+    # ══════════════════════════════════════
+    #  🧨 LAYER 4 — CHAOS / VINTAGE
+    # ══════════════════════════════════════
+    {
+        "name":     "Vintage T-Shirt",
+        "url":      "https://www.vinted.pl/catalog?search_text=vintage+t+shirt&catalog[]=4&order=newest_first&currency=PLN&price_to=300",
+        "category": "clothing",
+        "keywords": ["vintage", "t-shirt", "tshirt", "tee"],
+        "min_price": 15,
+        "layer": "chaos",
+        "vintage_mode": True,
+    },
+    {
+        "name":     "Single Stitch",
+        "url":      "https://www.vinted.pl/catalog?search_text=single+stitch&order=newest_first&currency=PLN&price_to=400",
+        "category": "clothing",
+        "keywords": ["single stitch"],
+        "min_price": 20,
+        "layer": "chaos",
+        "vintage_mode": True,
+    },
+    {
+        "name":     "Vintage Hoodie",
+        "url":      "https://www.vinted.pl/catalog?search_text=vintage+hoodie&catalog[]=4&order=newest_first&currency=PLN&price_to=400",
+        "category": "clothing",
+        "keywords": ["vintage", "hoodie", "bluza"],
+        "min_price": 20,
+        "layer": "chaos",
+        "vintage_mode": True,
+    },
+    {
+        "name":     "Retro Jacket",
+        "url":      "https://www.vinted.pl/catalog?search_text=retro+jacket&catalog[]=4&order=newest_first&currency=PLN&price_to=500",
+        "category": "clothing",
+        "keywords": ["retro", "jacket", "kurtka"],
+        "min_price": 30,
+        "layer": "chaos",
+        "vintage_mode": True,
+    },
+    {
+        "name":     "Vintage Adidas",
+        "url":      "https://www.vinted.pl/catalog?search_text=vintage+adidas&order=newest_first&currency=PLN&price_to=400",
+        "category": "clothing",
+        "keywords": ["adidas", "vintage"],
+        "min_price": 20,
+        "layer": "chaos",
+        "vintage_mode": True,
+    },
+    {
+        "name":     "90s Jacket",
+        "url":      "https://www.vinted.pl/catalog?search_text=90s+jacket&catalog[]=4&order=newest_first&currency=PLN&price_to=500",
+        "category": "clothing",
+        "keywords": ["90s", "jacket", "kurtka"],
+        "min_price": 25,
+        "layer": "chaos",
+        "vintage_mode": True,
+    },
+    {
+        "name":     "Baggy Jeans Vintage",
+        "url":      "https://www.vinted.pl/catalog?search_text=baggy+jeans+vintage&catalog[]=4&order=newest_first&currency=PLN&price_to=300",
+        "category": "clothing",
+        "keywords": ["baggy", "jeans", "vintage"],
+        "min_price": 20,
+        "layer": "chaos",
+        "vintage_mode": True,
+    },
+    {
+        "name":     "Leather Jacket Vintage",
+        "url":      "https://www.vinted.pl/catalog?search_text=leather+jacket+vintage&catalog[]=4&order=newest_first&currency=PLN&price_to=800",
+        "category": "clothing",
+        "keywords": ["leather", "skórzana", "kurtka", "vintage"],
+        "min_price": 50,
+        "layer": "chaos",
+        "vintage_mode": True,
+    },
+    {
+        "name":     "Shearling Jacket",
+        "url":      "https://www.vinted.pl/catalog?search_text=shearling+jacket&catalog[]=4&order=newest_first&currency=PLN&price_to=1200",
+        "category": "clothing",
+        "keywords": ["shearling", "kożuch", "sheepskin"],
+        "min_price": 80,
+        "layer": "chaos",
+        "vintage_mode": True,
+    },
+    # Generic chaos — szeroka siatka na hidden gems
+    {
+        "name":     "Hoodie — Chaos Hunt",
+        "url":      "https://www.vinted.pl/catalog?search_text=hoodie&catalog[]=4&order=newest_first&currency=PLN&price_to=200",
+        "category": "clothing",
+        "keywords": ["supreme", "palace", "bape", "stussy", "carhartt", "arcteryx", "represent", "corteiz"],
+        "min_price": 15,
+        "layer": "chaos",
+        "hidden_gem_mode": True,
+        "exclude_keywords": ["dziecięc", "kids", "baby", "junior"],
+    },
+    {
+        "name":     "Jacket — Chaos Hunt",
+        "url":      "https://www.vinted.pl/catalog?search_text=jacket&catalog[]=4&order=newest_first&currency=PLN&price_to=300",
+        "category": "clothing",
+        "keywords": ["arcteryx", "carhartt", "stone island", "cp company", "salomon", "represent", "nike", "adidas"],
+        "min_price": 20,
+        "layer": "chaos",
+        "hidden_gem_mode": True,
+        "exclude_keywords": ["dziecięc", "kids", "baby", "junior"],
+    },
+    {
+        "name":     "Coat — Chaos Hunt",
+        "url":      "https://www.vinted.pl/catalog?search_text=coat&catalog[]=4&order=newest_first&currency=PLN&price_to=400",
+        "category": "clothing",
+        "keywords": ["moncler", "canada goose", "arcteryx", "burberry", "stone island"],
+        "min_price": 30,
+        "layer": "chaos",
+        "hidden_gem_mode": True,
+        "exclude_keywords": ["dziecięc", "kids", "baby"],
+    },
+
+    # ══════════════════════════════════════
+    #  ⚽ FOOTBALL — Vintage + Chaos
+    # ══════════════════════════════════════
+    {
+        "name":     "Football Shirt",
+        "url":      "https://www.vinted.pl/catalog?search_text=football+shirt&catalog[]=4&order=newest_first&currency=PLN&price_to=300",
+        "category": "football",
+        "keywords": ["shirt", "jersey", "koszulka"],
+        "min_price": 15,
+        "layer": "football",
+        "football_mode": True,
+    },
+    {
+        "name":     "Soccer Jersey",
+        "url":      "https://www.vinted.pl/catalog?search_text=soccer+jersey&catalog[]=4&order=newest_first&currency=PLN&price_to=300",
+        "category": "football",
+        "keywords": ["jersey", "shirt"],
+        "min_price": 15,
+        "layer": "football",
+        "football_mode": True,
+    },
+    {
+        "name":     "Koszulka Piłkarska",
+        "url":      "https://www.vinted.pl/catalog?search_text=koszulka+pilkarska&catalog[]=4&order=newest_first&currency=PLN&price_to=250",
+        "category": "football",
+        "keywords": ["koszulka", "piłkarska", "pilkarska"],
+        "min_price": 15,
+        "layer": "football",
+        "football_mode": True,
+    },
+    {
+        "name":     "Vintage Football Shirt",
+        "url":      "https://www.vinted.pl/catalog?search_text=vintage+football+shirt&catalog[]=4&order=newest_first&currency=PLN&price_to=400",
+        "category": "football",
+        "keywords": ["vintage", "shirt", "football"],
+        "min_price": 20,
+        "layer": "football",
+        "football_mode": True,
+        "vintage_mode": True,
+    },
+    {
+        "name":     "Retro Football Jersey",
+        "url":      "https://www.vinted.pl/catalog?search_text=retro+football+jersey&catalog[]=4&order=newest_first&currency=PLN&price_to=400",
+        "category": "football",
+        "keywords": ["retro", "jersey", "football"],
+        "min_price": 20,
+        "layer": "football",
+        "football_mode": True,
+        "vintage_mode": True,
+    },
+    {
+        "name":     "90s Football Shirt",
+        "url":      "https://www.vinted.pl/catalog?search_text=90s+football+shirt&catalog[]=4&order=newest_first&currency=PLN&price_to=400",
+        "category": "football",
+        "keywords": ["90s", "shirt", "football", "jersey"],
+        "min_price": 20,
+        "layer": "football",
+        "football_mode": True,
+        "vintage_mode": True,
+    },
+    {
+        "name":     "Umbro Shirt",
+        "url":      "https://www.vinted.pl/catalog?search_text=umbro+shirt&catalog[]=4&order=newest_first&currency=PLN&price_to=300",
+        "category": "football",
+        "keywords": ["umbro", "shirt", "jersey"],
+        "min_price": 15,
+        "layer": "football",
+        "football_mode": True,
+    },
+    {
+        "name":     "Kappa Shirt",
+        "url":      "https://www.vinted.pl/catalog?search_text=kappa+shirt&catalog[]=4&order=newest_first&currency=PLN&price_to=300",
+        "category": "football",
+        "keywords": ["kappa", "shirt", "jersey"],
+        "min_price": 15,
+        "layer": "football",
+        "football_mode": True,
+    },
+    {
+        "name":     "Lotto Football Shirt",
+        "url":      "https://www.vinted.pl/catalog?search_text=lotto+football+shirt&catalog[]=4&order=newest_first&currency=PLN&price_to=250",
+        "category": "football",
+        "keywords": ["lotto", "shirt", "football"],
+        "min_price": 15,
+        "layer": "football",
+        "football_mode": True,
+    },
+    {
+        "name":     "Diadora Football Shirt",
+        "url":      "https://www.vinted.pl/catalog?search_text=diadora+football+shirt&catalog[]=4&order=newest_first&currency=PLN&price_to=250",
+        "category": "football",
+        "keywords": ["diadora", "shirt"],
+        "min_price": 15,
+        "layer": "football",
+        "football_mode": True,
+    },
+    {
+        "name":     "Old Football Shirt",
+        "url":      "https://www.vinted.pl/catalog?search_text=old+football+shirt&catalog[]=4&order=newest_first&currency=PLN&price_to=200",
+        "category": "football",
+        "keywords": ["old", "shirt", "football"],
+        "min_price": 10,
+        "layer": "football",
+        "football_mode": True,
+    },
+
+    # ══════════════════════════════════════
+    #  🧱 LEGO — zachowane z poprzedniej wersji
+    # ══════════════════════════════════════
     {
         "name":     "LEGO Star Wars — wszystkie zestawy",
         "url":      "https://www.vinted.pl/catalog?search_text=lego+star+wars&order=newest_first&currency=PLN&price_to=100",
@@ -609,6 +984,7 @@ SEARCHES = [
         "exclude_keywords": ["polybag", "bitty", "keychain", "brelok", "kulcstart", "nyckelring", "mints", "saszetk"],
         "min_price": 15,
         "lego_sw_mode": True,
+        "layer": "lego",
     },
     {
         "name":     "LEGO Star Wars — numery setów",
@@ -618,15 +994,7 @@ SEARCHES = [
         "exclude_keywords": ["polybag", "bitty", "keychain", "brelok", "kulcstart", "nyckelring"],
         "min_price": 15,
         "lego_sw_mode": True,
-    },
-    {
-        "name":     "LEGO Star Wars — pojazdy",
-        "url":      "https://www.vinted.pl/catalog?search_text=lego+x-wing+falcon+death+star&order=newest_first&currency=PLN&price_to=100",
-        "category": "lego_sw",
-        "keywords": ["lego"],
-        "exclude_keywords": ["polybag", "bitty", "keychain", "brelok"],
-        "min_price": 15,
-        "lego_sw_mode": True,
+        "layer": "lego",
     },
     {
         "name":     "LEGO zestawy (ogólne)",
@@ -636,6 +1004,7 @@ SEARCHES = [
         "exclude_keywords": ["polybag", "bitty", "keychain", "brelok"],
         "brands":   ["lego"],
         "min_price": 20,
+        "layer": "lego",
     },
     {
         "name":     "Funko Pop",
@@ -645,107 +1014,14 @@ SEARCHES = [
         "exclude_keywords": ["bitty", "minis", "funko minis", "pocket pop"],
         "brands":   ["funko"],
         "min_price": 10,
-    },
-    {
-        "name":     "Funko Pop Star Wars (do 30 zł)",
-        "url":      "https://www.vinted.pl/catalog?search_text=funko+pop+star+wars&order=newest_first&currency=PLN&price_to=30",
-        "category": "funko",
-        "keywords": ["funko", "star wars"],
-        "exclude_keywords": ["bitty", "minis", "pocket pop"],
-        "min_price": 5,
-    },
-    # ── KOSZULKI PIŁKARSKIE RETRO ────────────
-    {
-        "name":     "Koszulki retro — Serie A / La Liga",
-        "url":      "https://www.vinted.pl/catalog?search_text=koszulka+pilkarska+vintage&catalog[]=4&order=newest_first&currency=PLN&price_to=150",
-        "category": "football",
-        "keywords": ["koszulka", "jersey", "shirt"],
-        "min_price": 20,
-        "football_mode": True,
-    },
-    {
-        "name":     "Koszulki retro — Premier League",
-        "url":      "https://www.vinted.pl/catalog?search_text=football+shirt+retro+vintage&catalog[]=4&order=newest_first&currency=PLN&price_to=150",
-        "category": "football",
-        "keywords": ["shirt", "jersey", "koszulka"],
-        "min_price": 20,
-        "football_mode": True,
-    },
-    {
-        "name":     "Koszulki retro — reprezentacje",
-        "url":      "https://www.vinted.pl/catalog?search_text=koszulka+reprezentacja+retro&catalog[]=4&order=newest_first&currency=PLN&price_to=150",
-        "category": "football",
-        "keywords": ["koszulka", "jersey", "shirt", "reprezentacja"],
-        "min_price": 20,
-        "football_mode": True,
-    },
-    {
-        "name":     "Umbro / Lotto / Kappa retro",
-        "url":      "https://www.vinted.pl/catalog?search_text=umbro+koszulka+pilkarska&catalog[]=4&order=newest_first&currency=PLN&price_to=150",
-        "category": "football",
-        "keywords": ["umbro", "lotto", "kappa", "koszulka", "jersey"],
-        "min_price": 15,
-        "football_mode": True,
-    },
-    # ── CARHARTT ─────────────────────────────
-    {
-        "name":     "Carhartt Trucker",
-        "url":      "https://www.vinted.pl/catalog?search_text=carhartt+trucker&catalog[]=4&order=newest_first&currency=PLN&price_to=150",
-        "category": "carhartt",
-        "keywords": ["carhartt", "trucker"],
-        "brands":   ["carhartt"],
-        "min_price": 20,
-        "carhartt_mode": True,
-        "carhartt_models": CARHARTT_TRUCKER_MODELS,
-        "carhartt_max_price": CARHARTT_TRUCKER_MAX,
-    },
-    {
-        "name":     "Carhartt Santa Fe / Detroit / Active",
-        "url":      "https://www.vinted.pl/catalog?search_text=carhartt+kurtka&catalog[]=4&order=newest_first&currency=PLN&price_to=250",
-        "category": "carhartt",
-        "keywords": ["carhartt"],
-        "brands":   ["carhartt"],
-        "min_price": 50,
-        "carhartt_mode": True,
-        "carhartt_models": CARHARTT_PREMIUM_MODELS,
-        "carhartt_max_price": CARHARTT_PREMIUM_MAX,
-    },
-    # ── HIDDEN GEM — tylko gdy mamy klucz AI ──
-    # Bez ANTHROPIC_KEY te wyszukiwania wysyłają wszystko bez filtracji
-    # Włączone tylko gdy ANTHROPIC_KEY jest ustawiony w Railway
-    {
-        "name":     "Buty bez marki (hidden gem)",
-        "url":      "https://www.vinted.pl/catalog?catalog[]=1206&order=newest_first&currency=PLN&price_to=80",
-        "category": "sneakers",
-        "keywords": ["nike", "adidas", "jordan", "puma", "reebok", "new balance", "vans", "converse"],
-        "brands":   [],
-        "min_price": 20,
-        "hidden_gem_mode": True,
-        # FIX #4 — Vinted zwraca kurtki Nike/Adidas mimo catalog=sneakers
-        "exclude_keywords": [
-            "kurtka", "jacket", "windbreaker", "wiatrówka", "wiatrowka",
-            "bluza", "hoodie", "sweatshirt", "dzseki", "vindjacka",
-            "anorak", "parka", "softshell", "fleece", "pullover",
-            "hanorac", "dzseki", "cazadora", "veste",
-        ],
-    },
-    {
-        "name":     "Ubrania bez marki (hidden gem)",
-        "url":      "https://www.vinted.pl/catalog?catalog[]=4&order=newest_first&currency=PLN&price_to=30",
-        "category": "clothing",
-        "keywords": ["supreme", "stone island", "carhartt", "nike", "adidas", "ralph lauren", "tommy hilfiger", "lacoste"],
-        "brands":   [],
-        "min_price": 10,
-        "hidden_gem_mode": True,
+        "layer": "lego",
     },
 ]
 
 # ─────────────────────────────────────────
 #  💾 PAMIĘĆ  (z automatycznym czyszczeniem)
 # ─────────────────────────────────────────
-_DATA_DIR      = os.getenv("DATA_DIR", "/tmp/vinted_bot")
-os.makedirs(_DATA_DIR, exist_ok=True)
-SEEN_FILE      = os.path.join(_DATA_DIR, "seen_items.json")
+SEEN_FILE      = "seen_items.json"
 SEEN_MAX_DAYS  = 30   # pamiętamy ID przez 30 dni — blokuje stare oferty
 
 def load_seen():
@@ -1308,7 +1584,7 @@ def get_market_median(search):
 #  Cache zapisywany do pliku JSON
 #  Odświeżamy ceny raz na 24h per set
 # ─────────────────────────────────────────
-BRICKLINK_CACHE_FILE = os.path.join(_DATA_DIR, "bricklink_prices.json")
+BRICKLINK_CACHE_FILE = "bricklink_prices.json"
 BRICKLINK_CACHE_TTL  = 24 * 3600  # 24h
 
 _bl_cache = {}
@@ -2015,6 +2291,9 @@ while True:
         cycle += 1
         print(f"\n🔄 Cykl #{cycle}")
 
+        # Step 6 — zbieramy wyniki wszystkich wyszukiwań, sortujemy i wysyłamy top 5
+        cycle_candidates = []   # (confidence, search, item, eval_result)
+
         for search in SEARCHES:
             print(f"  ⏳ Sprawdzam: {search['name']}")
             market_price = market_prices.get(search["name"])
@@ -2024,58 +2303,68 @@ while True:
             now = time.time()
             for item in new_items[:MAX_ALERTS_PER_SEARCH]:
 
-                photo = item.get("photo") or get_item_photo(item["id"], item["link"])
-
                 # ── Engine evaluation ─────────────────
                 if engine:
                     eval_result = engine.evaluate(item, search, market_price)
-                    conf  = eval_result["confidence"]
-                    tier  = eval_result["tier"]
-                    has_db = eval_result.get("db_data") is not None
 
                     is_special = (
                         search.get("football_mode") or
                         search.get("lego_sw_mode") or
                         search.get("carhartt_mode")
                     )
-
-                    # INSANE / GOOD → engine format
-                    if tier in ("INSANE", "GOOD"):
-                        engine_msg = engine.format_alert(eval_result)
-                        send_message(engine_msg, photo_url=photo, item_link=item.get("link"))
-                        seen[item["id"]] = now
-                        tag = "🔴" if tier == "INSANE" else "🟡"
-                        print(f"  {tag} [{tier}] conf={conf:.1f} | {item['title'][:45]}")
-                        continue
-
-                    # WATCH → standardowy format (informacyjny)
-                    if tier == "WATCH":
-                        msg = format_message(search, item)
-                        send_message(msg, photo_url=photo, item_link=item.get("link"))
-                        seen[item["id"]] = now
-                        print(f"  ⚪ [WATCH] conf={conf:.1f} | {item['title'][:45]}")
-                        continue
-
-                    # Engine skip — TYLKO gdy mamy dane DB i tryb normalny
-                    if not is_special and has_db:
-                        print(f"  ⏭  Engine skip: conf={conf:.1f} | {item['title'][:40]}")
+                    if not is_special and not eval_result["send_alert"]:
+                        print(f"  ⏭  Engine skip: conf={eval_result['confidence']:.1f} | {item['title'][:40]}")
                         seen[item["id"]] = now
                         continue
 
-                    # Brak danych DB (bot nowy) → standardowy format
-                    if not is_special and not has_db:
-                        msg = format_message(search, item)
-                        send_message(msg, photo_url=photo, item_link=item.get("link"))
+                    # Step 5 — hard confidence floor
+                    if eval_result["confidence"] < 6.5 and not is_special:
                         seen[item["id"]] = now
-                        print(f"  ✉️  [no-DB] {item['title'][:50]} | {item['price']:.0f} zł")
                         continue
 
-                # ── Tryby specjalne (football/lego_sw/carhartt) ──
+                    cycle_candidates.append((
+                        eval_result["confidence"],
+                        search,
+                        item,
+                        eval_result,
+                        now,
+                    ))
+                else:
+                    # Bez engine — stary fallback
+                    msg = format_message(search, item)
+                    photo = item.get("photo") or get_item_photo(item["id"], item["link"])
+                    send_message(msg, photo_url=photo, item_link=item.get("link"))
+                    seen[item["id"]] = now
+                    print(f"  ✉️ {item['title'][:55]} | {item['price']:.0f} zł")
+
+        # Step 6 — sortuj DESC po confidence, wyślij max 5 najlepszych
+        cycle_candidates.sort(key=lambda x: x[0], reverse=True)
+        sent_this_cycle = 0
+
+        for conf, search, item, eval_result, now in cycle_candidates:
+            if sent_this_cycle >= 5:
+                # Oznacz pozostałe jako widziane bez wysyłania
+                seen[item["id"]] = now
+                continue
+
+            if eval_result["tier"] in ("INSANE", "GOOD"):
+                engine_msg = engine.format_alert(eval_result)
+                photo = item.get("photo") or get_item_photo(item["id"], item["link"])
+                send_message(engine_msg, photo_url=photo, item_link=item.get("link"))
+                seen[item["id"]] = now
+                sent_this_cycle += 1
+                tier_tag = "🔴" if eval_result["tier"] == "INSANE" else "🟡"
+                print(f"  {tier_tag} Engine [{eval_result['tier']}] conf={conf:.1f} | {item['title'][:40]}")
+            elif eval_result.get("send_alert") or search.get("lego_sw_mode") or search.get("football_mode") or search.get("carhartt_mode"):
                 msg = format_message(search, item)
+                photo = item.get("photo") or get_item_photo(item["id"], item["link"])
                 send_message(msg, photo_url=photo, item_link=item.get("link"))
                 seen[item["id"]] = now
+                sent_this_cycle += 1
                 tag = "💎" if item.get("is_hidden_gem") else ("🔤" if item.get("has_typo") else "✉️")
                 print(f"  {tag} {item['title'][:55]} | {item['price']:.0f} zł")
+            else:
+                seen[item["id"]] = now
 
         save_seen(seen)
         time.sleep(60)
