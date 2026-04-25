@@ -34,22 +34,19 @@ from collections import defaultdict
 
 
 # ─────────────────────────────────────────────────────
-#  📁 PLIKI — /tmp przeżywa restarty na Railway
+#  📁 PLIKI
 # ─────────────────────────────────────────────────────
-_DATA_DIR = os.getenv("DATA_DIR", "/tmp/vinted_bot")
-os.makedirs(_DATA_DIR, exist_ok=True)
-
-DB_FILE          = os.path.join(_DATA_DIR, "market_db.json")
-RAW_FILE         = os.path.join(_DATA_DIR, "raw_items.json")
-FEEDBACK_FILE    = os.path.join(_DATA_DIR, "feedback.json")
-AI_CACHE_FILE    = os.path.join(_DATA_DIR, "ai_cache.json")
+DB_FILE          = "market_db.json"
+RAW_FILE         = "raw_items.json"
+FEEDBACK_FILE    = "feedback.json"
+AI_CACHE_FILE    = "ai_cache.json"
 
 # ─────────────────────────────────────────────────────
 #  ⚙️ PROGI
 # ─────────────────────────────────────────────────────
 CONFIDENCE_INSANE  = 8.5   # 🔴 INSANE DEAL
 CONFIDENCE_GOOD    = 7.0   # 🟡 GOOD DEAL
-CONFIDENCE_WATCH   = 6.0   # ⚪ WATCH (podnosimy z 5.5 → mniej spamu)
+CONFIDENCE_WATCH   = 5.5   # ⚪ WATCH
 
 DB_MIN_SAMPLES     = 3     # min próbek żeby użyć DB
 DB_BUILD_EVERY     = 150   # buduj DB co N nowych itemów
@@ -70,6 +67,16 @@ HYPE_BRANDS = {
     "carhartt wip", "dickies", "wtaps",
     # FIX: Funko jako hype brand (kolekcjonerski)
     "funko", "funko pop",
+    # Step 1 — nowe hype brandy flip engine
+    "corteiz", "crtz", "broken planet", "denim tears",
+    "represent", "arcteryx", "arc'teryx",
+    "salomon",  # hype footwear
+}
+
+MAINSTREAM_BRANDS = {
+    "nike", "adidas", "puma", "reebok", "new balance",
+    "vans", "converse", "asics", "carhartt", "levi",
+    "lego", "funko",
 }
 
 CATEGORY_MAP = {
@@ -560,6 +567,101 @@ Zasady oceny:
 # ─────────────────────────────────────────────────────
 #  🧮 CONFIDENCE SCORING
 # ─────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
+#  🎸 VINTAGE SCORING — Step 2
+# ─────────────────────────────────────────────────────
+VINTAGE_KEYWORDS = [
+    "vintage", "single stitch", "90s", "80s", "70s", "y2k",
+    "retro", "deadstock", "made in usa", "made in usa",
+    "distressed", "faded", "worn", "aged",
+]
+
+HIGH_VALUE_TOPICS = [
+    # Muzyka
+    "metallica", "nirvana", "tour", "band tee", "band shirt",
+    "ac/dc", "rolling stones", "led zeppelin", "pink floyd",
+    "rap tee", "rap shirt", "wu-tang", "wu tang", "tupac",
+    "biggie", "eminem", "jay-z", "nas", "travis scott",
+    # Pop culture
+    "disney", "mickey", "mickey mouse", "looney tunes",
+    "harley", "harley davidson", "nascar",
+    "starter", "champion", "russell athletic",
+    # Gaming
+    "pokemon", "pikachu", "zelda", "mario", "nintendo",
+    "anime", "dragon ball", "naruto", "playstation",
+    # Inne tematyki vintage premium
+    "usa olympic", "olympics", "world cup", "superbowl",
+    "college", "university", "varsity",
+]
+
+
+def vintage_score(title: str, description: str | None = None) -> float:
+    """
+    Oblicza score vintage (0–10) na podstawie tytułu i opisu.
+    Step 2 z flipengine spec.
+    """
+    t = (title + " " + (description or "")).lower()
+    score = 0.0
+
+    if any(k in t for k in VINTAGE_KEYWORDS):
+        score += 2.0
+
+    if any(k in t for k in HIGH_VALUE_TOPICS):
+        score += 3.0
+
+    if "tour" in t:
+        score += 1.5
+
+    if "single stitch" in t:
+        score += 1.0
+
+    # Zwykły t-shirt bez "vintage" — mała szansa na gem
+    if ("t shirt" in t or "tshirt" in t or "tee" in t) and "vintage" not in t:
+        score += 0.5
+
+    return min(score, 10.0)
+
+
+# ─────────────────────────────────────────────────────
+#  ⚽ FOOTBALL VINTAGE SCORING — Step 3
+# ─────────────────────────────────────────────────────
+ERA_KEYWORDS = [
+    "90s", "80s", "70s", "2000", "2001", "2002", "2003",
+    "1998", "1996", "1994", "1992", "1990", "1988",
+    "1986", "1984", "1982", "1980", "1970",
+    "98", "96", "94", "92", "90", "88", "86",
+]
+
+
+def football_vintage_score(title: str) -> float:
+    """
+    Oblicza score koszulki vintage (0–10).
+    Step 3 z flipengine spec.
+    """
+    t = title.lower()
+    score = 0.0
+
+    if "football" in t or "jersey" in t or "shirt" in t or "koszulka" in t:
+        score += 1.0
+
+    if any(k in t for k in ["vintage", "retro", "classic", "old", "original"]):
+        score += 2.0
+
+    if any(k in t for k in ["umbro", "kappa", "lotto", "diadora",
+                              "hummel", "le coq sportif", "admiral", "bukta"]):
+        score += 2.0
+
+    if any(k in t for k in ERA_KEYWORDS):
+        score += 1.5
+
+    # Bonus za znane turnieje
+    if any(k in t for k in ["world cup", "euro", "champions league",
+                              "copa", "mundial", "mistrzostwa"]):
+        score += 1.0
+
+    return min(score, 10.0)
+
+
 def calculate_confidence(
     price: float,
     db_data: dict | None,
@@ -568,18 +670,13 @@ def calculate_confidence(
     brand: str | None,
     category: str,
     learner: FeedbackLearner,
+    title: str = "",
+    description: str = "",
 ) -> dict:
     """
-    Oblicza confidence score (0–10) z trzech źródeł:
-      - db_score   (40%) — porównanie z naszą bazą
-      - market_score (30%) — porównanie z medianą Vinted
-      - ai_score   (30%) — ocena AI
-
-    Zwraca:
-    {
-        confidence, db_score, market_score, ai_score,
-        fake_risk, flip_profit, trend
-    }
+    Oblicza confidence score (0–10).
+    Steps 4/5/7/8: vintage boost, football boost, flip boost,
+                   chaos bonus, anti-spam, fake filter.
     """
 
     # ── DB SCORE (0–10) ──────────────────────
@@ -606,73 +703,60 @@ def calculate_confidence(
         else:
             db_score = 3.0
 
-        # Fake risk — luksus bardzo tani
         if brand in LUXURY_BRANDS and ratio < FAKE_LUXURY_RATIO:
             fake_risk = True
             db_score = max(db_score - 2.0, 0.0)
 
-        # FIX #9 — silniejsza detekcja fake luxury: poniżej 30% avg
         if brand in LUXURY_BRANDS and ratio < 0.30:
             fake_risk = True
-            db_score = max(db_score - 3.0, 0.0)  # dodatkowa kara -3
+            db_score = max(db_score - 3.0, 0.0)
 
-        # Flip profit
         estimated = ai_data.get("estimated_value", avg)
         flip_profit = max(estimated - price, 0.0)
 
-        # Trend boost
         if trend == "rising":
             db_score = min(db_score + 0.5, 10.0)
         elif trend == "falling":
             db_score = max(db_score - 0.5, 0.0)
+    else:
+        estimated = ai_data.get("estimated_value", price * 1.5)
+        flip_profit = max(estimated - price, 0.0)
 
     # ── MARKET SCORE (0–10) ──────────────────
     market_score = 5.0
     if market_price and market_price > 0:
-        # FIX #7 — market_price unreliable below 20 zł
         if market_price < 20:
             market_score = 5.0
         else:
-            ratio = price / market_price
-            if ratio < 0.50:
+            ratio_m = price / market_price
+            if ratio_m < 0.50:
                 market_score = 10.0
-            elif ratio < 0.60:
+            elif ratio_m < 0.60:
                 market_score = 9.0
-            elif ratio < 0.70:
+            elif ratio_m < 0.70:
                 market_score = 8.0
-            elif ratio < 0.80:
+            elif ratio_m < 0.80:
                 market_score = 6.5
-            elif ratio < 0.90:
+            elif ratio_m < 0.90:
                 market_score = 5.0
             else:
                 market_score = 3.0
 
     # ── AI SCORE (0–10) ──────────────────────
     ai_score = float(ai_data.get("final_score", 5.0))
-
-    # Hype bonus
     hype = ai_data.get("hype_score", 3)
     if hype >= 8:
         ai_score = min(ai_score + 1.0, 10.0)
     elif hype >= 6:
         ai_score = min(ai_score + 0.5, 10.0)
 
-    # Rarity bonus
     rarity = ai_data.get("rarity", 3)
     if rarity >= 8:
         ai_score = min(ai_score + 1.0, 10.0)
 
-    # Flip profit boost
     if flip_profit > FLIP_MIN_PROFIT:
         boost = min(flip_profit / 100.0, 1.5)
         ai_score = min(ai_score + boost, 10.0)
-
-    # FIX #6 — flip profit bezpośrednio wpływa na confidence
-    flip_confidence_bonus = 0.0
-    if flip_profit > 500:
-        flip_confidence_bonus = 2.0
-    elif flip_profit > 200:
-        flip_confidence_bonus = 1.0
 
     # ── WEIGHTED CONFIDENCE ───────────────────
     confidence = (
@@ -681,25 +765,69 @@ def calculate_confidence(
         ai_score     * 0.30
     )
 
-    # FIX #6 — flip profit bonus (po ważeniu)
-    confidence += flip_confidence_bonus
+    # ── STEP 4: VINTAGE BOOST ─────────────────
+    v_score = vintage_score(title, description)
+    if v_score >= 8:
+        confidence += 2.0
+    elif v_score >= 6:
+        confidence += 1.0
+
+    # ── STEP 4: FOOTBALL VINTAGE BOOST ────────
+    f_score = football_vintage_score(title) if category == "football" else 0.0
+    if f_score >= 6 and price < 100:
+        confidence += 2.0
+    elif f_score >= 5 and price < 150:
+        confidence += 1.5
+
+    # ── STEP 4: FLIP PROFIT BOOST ─────────────
+    if flip_profit > 300:
+        confidence += 2.0
+    elif flip_profit > 150:
+        confidence += 1.0
+
+    # ── STEP 4: HYPE + UNDERPRICED BOOST ──────
+    estimated_val = ai_data.get("estimated_value", price * 1.5)
+    if hype >= 8 and estimated_val > 0 and price < estimated_val * 0.70:
+        confidence += 1.0
+
+    # ── STEP 5: ANTI-SPAM PENALTIES ───────────
+    t_lower = title.lower()
+    if any(b in t_lower for b in ["shein", "zara", "h&m", "hm "]):
+        confidence -= 2.0
+    if price < 20:
+        confidence -= 1.0
+
+    # ── STEP 7: CHAOS BONUS ───────────────────
+    if brand is None:
+        if price < 100:
+            confidence += 0.5
+        if ai_score < 6:
+            confidence -= 1.0
+
+    # ── STEP 8: FAKE FILTER ───────────────────
+    if any(k in t_lower for k in ["replica", "replika", "fake", "kopia",
+                                    "podróbka", "bootleg", "inspired"]):
+        fake_risk = True
+        confidence -= 3.0
 
     # ── SELF-LEARNING BONUS ───────────────────
     if brand:
         confidence += learner.get_brand_bonus(brand) * 0.3
     confidence += learner.get_category_bonus(category) * 0.2
 
-    # FIX #6 — clamp do max 10
-    confidence = min(confidence, 10.0)
+    # ── CLAMP 0–10 ────────────────────────────
+    confidence = max(0.0, min(confidence, 10.0))
 
     return {
-        "confidence":   round(confidence, 2),
-        "db_score":     round(db_score, 2),
-        "market_score": round(market_score, 2),
-        "ai_score":     round(ai_score, 2),
-        "fake_risk":    fake_risk,
-        "flip_profit":  round(flip_profit, 2),
-        "trend":        trend,
+        "confidence":     round(confidence, 2),
+        "db_score":       round(db_score, 2),
+        "market_score":   round(market_score, 2),
+        "ai_score":       round(ai_score, 2),
+        "fake_risk":      fake_risk,
+        "flip_profit":    round(flip_profit, 2),
+        "trend":          trend,
+        "vintage_score":  round(v_score, 2),
+        "football_score": round(f_score, 2),
     }
 
 
@@ -709,15 +837,20 @@ def calculate_confidence(
 def get_alert_tier(confidence: float, ai_decision: str) -> str | None:
     """
     Zwraca tier alertu lub None jeśli nie wysyłać.
-    INSANE: tylko prawdziwe okazje (conf >= 8.5)
-    GOOD:   conf >= 7.0 LUB (BUY + conf >= 6.5)
-    WATCH:  conf >= 6.0
+    FIX #3: doprecyzowane progi — BUY bez solidnego conf nie awansuje do GOOD.
+    Skala:
+      INSANE = conf >= 8.5 LUB (BUY + conf >= 7.0)
+      GOOD   = conf >= 7.0 LUB (BUY + conf >= 6.2)  ← podniesiony z 5.5
+      WATCH  = conf >= 5.5
+    Funko bez DB: base=6.0 → score≈8.0 → BUY, conf≈6.1 → WATCH (nie GOOD)
     """
     if confidence >= CONFIDENCE_INSANE:
         return "INSANE"
+    if ai_decision == "BUY" and confidence >= CONFIDENCE_GOOD:
+        return "INSANE"
     if confidence >= CONFIDENCE_GOOD:
         return "GOOD"
-    if ai_decision == "BUY" and confidence >= 6.5:
+    if ai_decision == "BUY" and confidence >= 6.2:   # podniesiony próg BUY→GOOD
         return "GOOD"
     if confidence >= CONFIDENCE_WATCH:
         return "WATCH"
@@ -819,6 +952,8 @@ class Engine:
             brand=brand,
             category=category,
             learner=self.learner,
+            title=title,
+            description=item.get("description", ""),
         )
 
         # 6. Fake risk — zmniejsz confidence
