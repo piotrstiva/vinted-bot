@@ -1296,9 +1296,9 @@ VINTED_MAX_DELAY = 4.0
 VINTED_429_WAIT  = 180
 
 # BOT #5 — globalny licznik 403 — gdy Vinted blokuje, zwiększamy pauzę
-_consecutive_403 = 0
-_403_BACKOFF_THRESHOLD = 3    # po ilu 403 z rzędu → długa pauza
-_403_BACKOFF_SECONDS   = 300  # 5 minut pauzy po serii 403
+_consecutive_403   = 0
+_403_BACKOFF_STEPS = [60, 120, 300]   # FIX #7 — exponential: 60s → 120s → 300s
+_403_BACKOFF_THRESHOLD = 3
 
 def get_headers():
     """Zwraca losowy zestaw nagłówków naśladujący przeglądarkę."""
@@ -1319,9 +1319,7 @@ def get_headers():
 def vinted_fetch(url, label=""):
     """
     Pobiera stronę Vinted (HTML).
-    Zwraca obiekt requests.Response lub None.
-    Obsługuje 429 z retry i losowy jitter.
-    BOT #5: śledzi serię 403 i wstrzymuje bota po kilku z rzędu.
+    FIX #7: exponential backoff 60s → 120s → 300s po serii 403.
     """
     global _consecutive_403
     for attempt in range(1, 4):
@@ -1330,7 +1328,7 @@ def vinted_fetch(url, label=""):
             r = requests.get(url, headers=get_headers(), timeout=10)
 
             if r.status_code == 200:
-                _consecutive_403 = 0  # reset licznika po sukcesie
+                _consecutive_403 = 0
                 return r
 
             if r.status_code == 429:
@@ -1341,15 +1339,17 @@ def vinted_fetch(url, label=""):
 
             if r.status_code in (403, 401):
                 _consecutive_403 += 1
-                print(f"  ⚠️ HTTP {r.status_code} [{label}] — próba {attempt}/3 (seria 403: {_consecutive_403})")
-                # BOT #5 — po serii 403 rób długą pauzę i odśwież sesję
+                step_idx = min(_consecutive_403 - 1, len(_403_BACKOFF_STEPS) - 1)
+                backoff  = _403_BACKOFF_STEPS[step_idx]
+                print(f"  ⚠️ HTTP {r.status_code} [{label}] — próba {attempt}/3 "
+                      f"(seria {_consecutive_403}x → backoff {backoff}s)")
                 if _consecutive_403 >= _403_BACKOFF_THRESHOLD:
-                    print(f"  🛑 Seria {_consecutive_403}x 403 — pauza {_403_BACKOFF_SECONDS}s i odświeżam sesję...")
-                    time.sleep(_403_BACKOFF_SECONDS)
+                    print(f"  🛑 Seria {_consecutive_403}x 403 — backoff {backoff}s + odświeżam sesję")
+                    time.sleep(backoff)
                     refresh_session()
                     _consecutive_403 = 0
                 else:
-                    time.sleep(5 * attempt)
+                    time.sleep(backoff)
                 continue
 
             print(f"  ⚠️ HTTP {r.status_code} [{label}]")
@@ -1962,14 +1962,70 @@ def check_search(search, seen, market_price):
                     cnt_price += 1
                     continue
 
-                # filtr słów kluczowych
-                # hidden_gem_mode bez AI → używaj keywords jak normalny tryb
-                effective_hidden = hidden_gem_mode and bool(ANTHROPIC_KEY)
-                if not effective_hidden and not lego_sw_mode and not carhartt_mode and not football_mode:
-                    keywords = search.get("keywords", [])
-                    if keywords and not any(kw.lower() in title.lower() for kw in keywords):
+                # ── FIX #2: SMART ITEM SCORING ──────────────
+                # Zastępuje prosty keyword filter systemem scoringowym.
+                # Każdy item dostaje item_score — odrzucamy poniżej progu.
+                VINTAGE_KW  = ["vintage", "retro", "90s", "80s", "70s", "y2k",
+                                "single stitch", "archive", "deadstock", "band tee",
+                                "tour", "old school", "heritage", "throwback"]
+                BRAND_KW    = [
+                    "nike", "adidas", "jordan", "supreme", "palace", "stussy",
+                    "bape", "carhartt", "arcteryx", "salomon", "corteiz",
+                    "represent", "broken planet", "denim tears", "essentials",
+                    "fear of god", "yeezy", "levi", "wrangler", "kappa",
+                    "umbro", "lotto", "diadora", "hummel", "funko", "lego",
+                    "puma", "reebok", "asics", "new balance", "vans",
+                ]
+                CATEGORY_KW = search.get("keywords", [])
+                TRASH_KW    = [
+                    "zara", "bershka", "h&m", "hm", "shein", "primark",
+                    "sinsay", "reserved", "stradivarius", "pull&bear",
+                    "mango", "mohito", "house brand", "terranova",
+                ]
+
+                t_lo = title_lower  # już wcześniej obliczone
+
+                item_score = 0
+                # +2 za wykrycie brandu
+                if any(b in t_lo for b in BRAND_KW):
+                    item_score += 2
+                # +2 za słowo z keywords danego wyszukiwania
+                if CATEGORY_KW and any(kw.lower() in t_lo for kw in CATEGORY_KW):
+                    item_score += 2
+                # +1 za vintage keyword
+                if any(v in t_lo for v in VINTAGE_KW):
+                    item_score += 1
+                # -2 za trash brand
+                if any(tr in t_lo for tr in TRASH_KW):
+                    item_score -= 2
+
+                # Tryby specjalne nie korzystają z item_score
+                # (mają własne walidatory)
+                if not lego_sw_mode and not carhartt_mode and not football_mode:
+                    # FIX #2: odrzuć jeśli zbyt niski score
+                    # hidden_gem_mode z AI — obniżony próg (AI może znaleźć gem bez brandów)
+                    effective_hidden = hidden_gem_mode and bool(ANTHROPIC_KEY)
+                    min_score = 1 if effective_hidden else 2
+                    if item_score < min_score:
                         cnt_kw += 1
+                        if item_score < 0:
+                            pass  # trash brand — odrzucone przez BLOCKED_BRANDS wcześniej
                         continue
+
+                # FIX #10 — verbose logging score
+                _item_score_val = item_score
+
+                # ── FIX #6: HARD FILTER — bad vintage ───────
+                # Odrzuć śmieciowe vintage bez brandu i bez słów kluczowych
+                # To eliminuje: losowe ubrania za 15 zł bez żadnej wartości flip
+                if (
+                    not lego_sw_mode and not carhartt_mode and not football_mode
+                    and price < 30
+                    and not any(b in t_lo for b in BRAND_KW)
+                    and not any(v in t_lo for v in VINTAGE_KW)
+                ):
+                    cnt_rejected += 1
+                    continue
 
                 # ocena cenowa
                 steal_threshold = STEAL_PRICES.get(search["category"], 9999)
@@ -2320,15 +2376,28 @@ while True:
                 # ── Engine evaluation ─────────────────
                 if engine:
                     eval_result = engine.evaluate(item, search, market_price)
-                    conf     = eval_result["confidence"]
-                    has_db   = eval_result.get("db_data") is not None
+                    conf        = eval_result["confidence"]
+                    has_db      = eval_result.get("db_data") is not None
+                    flip_speed  = eval_result.get("scoring", {}).get("flip_speed", "MEDIUM")
+                    flip_profit = eval_result.get("flip_profit", 0)
 
-                    # Skip tylko gdy mamy dane DB i conf < 6.5
+                    # FIX #10 — verbose: loguj brand, score, powód odrzucenia
+                    detected_brand = eval_result.get("brand", "?")
+                    detected_cat   = eval_result.get("category", "?")
+
+                    # Skip gdy słaba confidence z danymi DB
                     if has_db and conf < 6.5:
-                        print(f"  ⏭  Engine skip: conf={conf:.1f} | {item['title'][:40]}")
+                        print(f"  ⏭  Engine skip: conf={conf:.1f} brand={detected_brand} cat={detected_cat} | {item['title'][:35]}")
                         seen[item["id"]] = now
                         continue
 
+                    # FIX #9 — Quality filter: SLOW flip z małym zyskiem → skip
+                    if flip_speed == "SLOW" and flip_profit < 80:
+                        print(f"  ⏭  Quality skip (SLOW, profit={flip_profit:.0f}zł) | {item['title'][:35]}")
+                        seen[item["id"]] = now
+                        continue
+
+                    print(f"  ✅ Kandydat: conf={conf:.1f} speed={flip_speed} profit={flip_profit:.0f} brand={detected_brand} | {item['title'][:30]}")
                     cycle_candidates.append((conf, search, item, eval_result, now))
                 else:
                     # Bez engine — stary fallback
@@ -2341,7 +2410,7 @@ while True:
         # Step 6 — sortuj DESC po confidence, wyślij max 10 per cykl
         cycle_candidates.sort(key=lambda x: x[0], reverse=True)
         sent_this_cycle = 0
-        MAX_PER_CYCLE   = 10
+        MAX_PER_CYCLE   = 5   # FIX: max 3–5 wysokiej jakości dealów per cykl
 
         for conf, search, item, eval_result, now in cycle_candidates:
             if sent_this_cycle >= MAX_PER_CYCLE:
