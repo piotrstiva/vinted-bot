@@ -706,10 +706,15 @@ def calculate_confidence(
 def get_alert_tier(confidence: float, ai_decision: str) -> str | None:
     """
     Zwraca tier alertu lub None jeśli nie wysyłać.
+    BOT FIX #3: ai_decision==BUY bez minimalnego conf nie może dawać INSANE
+    — wcześniej conf=5.9 + BUY = INSANE (sprzeczność widoczna w logach).
     """
-    if confidence >= CONFIDENCE_INSANE or ai_decision == "BUY":
+    if confidence >= CONFIDENCE_INSANE:
         return "INSANE"
-    if confidence >= CONFIDENCE_GOOD:
+    # BUY od AI podnosi tier, ale tylko gdy conf jest sensowny (≥ GOOD)
+    if ai_decision == "BUY" and confidence >= CONFIDENCE_GOOD:
+        return "INSANE"
+    if confidence >= CONFIDENCE_GOOD or (ai_decision == "BUY" and confidence >= CONFIDENCE_WATCH):
         return "GOOD"
     if confidence >= CONFIDENCE_WATCH:
         return "WATCH"
