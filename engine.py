@@ -1,2454 +1,1172 @@
-import requests
-import time
-import os
-import json
-import re
-import base64
-from statistics import median
+"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🧠  VINTED BOT — INTELLIGENCE ENGINE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Moduł rozszerzający bota o:
+  1. Auto-budowanie bazy cen rynkowych
+  2. AI scoring (Claude)
+  3. Confidence scoring (DB + market + AI)
+  4. Trend detection
+  5. Flip score
+  6. Fake risk detection
+  7. Tiered alert system
+  8. Self-learning z feedbacku
 
-# ── Intelligence Engine ──────────────────
-try:
+Użycie w bot.py:
     from engine import Engine
-    _ENGINE_AVAILABLE = True
-except ImportError:
-    _ENGINE_AVAILABLE = False
-    print("⚠️  engine.py nie znaleziony — tryb podstawowy")
+    engine = Engine(anthropic_key=ANTHROPIC_KEY)
 
-# ─────────────────────────────────────────
-#  🔑 USTAWIENIA — Railway Variables
-#  Dodaj w Railway:
-#    TOKEN          = token z BotFather
-#    CHAT_ID        = Twój chat id
-#    ANTHROPIC_KEY  = klucz z console.anthropic.com
-# ─────────────────────────────────────────
-TOKEN         = os.getenv("TOKEN")
-CHAT_ID       = os.getenv("CHAT_ID")
-ANTHROPIC_KEY = os.getenv("ANTHROPIC_KEY")
+    # W pętli check_search, po podstawowych filtrach:
+    result = engine.evaluate(item, search, market_price)
+    if result["send_alert"]:
+        msg = engine.format_alert(result)
+        send_message(msg, ...)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) "
-                  "Chrome/120.0.0.0 Safari/537.36",
-    "Accept-Language": "pl-PL,pl;q=0.9",
+import re
+import json
+import os
+import time
+import requests
+from statistics import mean, median, stdev
+from collections import defaultdict
+
+
+# ─────────────────────────────────────────────────────
+#  📁 PLIKI — /tmp przeżywa restarty na Railway
+# ─────────────────────────────────────────────────────
+_DATA_DIR = os.getenv("DATA_DIR", "/tmp/vinted_bot")
+os.makedirs(_DATA_DIR, exist_ok=True)
+
+DB_FILE          = os.path.join(_DATA_DIR, "market_db.json")
+RAW_FILE         = os.path.join(_DATA_DIR, "raw_items.json")
+FEEDBACK_FILE    = os.path.join(_DATA_DIR, "feedback.json")
+AI_CACHE_FILE    = os.path.join(_DATA_DIR, "ai_cache.json")
+
+# ─────────────────────────────────────────────────────
+#  ⚙️ PROGI
+# ─────────────────────────────────────────────────────
+CONFIDENCE_INSANE  = 8.5   # 🔴 INSANE DEAL
+CONFIDENCE_GOOD    = 7.0   # 🟡 GOOD DEAL
+CONFIDENCE_WATCH   = 6.0   # ⚪ WATCH (podwyższone z 5.5)
+
+DB_MIN_SAMPLES     = 3     # min próbek żeby użyć DB
+DB_BUILD_EVERY     = 150   # buduj DB co N nowych itemów
+FLIP_MIN_PROFIT    = 30    # min zysk flip (PLN) żeby liczyć
+FAKE_LUXURY_RATIO  = 0.35  # cena < 35% avg → podejrzenie fake
+
+LUXURY_BRANDS = {
+    "gucci", "louis vuitton", "prada", "hermes", "balenciaga",
+    "versace", "burberry", "fendi", "dior", "ysl", "saint laurent",
+    "bottega veneta", "givenchy", "valentino", "off-white",
+    "stone island", "cp company", "moncler", "canada goose",
 }
 
-# ─────────────────────────────────────────
-#  ⚙️ PROGI OKAZJI
-# ─────────────────────────────────────────
-MIN_DISCOUNT_PCT = 40      # % poniżej mediany → okazja
-MIN_AI_CONFIDENCE = 60     # % pewności AI że to ukryta okazja
-MIN_SAVING_PLN   = 6       # minimalna oszczędność w zł (odrzuć 1-5 zł różnicę)
-MAX_ALERTS_PER_SEARCH = 5  # max powiadomień per wyszukiwanie per cykl
-
-STEAL_PRICES = {
-    "sneakers": 120,
-    "clothing":  30,
-    "lego":      60,
-    "funko":     25,
-    "football":  50,
-    "lego_sw":   80,
-    "carhartt": 250,
+HYPE_BRANDS = {
+    "supreme", "palace", "stussy", "bape", "a bathing ape",
+    "kaws", "travis scott", "yeezy", "jordan", "dunk",
+    "nike sb", "sacai", "fragment", "fear of god", "essentials",
+    "carhartt wip", "dickies", "wtaps",
+    # FIX: Funko jako hype brand (kolekcjonerski)
+    "funko", "funko pop",
+    # Step 1 — nowe hype brandy flip engine
+    "corteiz", "crtz", "broken planet", "denim tears",
+    "represent", "arcteryx", "arc'teryx",
+    "salomon",  # hype footwear
 }
 
-# ─────────────────────────────────────────
-#  🚫 SŁOWA KTÓRE ZAWSZE ODRZUCAMY
-# ─────────────────────────────────────────
-GLOBAL_EXCLUDE = [
-    # Ubrania dziecięce
-    "dziecięc", "dzieciec", "niemowl", "chłopięc", "chlopiec",
-    "dziewczęc", "dziewczec", "dla dzieci", "dla chłopca", "dla dziewcz",
-    "rozmiar 86", "rozmiar 92", "rozmiar 98", "rozmiar 104",
-    "rozmiar 110", "rozmiar 116", "rozmiar 122", "rozmiar 128",
-    "r.86", "r.92", "r.98", "r.104", "r.110", "r.116",
-    "duplo", "baby", "junior ", "kids ", " kid ", "toddler",
-    # Karty/albumy LEGO
-    "karta lego", "karty lego", "album lego", "naklejki lego",
-    "lego karta", "lego album", "lego naklejki", "lego card",
-    "trading card", "trading kart", "sticker", "naklejka",
-    # Minecraft
-    "minecraft",
-    # Gry video
-    "nintendo switch", "xbox", "playstation", "ps4", "ps5",
-    "gra lego", "lego gra", "lego game",
-    # FIX #1 — LEGO clothing / akcesoria które nie są zestawami
-    # (Vinted taguje je marką LEGO bo mają logo)
-    "bluza lego", "lego bluza", "kurtka lego", "lego kurtka",
-    "piżama lego", "lego piżama", "t-shirt lego", "lego t-shirt",
-    "czapka lego", "lego czapka", "buty lego", "lego buty",
-    "plecak lego", "lego plecak", "torba lego", "lego torba",
-    "aparat lego", "lego aparat", "zegarek lego", "lego zegarek",
-    "lego 128", "lego 92", "lego 98", "lego 104", "lego 116",  # rozmiary odzieży
-    # FIX #1 — luzem klocki (nie kompletne zestawy)
-    "luzem", "bulk", "loose", "mixed", "random klocki",
-    "worek klocków", "klocki luzem", "mix klocków", "klocki mix",
-    # FIX #1 — drukarki 3D / podstawki / akcesoria display
-    "3d print", "3d druk", "druk 3d", "display stand", "display dla",
-    "podstawka pod", "podstawka lego", "stand lego", "stand dla lego",
-    "uchwyt lego", "ramka lego", "gablotka",
-]
-
-# ─────────────────────────────────────────
-#  🚫 MARKI KTÓRYCH NIE CHCEMY NIGDY
-# ─────────────────────────────────────────
-BLOCKED_BRANDS = [
-    # Fast fashion
-    "h&m", "zara", "bershka", "sinsay", "reserved", "house",
-    "shein", "primark", "pepco", "c&a", "stradivarius",
-    "new yorker", "cropp", "new look", "boohoo", "asos",
-    "pull&bear", "mango", "vero moda", "only ", "jack&jones",
-    "terranova", "mohito", "medicine", "diverse", "carry",
-    "lager 157", "rainbow ", "iné", "amisu", "george ",
-    # Premium marki których nie chcemy
-    "tommy hilfiger", "tommy jeans", "calvin klein", "ralph lauren",
-    "lacoste", "hugo boss", "boss ", "michael kors", "guess ",
-    "armani exchange", "emporio armani",
-    # Sportowe masowe
-    "under armour", "columbia ", "quechua", "decathlon",
-    "jack wolfskin", "the north face", "regatta",
-]
-
-# ─────────────────────────────────────────
-#  🧥 CARHARTT — konfiguracja modeli
-# ─────────────────────────────────────────
-
-# Modele z niższym progiem (Trucker cap/hat)
-CARHARTT_TRUCKER_MODELS = [
-    "trucker", "trucker cap", "trucker hat", "czapka trucker",
-]
-CARHARTT_TRUCKER_MAX = 150   # alert gdy cena ≤ 150 zł
-
-# Modele z wyższym progiem (kurtki)
-CARHARTT_PREMIUM_MODELS = [
-    "santa fe", "detroit", "active jacket",
-    "kurtka santa fe", "kurtka detroit", "kurtka active",
-]
-CARHARTT_PREMIUM_MAX = 250   # alert gdy cena ≤ 250 zł
-
-# ─────────────────────────────────────────
-#  🧱 LEGO STAR WARS — konfiguracja
-# ─────────────────────────────────────────
-
-# Numery kultowych setów Star Wars (wartościowe)
-SW_SET_NUMBERS = [
-    # UCS / Ultimate Collector Series
-    "75192", "75309", "75313", "75252", "75274", "75144",
-    "10179", "10221", "10240", "10143",
-    # Popularne zestawy
-    "75257", "75243", "75218", "75212", "75179",
-    "75190", "75189", "75188", "75187", "75186",
-    "75159", "75098", "75060", "75059",
-    "75153", "75154", "75155", "75156",
-    "75105", "75103", "75104", "75102", "75101", "75100",
-    "75082", "75083", "75084", "75085", "75086",
-    # Klasyki
-    "7965", "7964", "7962", "7961", "7959",
-    "9516", "9515", "9514", "9512", "9511",
-    "4504", "4480", "4481", "4482", "4483", "4484",
-    "6211", "6212",
-    # Mandalorian / nowe popularne
-    "75292", "75299", "75316", "75317", "75318",
-    "75319", "75320", "75321", "75325", "75326",
-]
-
-# Pojazdy i miejsca — szukamy tych nazw w tytule
-SW_VEHICLES = [
-    "millennium falcon", "millenium falcon", "sokół milenium",
-    "x-wing", "xwing", "x wing",
-    "tie fighter", "tie-fighter",
-    "death star", "gwiazda śmierci", "gwiazda smierci",
-    "star destroyer", "niszczyciel gwiezdny",
-    "at-at", "atat", "at at",
-    "at-st", "atst",
-    "slave i", "slave 1",
-    "y-wing", "ywing",
-    "a-wing", "awing",
-    "republic gunship", "venator",
-    "razor crest",
-    "naboo", "podracer", "pod racer",
-    "imperial shuttle", "prom imperialny",
-    "b-wing", "bwing",
-    "sandcrawler", "sand crawler",
-    "cloud city",
-    "jabba", "sarlacc",
-    "ewok village", "wioska ewoków",
-]
-
-# Postacie których szukamy
-SW_CHARACTERS = [
-    "darth vader", "vader",
-    "yoda", "master yoda",
-    "luke skywalker", "luke",
-    "han solo",
-    "darth maul",
-    "obi-wan", "obi wan", "kenobi",
-    "mandalorian", "mando", "din djarin",
-    "grogu", "baby yoda",
-    "boba fett",
-    "stormtrooper", "szturmowiec",
-    "clone trooper", "klony",
-    "jango fett",
-    "emperor palpatine", "palpatine", "sidious",
-    "kylo ren",
-    "rey",
-    "r2-d2", "r2d2",
-    "c-3po", "c3po",
-    "chewbacca", "chewie",
-    "leia", "princess leia",
-    "anakin skywalker", "anakin",
-    "count dooku",
-    "grievous", "general grievous",
-    "ahsoka",
-    "mace windu",
-]
-
-# Słowa które MUSZĄ być w ofercie żeby uznać ją za kompletną
-SW_COMPLETE_KEYWORDS = [
-    "kompletny", "komplet", "complete", "wszystkie części",
-    "z figurkami", "z minifigurkami", "minifigurki w zestawie",
-    "pudełko", "instrukcja", "100%", "idealny stan",
-    "używany", "używane", "second hand",   # używane są OK
-]
-
-# Słowa które dyskwalifikują ofertę (niekompletna / nie-zestaw)
-SW_INCOMPLETE_KEYWORDS = [
-    "niekompletny", "brakuje", "bez figurek", "bez minifigurek",
-    "niepełny", "części", "uszkodzony", "incomplete",
-    "only parts", "spare parts", "zamienię",
-    # FIX #2 — druk 3D / podstawki / gablotki (nie zestawy LEGO)
-    "3d print", "3d druk", "druk 3d", "printed", "display stand",
-    "display dla", "podstawka", "stand dla", "uchwyt", "ramka",
-    "gablotka", "diorama",
-    # FIX #4 — sama instrukcja bez zestawu
-    "instrukcja", "instrukcje", "manual", "booklet", "instruction",
-    "tylko instrukcja", "sam instrukcja",
-    # FIX #5 — pojedyncza minifigurka (nie zestaw) — ale ostrożnie:
-    # "minifigurka" w tytule BEZ numeru setu = prawdopodobnie luzem
-    # (validate_lego_sw sprawdza ten warunek przez brak found_set)
-    "pojedyncza figurka", "single minifig", "jedna figurka",
-    "figurka luzem", "minifig luzem",
-    # Kluczbrelok / gadżet
-    "brelok", "keychain", "key chain", "kulcstartó", "nyckelring",
-    "magnes", "magnet",
-]
-
-# ─────────────────────────────────────────
-#  ⚽ KOSZULKI RETRO — konfiguracja
-# ─────────────────────────────────────────
-
-# Lata które uznajemy za "retro"
-RETRO_DECADES = [
-    # Lata jako ciągi (pasuje do "1994/95", "94-95" itp.)
-    "1970", "1971", "1972", "1973", "1974", "1975", "1976", "1977", "1978", "1979",
-    "1980", "1981", "1982", "1983", "1984", "1985", "1986", "1987", "1988", "1989",
-    "1990", "1991", "1992", "1993", "1994", "1995", "1996", "1997", "1998", "1999",
-    "2000", "2001", "2002", "2003",
-    # Skróty dekad
-    "70s", "80s", "90s", "00s", "70'", "80'", "90'",
-    # Słowa kluczowe
-    "vintage", "retro", "classic", "klasyczna", "klasyk",
-    "stara", "kolekcjonerska", "historyczna", "archival",
-    "throwback", "heritage", "old school",
-]
-
-# ─────────────────────────────────────────
-#  ⚽ PRODUCENCI KITÓW — oryginalne marki
-# ─────────────────────────────────────────
-FOOTBALL_ORIGINAL_BRANDS = [
-    # Wielka trójka
-    "adidas", "nike", "puma",
-    # Klasyczne marki retro
-    "umbro", "lotto", "kappa", "reebok",
-    "diadora", "le coq sportif", "hummel",
-    "errea", "uhlsport", "patrick",
-    # Inne autentyczne
-    "score draw", "admiral", "bukta",
-    "ribero", "hafnia", "uhlsport",
-    "fila", "asics", "mizuno",
-    "new balance", "macron", "joma",
-    "castore", "warrior", "burrda",
-]
-
-# Słowa sugerujące replikę → odrzucamy
-REPLICA_KEYWORDS = [
-    "replika", "replica", "kopia", "podróbka", "nieoryginalna",
-    "chiński", "chińska", "fakes", "fake", "inspired", "bootleg",
-]
-
-# ─────────────────────────────────────────
-#  ⚽ BAZA KLUBÓW I REPREZENTACJI
-#  Każdy wpis = jedna forma nazwy jaką
-#  sprzedający może wpisać na Vinted
-# ─────────────────────────────────────────
-
-# ── SERIE A / WŁOCHY ─────────────────────
-_SERIE_A = [
-    "ac milan", "milan", "rossoneri",
-    "inter milan", "inter", "internazionale", "nerazzurri",
-    "juventus", "juve", "bianconeri",
-    "as roma", "roma", "giallorossi",
-    "napoli", "partenopei",
-    "lazio", "biancocelesti",
-    "fiorentina", "viola",
-    "parma", "crociati",
-    "sampdoria", "samp",
-    "atalanta", "bergamo",
-    "torino",
-    "udinese",
-    "bologna",
-    "genoa",
-    "cagliari",
-    "palermo",
-    "bari",
-    "reggiana",
-    "piacenza",
-    "venezia",
-    "brescia",
-    "lecce",
-]
-
-# ── LA LIGA / HISZPANIA ───────────────────
-_LA_LIGA = [
-    "real madrid", "real madryt", "madrytu", "los blancos", "merengues",
-    "barcelona", "barca", "blaugrana", "barca",
-    "atletico madrid", "atletico", "atletico de madrid", "colchoneros",
-    "sevilla", "sevillistas",
-    "valencia", "che",
-    "deportivo", "deportivo la coruna", "galicia",
-    "real sociedad",
-    "athletic bilbao", "athletic club", "leones",
-    "villarreal", "submarino amarillo",
-    "betis", "real betis",
-    "celta vigo", "celta",
-    "rayo vallecano", "rayo",
-    "racing santander",
-    "real zaragoza", "zaragoza",
-    "mallorca",
-    "osasuna",
-    "alaves",
-    "espanyol",
-]
-
-# ── PREMIER LEAGUE / ANGLIA ───────────────
-_PREMIER_LEAGUE = [
-    "manchester united", "man utd", "man united", "red devils", "united",
-    "liverpool", "reds", "anfield",
-    "arsenal", "gunners",
-    "chelsea", "blues",
-    "tottenham", "spurs", "tottenham hotspur",
-    "manchester city", "man city", "citizens",
-    "newcastle", "newcastle united", "magpies",
-    "leeds", "leeds united", "whites",
-    "aston villa", "villa",
-    "everton", "toffees",
-    "blackburn", "blackburn rovers",
-    "west ham", "hammers",
-    "nottingham forest", "forest",
-    "leicester", "leicester city", "foxes",
-    "coventry", "coventry city",
-    "sheffield wednesday", "sheffield united",
-    "bolton", "bolton wanderers",
-    "ipswich",
-    "sunderland",
-    "middlesbrough",
-    "derby", "derby county",
-    "southampton", "saints",
-    "wimbledon",
-    "crystal palace",
-    "charlton",
-    "bradford",
-    "watford",
-    "fulham",
-]
-
-# ── BUNDESLIGA / NIEMCY ───────────────────
-_BUNDESLIGA = [
-    "bayern", "bayern munich", "bayern münchen", "fcb", "rekordmeister",
-    "borussia dortmund", "dortmund", "bvb",
-    "borussia monchengladbach", "gladbach", "fohlen",
-    "schalke", "schalke 04", "knappen",
-    "werder bremen", "werder", "bremen",
-    "hamburger sv", "hsv", "hamburg",
-    "bayer leverkusen", "leverkusen",
-    "vfb stuttgart", "stuttgart",
-    "eintracht frankfurt", "frankfurt",
-    "kaiserslautern", "lautern",
-    "1860 münchen", "1860 munich",
-    "karlsruher sc",
-    "vfl wolfsburg", "wolfsburg",
-    "rb leipzig", "leipzig",
-    "hertha berlin", "hertha",
-    "fc köln", "koln", "cologne",
-    "fortuna düsseldorf",
-    "mönchengladbach",
-]
-
-# ── LIGUE 1 / FRANCJA ────────────────────
-_LIGUE_1 = [
-    "paris saint-germain", "paris saint germain", "psg",
-    "marseille", "om", "olympique marseille",
-    "monaco", "as monaco",
-    "lyon", "olympique lyonnais", "ol",
-    "bordeaux",
-    "lens",
-    "lille", "losc",
-    "nantes", "fc nantes",
-    "saint-etienne", "saint etienne", "asse",
-    "rennes", "stade rennais",
-    "auxerre", "aja",
-    "metz",
-    "nice", "ogc nice",
-    "strasbourg",
-    "toulouse",
-    "montpellier",
-    "reims",
-    "gueugnon",
-    "troyes",
-]
-
-# ── HOLANDIA / EREDIVISIE ─────────────────
-_EREDIVISIE = [
-    "ajax", "ajax amsterdam", "ajacieden",
-    "psv", "psv eindhoven",
-    "feyenoord", "feyenoord rotterdam",
-    "vitesse",
-    "az alkmaar", "az",
-    "fc twente", "twente",
-    "utrecht", "fc utrecht",
-]
-
-# ── SZKOCJA ───────────────────────────────
-_SCOTLAND = [
-    "celtic", "bhoys",
-    "rangers", "gers",
-    "aberdeen",
-    "hearts",
-    "hibernian", "hibs",
-    "dundee united",
-    "motherwell",
-]
-
-# ── PORTUGALIA ────────────────────────────
-_PORTUGAL = [
-    "benfica", "sl benfica", "aguias",
-    "porto", "fc porto", "dragoes",
-    "sporting", "sporting cp", "sporting lisbon", "leoes",
-    "boavista",
-    "braga",
-]
-
-# ── BELGIA ────────────────────────────────
-_BELGIUM = [
-    "anderlecht", "rsc anderlecht",
-    "club brugge", "brugge",
-    "standard liege", "standard",
-]
-
-# ── POLSKA ────────────────────────────────
-_POLAND_CLUBS = [
-    "legia", "legia warszawa",
-    "lech", "lech poznan", "kolejorz",
-    "wisla", "wisła", "wisla krakow",
-    "gornik", "górnik", "gornik zabrze",
-    "cracovia",
-    "ruch chorzow", "ruch",
-    "zaglebie", "zagłębie",
-    "slask", "śląsk", "slask wroclaw",
-    "widzew", "widzew lodz",
-    "gks katowice", "gks",
-    "arka gdynia", "arka",
-    "jagiellonia",
-]
-
-# ── REPREZENTACJE NARODOWE ────────────────
-_NATIONAL_TEAMS = [
-    # Polska
-    "polska", "poland", "reprezentacja polski",
-    # Niemcy
-    "niemcy", "niemiec", "germany", "deutschland", "mannschaft",
-    # Włochy
-    "włochy", "wlochy", "italia", "italy", "azzurri",
-    # Francja
-    "francja", "france", "les bleus",
-    # Brazylia
-    "brazylia", "brazil", "brasil", "selecao", "seleção",
-    # Argentyna
-    "argentyna", "argentina", "albiceleste",
-    # Anglia
-    "anglia", "england", "three lions",
-    # Hiszpania
-    "hiszpania", "spain", "espana", "españa", "la roja",
-    # Holandia
-    "holandia", "netherlands", "holland", "oranje",
-    # Portugalia
-    "portugalia", "portugal",
-    # Chorwacja
-    "chorwacja", "croatia", "hrvatska",
-    # Czechy
-    "czechy", "czech republic", "czechia",
-    # Belgia
-    "belgia", "belgium", "red devils",
-    # Dania
-    "dania", "denmark",
-    # Szwecja
-    "szwecja", "sweden",
-    # Norwegia
-    "norwegia", "norway",
-    # Rumunia
-    "rumunia", "romania",
-    # Rosja
-    "rosja", "russia",
-    # Turcja
-    "turcja", "turkey",
-    # Meksyk
-    "meksyk", "mexico",
-    # USA
-    "usa", "united states", "usmnt",
-    # Japonia
-    "japonia", "japan",
-    # Korea
-    "korea", "south korea",
-    # Kamerun
-    "kamerun", "cameroon",
-    # Nigeria
-    "nigeria",
-    # Senegal
-    "senegal",
-    # Wybrzeże Kości Słoniowej
-    "ivory coast", "cote d'ivoire",
-    # Urugwaj
-    "urugwaj", "uruguay",
-    # Kolumbia
-    "kolumbia", "colombia",
-    # Chile
-    "chile",
-    # Szkocja
-    "szkocja", "scotland",
-    # Irlandia
-    "irlandia", "ireland", "republic of ireland",
-    # Walia
-    "walia", "wales",
-]
-
-# ── PUCHARY / TURNIEJE ────────────────────
-_TOURNAMENTS = [
-    "world cup", "mistrzostwa swiata", "mistrzostwa świata",
-    "euro", "mistrzostwa europy",
-    "champions league", "liga mistrzow", "liga mistrzów",
-    "copa america",
-    "africa cup", "afcon",
-]
-
-# ── ŁĄCZYMY WSZYSTKO ─────────────────────
-FOOTBALL_CLUBS = (
-    _SERIE_A + _LA_LIGA + _PREMIER_LEAGUE + _BUNDESLIGA +
-    _LIGUE_1 + _EREDIVISIE + _SCOTLAND + _PORTUGAL +
-    _BELGIUM + _POLAND_CLUBS + _NATIONAL_TEAMS + _TOURNAMENTS
-)
-
-# ─────────────────────────────────────────
-#  🔤 SŁOWNIK BŁĘDNYCH PISOWNI
-#  bot szuka tych słów i rozpoznaje markę
-# ─────────────────────────────────────────
-BRAND_TYPOS = {
-    "nike":         ["niike", "nikee", "nik3", "n1ke", "nke", "nike'"],
-    "adidas":       ["addidas", "adidass", "adidaas", "adi das", "adidasi"],
-    "supreme":      ["suprime", "supream", "supreem", "supremme", "supr3me"],
-    "jordan":       ["jordon", "jordann", "joradan", "ajordan", "jodan"],
-    "yeezy":        ["yezi", "yezy", "yeeezi", "yeezi", "ye3zy"],
-    "off-white":    ["offwhite", "off white", "of white", "offwite"],
-    "stone island": ["stone isl", "stoneisland", "stone ilsand"],
-    "lego":         ["leg0", "leg o", "legi", "lego's"],
-    "funko":        ["funk0", "funco", "funko's", "funkopop"],
-    "balenciaga":   ["balenciag", "balenciga", "balenciaga's", "balanciaga"],
-    "gucci":        ["guci", "guchi", "gucci's"],
-    "louis vuitton":["louis viton", "luis vuitton", "louiss vuitton", "lv"],
-    "carhartt":     ["carhatt", "carhart", "carhарт", "cahartt", "carharrt", "charhartt"],
+MAINSTREAM_BRANDS = {
+    "nike", "adidas", "puma", "reebok", "new balance",
+    "vans", "converse", "asics", "carhartt", "levi",
+    "lego", "funko",
 }
 
-# ─────────────────────────────────────────
-#  🔍 WYSZUKIWANIA
-# ─────────────────────────────────────────
-# ─────────────────────────────────────────
-#  🔍 WYSZUKIWANIA — 4-warstwowy Flip Engine
-#  🥇 WIDE BRAND   — dane rynkowe, szerokie siatki
-#  🥈 CATEGORY     — trendy, kategorie
-#  🥉 TARGETED     — wysokiej wartości itemy
-#  🧨 CHAOS/VINTAGE — ukryte okazje
-#  ⚽ FOOTBALL     — vintage koszulki
-# ─────────────────────────────────────────
-SEARCHES = [
+CATEGORY_MAP = {
+    "sneakers": ["nike", "adidas", "jordan", "dunk", "yeezy", "samba", "air force",
+                 "new balance", "vans", "converse", "asics", "reebok", "puma"],
+    "streetwear": ["supreme", "palace", "stussy", "bape", "carhartt", "dickies"],
+    "luxury": list(LUXURY_BRANDS),
+    "lego": ["lego", "star wars", "technic", "ninjago", "creator"],
+    "funko": ["funko", "pop!", "vinyl figure"],
+    "football": ["koszulka", "jersey", "shirt", "football", "soccer"],
+}
 
-    # ══════════════════════════════════════
-    #  🥇 LAYER 1 — WIDE BRAND (Core Data)
-    # ══════════════════════════════════════
-    {
-        "name":     "Corteiz",
-        "url":      "https://www.vinted.pl/catalog?search_text=corteiz&order=newest_first&currency=PLN&price_to=800",
-        "category": "clothing",
-        "keywords": ["corteiz", "crtz"],
-        "min_price": 50,
-        "layer": "wide_brand",
-    },
-    {
-        "name":     "Broken Planet",
-        "url":      "https://www.vinted.pl/catalog?search_text=broken+planet&order=newest_first&currency=PLN&price_to=600",
-        "category": "clothing",
-        "keywords": ["broken planet"],
-        "min_price": 50,
-        "layer": "wide_brand",
-    },
-    {
-        "name":     "Denim Tears",
-        "url":      "https://www.vinted.pl/catalog?search_text=denim+tears&order=newest_first&currency=PLN&price_to=1000",
-        "category": "clothing",
-        "keywords": ["denim tears"],
-        "min_price": 50,
-        "layer": "wide_brand",
-    },
-    {
-        "name":     "Represent",
-        "url":      "https://www.vinted.pl/catalog?search_text=represent+clothing&order=newest_first&currency=PLN&price_to=800",
-        "category": "clothing",
-        "keywords": ["represent"],
-        "min_price": 50,
-        "layer": "wide_brand",
-    },
-    {
-        "name":     "Essentials Fear of God",
-        "url":      "https://www.vinted.pl/catalog?search_text=essentials+fear+of+god&order=newest_first&currency=PLN&price_to=600",
-        "category": "clothing",
-        "keywords": ["essentials", "fear of god", "fog"],
-        "min_price": 50,
-        "layer": "wide_brand",
-    },
-    {
-        "name":     "Stussy",
-        "url":      "https://www.vinted.pl/catalog?search_text=stussy&order=newest_first&currency=PLN&price_to=500",
-        "category": "clothing",
-        "keywords": ["stussy"],
-        "min_price": 30,
-        "layer": "wide_brand",
-    },
-    {
-        "name":     "Carhartt WIP",
-        "url":      "https://www.vinted.pl/catalog?search_text=carhartt+wip&order=newest_first&currency=PLN&price_to=500",
-        "category": "carhartt",
-        "keywords": ["carhartt", "wip"],
-        "brands":   ["carhartt"],
-        "min_price": 40,
-        "layer": "wide_brand",
-        "carhartt_mode": True,
-        "carhartt_models": CARHARTT_PREMIUM_MODELS,
-        "carhartt_max_price": CARHARTT_PREMIUM_MAX,
-    },
-    {
-        "name":     "Arc'teryx",
-        "url":      "https://www.vinted.pl/catalog?search_text=arcteryx&order=newest_first&currency=PLN&price_to=1500",
-        "category": "clothing",
-        "keywords": ["arcteryx", "arc'teryx", "arc teryx"],
-        "min_price": 100,
-        "layer": "wide_brand",
-    },
-    {
-        "name":     "Salomon",
-        "url":      "https://www.vinted.pl/catalog?search_text=salomon&order=newest_first&currency=PLN&price_to=600",
-        "category": "sneakers",
-        "keywords": ["salomon"],
-        "min_price": 50,
-        "layer": "wide_brand",
-    },
-    {
-        "name":     "New Balance",
-        "url":      "https://www.vinted.pl/catalog?search_text=new+balance&catalog[]=1206&order=newest_first&currency=PLN&price_to=600",
-        "category": "sneakers",
-        "keywords": ["new balance"],
-        "min_price": 40,
-        "layer": "wide_brand",
-    },
-    {
-        "name":     "ASICS",
-        "url":      "https://www.vinted.pl/catalog?search_text=asics&catalog[]=1206&order=newest_first&currency=PLN&price_to=500",
-        "category": "sneakers",
-        "keywords": ["asics", "gel"],
-        "min_price": 40,
-        "layer": "wide_brand",
-    },
+# FIX #5 — marki mainstream (Nike/Adidas ogólnie) — nie są w HYPE_BRANDS
+# ale warto je traktować łagodniej w spam filter gdy brakuje danych DB
+MAINSTREAM_BRANDS = {
+    "nike", "adidas", "puma", "reebok", "new balance",
+    "vans", "converse", "asics", "carhartt", "levi",
+    "lego", "funko",
+}
 
-    # ══════════════════════════════════════
-    #  🥈 LAYER 2 — CATEGORY (Trend Capture)
-    # ══════════════════════════════════════
-    {
-        "name":     "Cargo Pants",
-        "url":      "https://www.vinted.pl/catalog?search_text=cargo+pants&catalog[]=4&order=newest_first&currency=PLN&price_to=400",
-        "category": "clothing",
-        "keywords": ["cargo", "pants", "spodnie"],
-        "min_price": 30,
-        "layer": "category",
-        "exclude_keywords": [
-            "dziecięc", "dzieciec", "dla dzieci", "kids",
-        ],
-    },
-    {
-        "name":     "Baggy Jeans",
-        "url":      "https://www.vinted.pl/catalog?search_text=baggy+jeans&catalog[]=4&order=newest_first&currency=PLN&price_to=400",
-        "category": "clothing",
-        "keywords": ["baggy", "jeans", "wide leg"],
-        "min_price": 30,
-        "layer": "category",
-    },
-    {
-        "name":     "Designer Sunglasses",
-        "url":      "https://www.vinted.pl/catalog?search_text=designer+sunglasses&order=newest_first&currency=PLN&price_to=600",
-        "category": "clothing",
-        "keywords": ["oakley", "ray-ban", "gucci", "prada", "dior", "versace", "carrera"],
-        "min_price": 40,
-        "layer": "category",
-    },
-    {
-        "name":     "Vintage Nike",
-        "url":      "https://www.vinted.pl/catalog?search_text=vintage+nike&order=newest_first&currency=PLN&price_to=300",
-        "category": "clothing",
-        "keywords": ["nike", "vintage"],
-        "min_price": 20,
-        "layer": "category",
-        "vintage_mode": True,
-    },
-    {
-        "name":     "Football Jersey",
-        "url":      "https://www.vinted.pl/catalog?search_text=football+jersey&catalog[]=4&order=newest_first&currency=PLN&price_to=300",
-        "category": "football",
-        "keywords": ["jersey", "shirt", "football"],
-        "min_price": 15,
-        "layer": "category",
-        "football_mode": True,
-    },
+# ─────────────────────────────────────────────────────
+#  🔤 NORMALIZACJA TYTUŁU
+# ─────────────────────────────────────────────────────
+_STOP_WORDS = {
+    "marka", "stan", "rozmiar", "nowy", "nowa", "dobry", "dobra",
+    "bardzo", "bez", "metki", "używany", "używana", "zł", "pln",
+    "zawiera", "ochronę", "kupujących", "stan:", "rozmiar:",
+    "the", "and", "for", "with", "de", "le", "la", "el",
+}
 
-    # ══════════════════════════════════════
-    #  🥉 LAYER 3 — TARGETED (High Value)
-    # ══════════════════════════════════════
-    {
-        "name":     "Arc'teryx Beta",
-        "url":      "https://www.vinted.pl/catalog?search_text=arcteryx+beta&order=newest_first&currency=PLN&price_to=1500",
-        "category": "clothing",
-        "keywords": ["arcteryx", "beta"],
-        "min_price": 200,
-        "layer": "targeted",
-    },
-    {
-        "name":     "Salomon XT-6",
-        "url":      "https://www.vinted.pl/catalog?search_text=salomon+xt+6&catalog[]=1206&order=newest_first&currency=PLN&price_to=600",
-        "category": "sneakers",
-        "keywords": ["salomon", "xt"],
-        "min_price": 80,
-        "layer": "targeted",
-    },
-    {
-        "name":     "New Balance 1906R",
-        "url":      "https://www.vinted.pl/catalog?search_text=new+balance+1906&catalog[]=1206&order=newest_first&currency=PLN&price_to=500",
-        "category": "sneakers",
-        "keywords": ["new balance", "1906"],
-        "min_price": 80,
-        "layer": "targeted",
-    },
+# FIX #1 — dodatkowe słowa do usunięcia przed grupowaniem
+_COLOR_WORDS = {
+    "red", "black", "white", "blue", "green", "pink",
+    "yellow", "grey", "gray", "navy", "beige", "brown",
+    "orange", "purple", "cream", "czarny", "biały", "czerwony",
+    "niebieski", "zielony", "szary", "granatowy",
+}
 
-    # ══════════════════════════════════════
-    #  🧨 LAYER 4 — CHAOS / VINTAGE
-    # ══════════════════════════════════════
-    {
-        "name":     "Vintage T-Shirt",
-        "url":      "https://www.vinted.pl/catalog?search_text=vintage+t+shirt&catalog[]=4&order=newest_first&currency=PLN&price_to=300",
-        "category": "clothing",
-        "keywords": ["vintage", "t-shirt", "tshirt", "tee"],
-        "min_price": 15,
-        "layer": "chaos",
-        "vintage_mode": True,
-    },
-    {
-        "name":     "Single Stitch",
-        "url":      "https://www.vinted.pl/catalog?search_text=single+stitch&order=newest_first&currency=PLN&price_to=400",
-        "category": "clothing",
-        "keywords": ["single stitch"],
-        "min_price": 20,
-        "layer": "chaos",
-        "vintage_mode": True,
-    },
-    {
-        "name":     "Vintage Hoodie",
-        "url":      "https://www.vinted.pl/catalog?search_text=vintage+hoodie&catalog[]=4&order=newest_first&currency=PLN&price_to=400",
-        "category": "clothing",
-        "keywords": ["vintage", "hoodie", "bluza"],
-        "min_price": 20,
-        "layer": "chaos",
-        "vintage_mode": True,
-    },
-    {
-        "name":     "Retro Jacket",
-        "url":      "https://www.vinted.pl/catalog?search_text=retro+jacket&catalog[]=4&order=newest_first&currency=PLN&price_to=500",
-        "category": "clothing",
-        "keywords": ["retro", "jacket", "kurtka"],
-        "min_price": 30,
-        "layer": "chaos",
-        "vintage_mode": True,
-    },
-    {
-        "name":     "Vintage Adidas",
-        "url":      "https://www.vinted.pl/catalog?search_text=vintage+adidas&order=newest_first&currency=PLN&price_to=400",
-        "category": "clothing",
-        "keywords": ["adidas", "vintage"],
-        "min_price": 20,
-        "layer": "chaos",
-        "vintage_mode": True,
-    },
-    {
-        "name":     "90s Jacket",
-        "url":      "https://www.vinted.pl/catalog?search_text=90s+jacket&catalog[]=4&order=newest_first&currency=PLN&price_to=500",
-        "category": "clothing",
-        "keywords": ["90s", "jacket", "kurtka"],
-        "min_price": 25,
-        "layer": "chaos",
-        "vintage_mode": True,
-    },
-    {
-        "name":     "Baggy Jeans Vintage",
-        "url":      "https://www.vinted.pl/catalog?search_text=baggy+jeans+vintage&catalog[]=4&order=newest_first&currency=PLN&price_to=300",
-        "category": "clothing",
-        "keywords": ["baggy", "jeans", "vintage"],
-        "min_price": 20,
-        "layer": "chaos",
-        "vintage_mode": True,
-    },
-    {
-        "name":     "Leather Jacket Vintage",
-        "url":      "https://www.vinted.pl/catalog?search_text=leather+jacket+vintage&catalog[]=4&order=newest_first&currency=PLN&price_to=800",
-        "category": "clothing",
-        "keywords": ["leather", "skórzana", "kurtka", "vintage"],
-        "min_price": 50,
-        "layer": "chaos",
-        "vintage_mode": True,
-    },
-    {
-        "name":     "Shearling Jacket",
-        "url":      "https://www.vinted.pl/catalog?search_text=shearling+jacket&catalog[]=4&order=newest_first&currency=PLN&price_to=1200",
-        "category": "clothing",
-        "keywords": ["shearling", "kożuch", "sheepskin"],
-        "min_price": 80,
-        "layer": "chaos",
-        "vintage_mode": True,
-    },
-    # Generic chaos — szeroka siatka na hidden gems
-    {
-        "name":     "Hoodie — Chaos Hunt",
-        "url":      "https://www.vinted.pl/catalog?search_text=hoodie&catalog[]=4&order=newest_first&currency=PLN&price_to=200",
-        "category": "clothing",
-        "keywords": ["supreme", "palace", "bape", "stussy", "carhartt", "arcteryx", "represent", "corteiz"],
-        "min_price": 15,
-        "layer": "chaos",
-        "hidden_gem_mode": True,
-        "exclude_keywords": ["dziecięc", "kids", "baby", "junior"],
-    },
-    {
-        "name":     "Jacket — Chaos Hunt",
-        "url":      "https://www.vinted.pl/catalog?search_text=jacket&catalog[]=4&order=newest_first&currency=PLN&price_to=300",
-        "category": "clothing",
-        "keywords": ["arcteryx", "carhartt", "stone island", "cp company", "salomon", "represent", "nike", "adidas"],
-        "min_price": 20,
-        "layer": "chaos",
-        "hidden_gem_mode": True,
-        "exclude_keywords": ["dziecięc", "kids", "baby", "junior"],
-    },
-    {
-        "name":     "Coat — Chaos Hunt",
-        "url":      "https://www.vinted.pl/catalog?search_text=coat&catalog[]=4&order=newest_first&currency=PLN&price_to=400",
-        "category": "clothing",
-        "keywords": ["moncler", "canada goose", "arcteryx", "burberry", "stone island"],
-        "min_price": 30,
-        "layer": "chaos",
-        "hidden_gem_mode": True,
-        "exclude_keywords": ["dziecięc", "kids", "baby"],
-    },
+_NOISE_WORDS = {
+    "rare", "nowy", "new", "stan", "okazja", "sale",
+    "polecam", "tanio", "super", "hit", "top", "ideał",
+}
 
-    # ══════════════════════════════════════
-    #  ⚽ FOOTBALL — Vintage + Chaos
-    # ══════════════════════════════════════
-    {
-        "name":     "Football Shirt",
-        "url":      "https://www.vinted.pl/catalog?search_text=football+shirt&catalog[]=4&order=newest_first&currency=PLN&price_to=300",
-        "category": "football",
-        "keywords": ["shirt", "jersey", "koszulka"],
-        "min_price": 15,
-        "layer": "football",
-        "football_mode": True,
-    },
-    {
-        "name":     "Soccer Jersey",
-        "url":      "https://www.vinted.pl/catalog?search_text=soccer+jersey&catalog[]=4&order=newest_first&currency=PLN&price_to=300",
-        "category": "football",
-        "keywords": ["jersey", "shirt"],
-        "min_price": 15,
-        "layer": "football",
-        "football_mode": True,
-    },
-    {
-        "name":     "Koszulka Piłkarska",
-        "url":      "https://www.vinted.pl/catalog?search_text=koszulka+pilkarska&catalog[]=4&order=newest_first&currency=PLN&price_to=250",
-        "category": "football",
-        "keywords": ["koszulka", "piłkarska", "pilkarska"],
-        "min_price": 15,
-        "layer": "football",
-        "football_mode": True,
-    },
-    {
-        "name":     "Vintage Football Shirt",
-        "url":      "https://www.vinted.pl/catalog?search_text=vintage+football+shirt&catalog[]=4&order=newest_first&currency=PLN&price_to=400",
-        "category": "football",
-        "keywords": ["vintage", "shirt", "football"],
-        "min_price": 20,
-        "layer": "football",
-        "football_mode": True,
-        "vintage_mode": True,
-    },
-    {
-        "name":     "Retro Football Jersey",
-        "url":      "https://www.vinted.pl/catalog?search_text=retro+football+jersey&catalog[]=4&order=newest_first&currency=PLN&price_to=400",
-        "category": "football",
-        "keywords": ["retro", "jersey", "football"],
-        "min_price": 20,
-        "layer": "football",
-        "football_mode": True,
-        "vintage_mode": True,
-    },
-    {
-        "name":     "90s Football Shirt",
-        "url":      "https://www.vinted.pl/catalog?search_text=90s+football+shirt&catalog[]=4&order=newest_first&currency=PLN&price_to=400",
-        "category": "football",
-        "keywords": ["90s", "shirt", "football", "jersey"],
-        "min_price": 20,
-        "layer": "football",
-        "football_mode": True,
-        "vintage_mode": True,
-    },
-    {
-        "name":     "Umbro Shirt",
-        "url":      "https://www.vinted.pl/catalog?search_text=umbro+shirt&catalog[]=4&order=newest_first&currency=PLN&price_to=300",
-        "category": "football",
-        "keywords": ["umbro", "shirt", "jersey"],
-        "min_price": 15,
-        "layer": "football",
-        "football_mode": True,
-    },
-    {
-        "name":     "Kappa Shirt",
-        "url":      "https://www.vinted.pl/catalog?search_text=kappa+shirt&catalog[]=4&order=newest_first&currency=PLN&price_to=300",
-        "category": "football",
-        "keywords": ["kappa", "shirt", "jersey"],
-        "min_price": 15,
-        "layer": "football",
-        "football_mode": True,
-    },
-    {
-        "name":     "Lotto Football Shirt",
-        "url":      "https://www.vinted.pl/catalog?search_text=lotto+football+shirt&catalog[]=4&order=newest_first&currency=PLN&price_to=250",
-        "category": "football",
-        "keywords": ["lotto", "shirt", "football"],
-        "min_price": 15,
-        "layer": "football",
-        "football_mode": True,
-    },
-    {
-        "name":     "Diadora Football Shirt",
-        "url":      "https://www.vinted.pl/catalog?search_text=diadora+football+shirt&catalog[]=4&order=newest_first&currency=PLN&price_to=250",
-        "category": "football",
-        "keywords": ["diadora", "shirt"],
-        "min_price": 15,
-        "layer": "football",
-        "football_mode": True,
-    },
-    {
-        "name":     "Old Football Shirt",
-        "url":      "https://www.vinted.pl/catalog?search_text=old+football+shirt&catalog[]=4&order=newest_first&currency=PLN&price_to=200",
-        "category": "football",
-        "keywords": ["old", "shirt", "football"],
-        "min_price": 10,
-        "layer": "football",
-        "football_mode": True,
-    },
 
-    # ══════════════════════════════════════
-    #  🧱 LEGO — zachowane z poprzedniej wersji
-    # ══════════════════════════════════════
-    {
-        "name":     "LEGO Star Wars — wszystkie zestawy",
-        "url":      "https://www.vinted.pl/catalog?search_text=lego+star+wars&order=newest_first&currency=PLN&price_to=100",
-        "category": "lego_sw",
-        "keywords": ["lego", "star wars"],
-        "exclude_keywords": ["polybag", "bitty", "keychain", "brelok", "kulcstart", "nyckelring", "mints", "saszetk"],
-        "min_price": 15,
-        "lego_sw_mode": True,
-        "layer": "lego",
-    },
-    {
-        "name":     "LEGO Star Wars — numery setów",
-        "url":      "https://www.vinted.pl/catalog?search_text=lego+star+wars+75&order=newest_first&currency=PLN&price_to=100",
-        "category": "lego_sw",
-        "keywords": ["lego", "star wars"],
-        "exclude_keywords": ["polybag", "bitty", "keychain", "brelok", "kulcstart", "nyckelring"],
-        "min_price": 15,
-        "lego_sw_mode": True,
-        "layer": "lego",
-    },
-    {
-        "name":     "LEGO zestawy (ogólne)",
-        "url":      "https://www.vinted.pl/catalog?search_text=lego&order=newest_first&currency=PLN",
-        "category": "lego",
-        "keywords": ["lego", "technic", "city", "ninjago", "harry potter", "creator"],
-        "exclude_keywords": ["polybag", "bitty", "keychain", "brelok"],
-        "brands":   ["lego"],
-        "min_price": 20,
-        "layer": "lego",
-    },
-    {
-        "name":     "Funko Pop",
-        "url":      "https://www.vinted.pl/catalog?search_text=funko+pop&order=newest_first&currency=PLN",
-        "category": "funko",
-        "keywords": ["funko", "pop", "vinyl", "figurka"],
-        "exclude_keywords": ["bitty", "minis", "funko minis", "pocket pop"],
-        "brands":   ["funko"],
-        "min_price": 10,
-        "layer": "lego",
-    },
-]
-
-# ─────────────────────────────────────────
-#  💾 PAMIĘĆ  (z automatycznym czyszczeniem)
-# ─────────────────────────────────────────
-SEEN_FILE      = "seen_items.json"
-SEEN_MAX_DAYS  = 30   # pamiętamy ID przez 30 dni — blokuje stare oferty
-
-def load_seen():
+def normalize_title(title: str) -> str:
     """
-    Zwraca dict {item_id: timestamp_float}.
-    Przy ładowaniu od razu usuwa wpisy starsze niż SEEN_MAX_DAYS.
-    Obsługuje też stary format (lista stringów) — migruje automatycznie.
+    Normalizuje tytuł do klucza grupowania.
+    'Supreme Box Logo Hoodie FW18 Red XL' → 'supreme_box_logo'
+    'LEGO Star Wars 75313'                → 'lego_75313'
     """
-    if not os.path.exists(SEEN_FILE):
-        return {}
-    try:
-        with open(SEEN_FILE, "r") as f:
-            data = json.load(f)
+    t = title.lower()
 
-        now = time.time()
-        cutoff = now - SEEN_MAX_DAYS * 86400
+    # FIX #1a — special item detection PRZED resztą przetwarzania
+    if "box logo" in t or "bogo" in t:
+        return "supreme_box_logo"
 
-        # Migracja starego formatu (lista) → nowy (dict z timestampem)
-        if isinstance(data, list):
-            print(f"💾 Migruję seen_items: {len(data)} wpisów → format z datą")
-            return {item_id: now for item_id in data}
+    # LEGO set number (4–6 cyfr)
+    lego_match = re.search(r'\b(\d{4,6})\b', t) if "lego" in t else None
+    if lego_match:
+        return f"lego_{lego_match.group(1)}"
 
-        # Usuń stare wpisy
-        fresh = {k: v for k, v in data.items() if v > cutoff}
-        removed = len(data) - len(fresh)
-        if removed:
-            print(f"💾 Wyczyszczono {removed} starych wpisów z seen_items")
-        return fresh
+    # Nike Dunk
+    if "dunk" in t:
+        return "nike_dunk"
 
-    except Exception as e:
-        print(f"Błąd load_seen: {e} — zaczynam od pustego")
-        return {}
+    # Usuń metadane Vinted
+    t = re.sub(r',?\s*(marka|stan|rozmiar|brand|size|condition):.*', '', t)
+    # Usuń rozmiary
+    t = re.sub(r'\b(xs|s|m|l|xl|xxl|\d{2}/\d{2}|\d{2})\b', '', t)
+    # Usuń lata i sezony
+    t = re.sub(r'\b(fw|ss|aw|sp)\d{2,4}\b', '', t)
+    # Usuń znaki specjalne i emoji
+    t = re.sub(r'[^a-z0-9\s]', ' ', t)
 
-def save_seen(seen):
-    try:
-        with open(SEEN_FILE, "w") as f:
-            json.dump(seen, f)
-    except Exception as e:
-        print(f"Błąd save_seen: {e}")
+    # Tokenizuj — usuń stop words + kolory + noise
+    tokens = [
+        w for w in t.split()
+        if w not in _STOP_WORDS
+        and w not in _COLOR_WORDS
+        and w not in _NOISE_WORDS
+        and len(w) > 2
+    ]
 
-# ─────────────────────────────────────────
-#  📤 TELEGRAM
-# ─────────────────────────────────────────
-def get_vinted_thumb(item_url, item_id):
+    # FIX #1b — max 3–4 znaczące tokeny
+    key = "_".join(tokens[:4])
+    return key or "unknown"
+
+
+def detect_category(title: str) -> str:
+    t = title.lower()
+    for cat, keywords in CATEGORY_MAP.items():
+        if any(kw in t for kw in keywords):
+            return cat
+    return "other"
+
+
+def detect_brand(title: str) -> str | None:
+    t = title.lower()
+    all_brands = (
+        list(LUXURY_BRANDS) + list(HYPE_BRANDS) +
+        ["nike", "adidas", "puma", "reebok", "lego", "funko"]
+    )
+    for brand in sorted(all_brands, key=len, reverse=True):
+        if brand in t:
+            return brand
     return None
 
 
-_last_tg_send   = 0.0
-TG_MIN_INTERVAL = 2.0
+# ─────────────────────────────────────────────────────
+#  💾 RAW ITEMS — surowe dane do budowania DB
+# ─────────────────────────────────────────────────────
+class RawStorage:
+    def __init__(self):
+        self.items: list[dict] = []
+        self._load()
 
-
-def send_message(text, photo_url=None, item_link=None):
-    global _last_tg_send
-    import json as _json
-    tg_base = f"https://api.telegram.org/bot{TOKEN}"
-
-    elapsed = time.time() - _last_tg_send
-    if elapsed < TG_MIN_INTERVAL:
-        time.sleep(TG_MIN_INTERVAL - elapsed)
-
-    clean = re.sub(r'<[^>]+>', '', text)
-
-    # Klikalny przycisk z linkiem do oferty
-    reply_markup = None
-    if item_link:
-        reply_markup = _json.dumps({
-            "inline_keyboard": [[{"text": "🔗 Otwórz na Vinted", "url": item_link}]]
-        })
-
-    try:
-        sent = False
-
-        if photo_url:
-            data = {"chat_id": CHAT_ID, "photo": photo_url, "caption": clean[:1024]}
-            if reply_markup:
-                data["reply_markup"] = reply_markup
-            r = requests.post(f"{tg_base}/sendPhoto", data=data, timeout=15)
-            if r.status_code == 200:
-                sent = True
-            elif r.status_code == 429:
-                time.sleep(5)
-
-        if not sent:
-            data = {
-                "chat_id":                  CHAT_ID,
-                "text":                     clean[:4096],
-                "disable_web_page_preview": True,
-            }
-            if reply_markup:
-                data["reply_markup"] = reply_markup
-            r = requests.post(f"{tg_base}/sendMessage", data=data, timeout=10)
-            if r.status_code == 429:
-                time.sleep(5)
-                requests.post(f"{tg_base}/sendMessage", data=data, timeout=10)
-
-        _last_tg_send = time.time()
-
-    except Exception as e:
-        print(f"Błąd wysyłania: {e}")
-
-# ─────────────────────────────────────────
-#  💰 WYCIĄGANIE CENY
-# ─────────────────────────────────────────
-def extract_price(text):
-    """
-    Wyciąga cenę z tekstu.
-    Ignoruje liczby które wyglądają jak numery setów LEGO (4-5 cyfr w tytule)
-    oraz inne fałszywe ceny.
-    """
-    if not text:
-        return None
-
-    # Szukamy wzorca ceny: liczba po której następuje "zł" lub "PLN"
-    # albo liczba poprzedzona symbolem waluty
-    price_patterns = [
-        r'(\d+[.,]?\d*)\s*(?:zł|PLN|pln)',   # "150 zł" lub "150PLN"
-        r'(?:cena|price)[:\s]+(\d+[.,]?\d*)',  # "cena: 150"
-    ]
-
-    for pattern in price_patterns:
-        m = re.search(pattern, text, re.IGNORECASE)
-        if m:
-            try:
-                val = float(m.group(1).replace(",", "."))
-                if 1 < val < 5000:
-                    return val
-            except:
-                pass
-
-    # Fallback: ostatnia liczba w tekście jeśli jest sensowna
-    nums = re.findall(r'\b(\d+[.,]?\d*)\b', text.replace("\xa0", " "))
-    candidates = []
-    for n in nums:
+    def _load(self):
         try:
-            val = float(n.replace(",", "."))
-            if 1 < val < 5000:   # max 5000 zł — eliminuje numery setów
-                candidates.append(val)
+            if os.path.exists(RAW_FILE):
+                with open(RAW_FILE) as f:
+                    self.items = json.load(f)
+        except:
+            self.items = []
+
+    def add(self, title: str, price: float, category: str):
+        self.items.append({
+            "title": title,
+            "price": price,
+            "category": category,
+            "ts": time.time(),
+        })
+        # Trzymaj max 5000 ostatnich
+        if len(self.items) > 5000:
+            self.items = self.items[-5000:]
+
+    def save(self):
+        try:
+            with open(RAW_FILE, "w") as f:
+                json.dump(self.items, f)
         except:
             pass
 
-    return candidates[-1] if candidates else None
+    def count_new_since(self, ts: float) -> int:
+        return sum(1 for i in self.items if i["ts"] > ts)
 
-# ─────────────────────────────────────────
-#  🔤 DETEKCJA BŁĘDNEJ PISOWNI MARKI
-# ─────────────────────────────────────────
-def detect_typo_brand(text):
-    """
-    Zwraca (prawdziwa_marka, znaleziony_typo) jeśli
-    wykryto błędną pisownię, inaczej (None, None)
-    """
-    text_lower = text.lower()
-    for brand, typos in BRAND_TYPOS.items():
-        for typo in typos:
-            if typo in text_lower:
-                return brand, typo
-    return None, None
 
-# ─────────────────────────────────────────
-#  🤖 AI — ANALIZA ZDJĘCIA + TEKSTU
-#  Wysyła zdjęcie i opis do Claude Vision
-#  i pyta: czy to ukryta okazja?
-# ─────────────────────────────────────────
-def analyze_with_ai(title, description, image_url):
-    """
-    Zwraca dict:
-      {
-        "is_hidden_gem": bool,
-        "confidence":    int (0-100),
-        "detected_brand": str lub None,
-        "reason":         str,
-        "mismatch":       bool  (zdjęcie ≠ opis)
-      }
-    """
-    if not ANTHROPIC_KEY:
-        return None
+# ─────────────────────────────────────────────────────
+#  🧱 MARKET DATABASE
+# ─────────────────────────────────────────────────────
+class MarketDB:
+    def __init__(self):
+        self.db: dict[str, dict] = {}
+        self._load()
 
-    # Pobierz zdjęcie i zakoduj do base64
-    image_data = None
-    image_type = "image/jpeg"
-    if image_url:
+    def _load(self):
         try:
-            img_r = requests.get(image_url, timeout=10, headers=HEADERS)
-            if img_r.status_code == 200:
-                image_data = base64.standard_b64encode(img_r.content).decode("utf-8")
-                ct = img_r.headers.get("content-type", "image/jpeg")
-                image_type = ct.split(";")[0].strip()
+            if os.path.exists(DB_FILE):
+                with open(DB_FILE) as f:
+                    self.db = json.load(f)
+                print(f"  📦 MarketDB: {len(self.db)} grup")
+        except:
+            self.db = {}
+
+    def save(self):
+        try:
+            with open(DB_FILE, "w") as f:
+                json.dump(self.db, f, indent=2)
         except:
             pass
 
-    # Zbuduj prompt
-    prompt = f"""Jesteś ekspertem od sneakersów, ubrań streetwear, LEGO i Funko Pop.
-Przeanalizuj tę ofertę z Vinted i odpowiedz TYLKO w JSON.
+    def build(self, raw_items: list[dict]):
+        """Grupuje surowe itemy i oblicza statystyki cenowe.
+        FIX #2: Merguje nowe dane z istniejącą bazą (nie nadpisuje).
+        FIX #3: Filtruje outlier'y przez IQR przed liczeniem statystyk.
+        """
+        groups: dict[str, list[float]] = defaultdict(list)
+        group_history: dict[str, list[dict]] = defaultdict(list)
 
-Tytuł oferty: {title[:200]}
-Opis: {description[:300] if description else 'brak'}
+        for item in raw_items:
+            key = normalize_title(item["title"])
+            if key == "unknown":
+                continue
+            groups[key].append(item["price"])
+            group_history[key].append({
+                "price": item["price"],
+                "ts": item.get("ts", 0),
+            })
 
-Odpowiedz w formacie JSON (bez żadnego innego tekstu):
-{{
-  "is_hidden_gem": true/false,
-  "confidence": 0-100,
-  "detected_brand": "nazwa marki lub null",
-  "reason": "krótkie wyjaśnienie po polsku",
-  "mismatch": true/false
-}}
+        new_db = {}
+        for key, prices in groups.items():
+            if len(prices) < DB_MIN_SAMPLES:
+                continue
 
-Kiedy is_hidden_gem = true:
-- zdjęcie pokazuje markową rzecz ale tytuł jej nie wymienia
-- tytuł ma błędną pisownię marki
-- cena jest bardzo niska jak na daną markę
-- tytuł jest ogólnikowy ale na zdjęciu widać logo premium marki
-- mismatch = true gdy zdjęcie NIE pasuje do opisu tekstowego"""
+            # FIX #3 — IQR outlier filter
+            prices = self._filter_outliers(prices)
+            if len(prices) < DB_MIN_SAMPLES:
+                continue
 
-    # Zbuduj wiadomość do API
-    content = []
-    if image_data:
-        content.append({
-            "type": "image",
-            "source": {
-                "type":       "base64",
-                "media_type": image_type,
-                "data":       image_data,
+            history = sorted(group_history[key], key=lambda x: x["ts"])
+            trend = self._detect_trend(history)
+
+            new_entry = {
+                "avg":    round(mean(prices), 2),
+                "median": round(median(prices), 2),
+                "min":    round(min(prices), 2),
+                "max":    round(max(prices), 2),
+                "std":    round(stdev(prices) if len(prices) > 1 else 0, 2),
+                "count":  len(prices),
+                "trend":  trend,
+                "updated": time.time(),
             }
-        })
-    content.append({"type": "text", "text": prompt})
 
+            # FIX #2 — merge z istniejącą bazą (weighted average)
+            if key in self.db:
+                old = self.db[key]
+                old_count = old.get("count", 0)
+                new_count = new_entry["count"]
+                total = old_count + new_count
+                if total > 0:
+                    new_entry["avg"] = round(
+                        (old["avg"] * old_count + new_entry["avg"] * new_count) / total, 2
+                    )
+                    new_entry["count"] = total
+                    new_entry["min"] = min(old.get("min", new_entry["min"]), new_entry["min"])
+                    new_entry["max"] = max(old.get("max", new_entry["max"]), new_entry["max"])
+                    # Mediana: użyj nowej (z aktualnych danych)
+                    # std: zachowaj nowe
+
+            new_db[key] = new_entry
+
+        # Zachowaj wpisy których nie ma w nowym buildzie (historyczne dane)
+        for key, data in self.db.items():
+            if key not in new_db:
+                new_db[key] = data
+
+        self.db = new_db
+        self.save()
+        print(f"  📊 MarketDB zbudowana: {len(self.db)} grup")
+        return new_db
+
+    def _filter_outliers(self, prices: list[float]) -> list[float]:
+        """FIX #3 — usuwa ceny poza zakresem Q1*0.5 .. Q3*1.5."""
+        if len(prices) < 4:
+            return prices
+        s = sorted(prices)
+        n = len(s)
+        q1 = s[n // 4]
+        q3 = s[(n * 3) // 4]
+        lo = q1 * 0.5
+        hi = q3 * 1.5
+        filtered = [p for p in s if lo < p < hi]
+        return filtered if len(filtered) >= DB_MIN_SAMPLES else prices
+
+    def _detect_trend(self, history: list[dict]) -> str:
+        """Wykrywa trend cenowy na podstawie historii."""
+        if len(history) < 4:
+            return "stable"
+        prices = [h["price"] for h in history[-6:]]  # ostatnie 6
+        mid = len(prices) // 2
+        avg_old = mean(prices[:mid])
+        avg_new = mean(prices[mid:])
+        if avg_new > avg_old * 1.15:
+            return "rising"
+        if avg_new < avg_old * 0.85:
+            return "falling"
+        return "stable"
+
+    def lookup(self, title: str) -> dict | None:
+        key = normalize_title(title)
+        return self.db.get(key)
+
+    def lookup_by_brand_category(self, brand: str, category: str) -> dict | None:
+        """Fallback — znajdź dane dla marki+kategorii."""
+        query = f"{brand}_{category}"
+        # Szukaj najbliższego klucza
+        for key, data in self.db.items():
+            if brand in key and data.get("count", 0) >= 5:
+                return data
+        return None
+
+
+# ─────────────────────────────────────────────────────
+#  🤖 AI CACHE
+# ─────────────────────────────────────────────────────
+class AICache:
+    def __init__(self):
+        self.cache: dict[str, dict] = {}
+        self._load()
+
+    def _load(self):
+        try:
+            if os.path.exists(AI_CACHE_FILE):
+                with open(AI_CACHE_FILE) as f:
+                    self.cache = json.load(f)
+        except:
+            self.cache = {}
+
+    def save(self):
+        try:
+            with open(AI_CACHE_FILE, "w") as f:
+                json.dump(self.cache, f)
+        except:
+            pass
+
+    def get(self, title: str, price: float = 0) -> dict | None:
+        # FIX #4 — klucz = pełny tytuł + cena (brak kolizji między różnymi itemami)
+        key = f"{title.lower().strip()}_{round(price)}"
+        entry = self.cache.get(key)
+        if entry:
+            # Cache ważny 24h
+            if time.time() - entry.get("ts", 0) < 86400:
+                return entry["data"]
+        return None
+
+    def set(self, title: str, data: dict, price: float = 0):
+        # FIX #4 — spójny klucz z get()
+        key = f"{title.lower().strip()}_{round(price)}"
+        self.cache[key] = {"data": data, "ts": time.time()}
+        # Trzymaj max 2000 wpisów
+        if len(self.cache) > 2000:
+            oldest = sorted(self.cache.items(), key=lambda x: x[1]["ts"])
+            for k, _ in oldest[:200]:
+                del self.cache[k]
+
+
+# ─────────────────────────────────────────────────────
+#  📈 SELF-LEARNING — feedback użytkownika
+# ─────────────────────────────────────────────────────
+class FeedbackLearner:
+    def __init__(self):
+        self.data: dict = {
+            "brand_scores": {},
+            "category_scores": {},
+            "keyword_scores": {},
+            "clicked": [],
+            "bought": [],
+        }
+        self._load()
+
+    def _load(self):
+        try:
+            if os.path.exists(FEEDBACK_FILE):
+                with open(FEEDBACK_FILE) as f:
+                    self.data = json.load(f)
+        except:
+            pass
+
+    def save(self):
+        try:
+            with open(FEEDBACK_FILE, "w") as f:
+                json.dump(self.data, f, indent=2)
+        except:
+            pass
+
+    def record_click(self, item_id: str, brand: str, category: str):
+        """Zwiększa score dla marki i kategorii po kliknięciu."""
+        self.data["clicked"].append({"id": item_id, "ts": time.time()})
+        self._boost(brand, category)
+        self.save()
+
+    def record_buy(self, item_id: str, brand: str, category: str):
+        """Silniejszy boost po zakupie."""
+        self.data["bought"].append({"id": item_id, "ts": time.time()})
+        self._boost(brand, category, multiplier=2.0)
+        self.save()
+
+    def _boost(self, brand: str, category: str, multiplier: float = 1.0):
+        if brand:
+            self.data["brand_scores"][brand] = (
+                self.data["brand_scores"].get(brand, 5.0) + 0.1 * multiplier
+            )
+        if category:
+            self.data["category_scores"][category] = (
+                self.data["category_scores"].get(category, 5.0) + 0.05 * multiplier
+            )
+
+    def get_brand_bonus(self, brand: str) -> float:
+        """Zwraca bonus (0.0–1.0) dla marki na podstawie historii."""
+        score = self.data["brand_scores"].get(brand, 5.0)
+        return min((score - 5.0) / 10.0, 1.0)
+
+    def get_category_bonus(self, category: str) -> float:
+        score = self.data["category_scores"].get(category, 5.0)
+        return min((score - 5.0) / 10.0, 1.0)
+
+
+# ─────────────────────────────────────────────────────
+#  🤖 AI ANALYZER (Claude)
+# ─────────────────────────────────────────────────────
+def _call_claude(prompt: str, anthropic_key: str) -> dict | None:
     try:
         r = requests.post(
             "https://api.anthropic.com/v1/messages",
             headers={
-                "x-api-key":         ANTHROPIC_KEY,
+                "x-api-key": anthropic_key,
                 "anthropic-version": "2023-06-01",
-                "content-type":      "application/json",
+                "content-type": "application/json",
             },
             json={
-                "model":      "claude-opus-4-5",
-                "max_tokens": 300,
-                "messages":   [{"role": "user", "content": content}],
+                "model": "claude-sonnet-4-20250514",
+                "max_tokens": 400,
+                "messages": [{"role": "user", "content": prompt}],
             },
             timeout=20,
         )
-
         if r.status_code != 200:
-            print(f"AI error: {r.text[:200]}")
             return None
-
-        raw = r.json()["content"][0]["text"].strip()
-        # Wyczyść ewentualne backticki
-        raw = re.sub(r"```json|```", "", raw).strip()
-        return json.loads(raw)
-
-    except Exception as e:
-        print(f"AI parse error: {e}")
+        text = r.json()["content"][0]["text"].strip()
+        text = re.sub(r"```json|```", "", text).strip()
+        return json.loads(text)
+    except:
         return None
 
-# ─────────────────────────────────────────
-#  🌐 POBIERANIE Z VINTED  (HTML scraping)
-# ─────────────────────────────────────────
-import random
-from bs4 import BeautifulSoup
 
-# Rotacja User-Agentów — zmniejsza ryzyko blokady
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
+def analyze_item_ai(
+    title: str,
+    description: str,
+    price: float,
+    db_data: dict | None,
+    anthropic_key: str,
+    ai_cache: AICache,
+) -> dict:
+    """
+    Analizuje ofertę przez Claude.
+    Zwraca:
+    {
+        brand, category, keywords,
+        estimated_value, rarity (1-10), hype_score (1-10),
+        underpriced (bool), final_score (0-10),
+        decision: BUY / WATCH / SKIP
+    }
+    """
+    # Sprawdź cache — FIX #4: klucz = tytuł + cena
+    cached = ai_cache.get(title, price)
+    if cached:
+        return cached
+
+    avg_str = f"{db_data['avg']:.0f} zł (z {db_data['count']} ofert)" if db_data else "brak danych"
+
+    prompt = f"""Jesteś ekspertem od wyceny używanych ubrań, butów, LEGO i Funko Pop.
+Analizujesz ofertę z Vinted i oceniasz czy warto kupić.
+
+Tytuł: {title[:200]}
+Opis: {description[:300] if description else 'brak'}
+Cena: {price:.0f} zł
+Średnia rynkowa (nasza baza): {avg_str}
+
+Odpowiedz TYLKO w JSON (bez backtick, bez wyjaśnień):
+{{
+  "brand": "nazwa marki lub null",
+  "category": "sneakers/streetwear/luxury/lego/funko/football/other",
+  "keywords": ["max 3 słowa kluczowe"],
+  "estimated_value": liczba_PLN,
+  "rarity": 1-10,
+  "hype_score": 1-10,
+  "underpriced": true/false,
+  "final_score": 0-10,
+  "decision": "BUY/WATCH/SKIP"
+}}
+
+Zasady oceny:
+- decision BUY: cena < 60% wartości rynkowej LUB rzadki item LUB hype > 7
+- decision WATCH: cena < 80% wartości LUB interesujący item
+- decision SKIP: normalna cena lub brak potencjału
+- estimated_value: realna wartość rynkowa w PLN (sprawdź czy pasuje do polskiego rynku)
+- rarity: 1=pospolite, 10=rzadkie kolekcjonerskie
+- hype_score: 1=nikt nie chce, 10=wszyscy szukają"""
+
+    result = _call_claude(prompt, anthropic_key)
+
+    if not result:
+        result = {
+            "brand": detect_brand(title),
+            "category": detect_category(title),
+            "keywords": [],
+            "estimated_value": db_data["avg"] if db_data else price * 1.5,
+            "rarity": 3,
+            "hype_score": 3,
+            "underpriced": price < (db_data["avg"] * 0.7 if db_data else price),
+            "final_score": 5.0,
+            "decision": "WATCH",
+        }
+
+    ai_cache.set(title, result, price)
+    return result
+
+
+# ─────────────────────────────────────────────────────
+#  🧮 CONFIDENCE SCORING
+# ─────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
+#  🎸 VINTAGE SCORING — Step 2
+# ─────────────────────────────────────────────────────
+VINTAGE_KEYWORDS = [
+    "vintage", "single stitch", "90s", "80s", "70s", "y2k",
+    "retro", "deadstock", "made in usa", "made in usa",
+    "distressed", "faded", "worn", "aged",
 ]
 
-VINTED_MIN_DELAY = 2.0
-VINTED_MAX_DELAY = 4.0
-VINTED_429_WAIT  = 180
+HIGH_VALUE_TOPICS = [
+    # Muzyka
+    "metallica", "nirvana", "tour", "band tee", "band shirt",
+    "ac/dc", "rolling stones", "led zeppelin", "pink floyd",
+    "rap tee", "rap shirt", "wu-tang", "wu tang", "tupac",
+    "biggie", "eminem", "jay-z", "nas", "travis scott",
+    # Pop culture
+    "disney", "mickey", "mickey mouse", "looney tunes",
+    "harley", "harley davidson", "nascar",
+    "starter", "champion", "russell athletic",
+    # Gaming
+    "pokemon", "pikachu", "zelda", "mario", "nintendo",
+    "anime", "dragon ball", "naruto", "playstation",
+    # Inne tematyki vintage premium
+    "usa olympic", "olympics", "world cup", "superbowl",
+    "college", "university", "varsity",
+]
 
-# BOT #5 — globalny licznik 403 — gdy Vinted blokuje, zwiększamy pauzę
-_consecutive_403   = 0
-_403_BACKOFF_STEPS = [60, 120, 300]   # FIX #7 — exponential: 60s → 120s → 300s
-_403_BACKOFF_THRESHOLD = 3
 
-def get_headers():
-    """Zwraca losowy zestaw nagłówków naśladujący przeglądarkę."""
-    return {
-        "User-Agent":      random.choice(USER_AGENTS),
-        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Accept-Encoding": "gzip, deflate, br",
-        "DNT":             "1",
-        "Connection":      "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Sec-Fetch-Dest":  "document",
-        "Sec-Fetch-Mode":  "navigate",
-        "Sec-Fetch-Site":  "none",
-        "Cache-Control":   "max-age=0",
-    }
-
-def vinted_fetch(url, label=""):
+def vintage_score(title: str, description: str | None = None) -> float:
     """
-    Pobiera stronę Vinted (HTML).
-    FIX #7: exponential backoff 60s → 120s → 300s po serii 403.
+    Oblicza score vintage (0–10) na podstawie tytułu i opisu.
+    Step 2 z flipengine spec.
     """
-    global _consecutive_403
-    for attempt in range(1, 4):
-        try:
-            time.sleep(random.uniform(VINTED_MIN_DELAY, VINTED_MAX_DELAY))
-            r = requests.get(url, headers=get_headers(), timeout=10)
+    t = (title + " " + (description or "")).lower()
+    score = 0.0
 
-            if r.status_code == 200:
-                _consecutive_403 = 0
-                return r
+    if any(k in t for k in VINTAGE_KEYWORDS):
+        score += 2.0
 
-            if r.status_code == 429:
-                wait = VINTED_429_WAIT * attempt
-                print(f"  🚫 429 [{label}] — czekam {wait}s (próba {attempt})")
-                time.sleep(wait)
-                continue
+    if any(k in t for k in HIGH_VALUE_TOPICS):
+        score += 3.0
 
-            if r.status_code in (403, 401):
-                _consecutive_403 += 1
-                step_idx = min(_consecutive_403 - 1, len(_403_BACKOFF_STEPS) - 1)
-                backoff  = _403_BACKOFF_STEPS[step_idx]
-                print(f"  ⚠️ HTTP {r.status_code} [{label}] — próba {attempt}/3 "
-                      f"(seria {_consecutive_403}x → backoff {backoff}s)")
-                if _consecutive_403 >= _403_BACKOFF_THRESHOLD:
-                    print(f"  🛑 Seria {_consecutive_403}x 403 — backoff {backoff}s + odświeżam sesję")
-                    time.sleep(backoff)
-                    refresh_session()
-                    _consecutive_403 = 0
-                else:
-                    time.sleep(backoff)
-                continue
+    if "tour" in t:
+        score += 1.5
 
-            print(f"  ⚠️ HTTP {r.status_code} [{label}]")
-            return None
+    if "single stitch" in t:
+        score += 1.0
 
-        except Exception as e:
-            print(f"  ⚠️ Request error [{label}]: {e}")
-            time.sleep(10)
+    # Zwykły t-shirt bez "vintage" — mała szansa na gem
+    if ("t shirt" in t or "tshirt" in t or "tee" in t) and "vintage" not in t:
+        score += 0.5
 
-    return None
+    return min(score, 10.0)
 
-def refresh_session():
-    """Stub dla kompatybilności — nie potrzebujemy już sesji API."""
-    print("✅ Sesja Vinted odświeżona")
 
-def parse_items_from_html(html):
+# ─────────────────────────────────────────────────────
+#  ⚽ FOOTBALL VINTAGE SCORING — Step 3
+# ─────────────────────────────────────────────────────
+ERA_KEYWORDS = [
+    "90s", "80s", "70s", "2000", "2001", "2002", "2003",
+    "1998", "1996", "1994", "1992", "1990", "1988",
+    "1986", "1984", "1982", "1980", "1970",
+    "98", "96", "94", "92", "90", "88", "86",
+]
+
+
+def football_vintage_score(title: str) -> float:
     """
-    Vinted renderuje przez JS — HTML nie zawiera treści ofert.
-    Zamiast tego wyciągamy dane z JSON osadzonego w stronie
-    (window.__PRELOADED_STATE__ lub podobny).
-    Zwraca listę dictów: {id, title, price, url}
+    Oblicza score koszulki vintage (0–10).
+    Step 3 z flipengine spec.
     """
-    items    = []
-    seen_ids = set()
+    t = title.lower()
+    score = 0.0
 
-    # Vinted osadza dane jako JSON w tagu <script>
-    # Szukamy: "items":[{...}] lub "catalogItems":[{...}]
-    patterns = [
-        r'"items"\s*:\s*(\[.*?\])\s*[,}]',
-        r'"catalogItems"\s*:\s*(\[.*?\])\s*[,}]',
-        r'"data"\s*:\s*(\[.*?\])\s*[,}]',
-    ]
+    if "football" in t or "jersey" in t or "shirt" in t or "koszulka" in t:
+        score += 1.0
 
-    import json as _json
+    if any(k in t for k in ["vintage", "retro", "classic", "old", "original"]):
+        score += 2.0
 
-    for pattern in patterns:
-        matches = re.findall(pattern, html, re.DOTALL)
-        for match in matches:
-            try:
-                data = _json.loads(match)
-                if not isinstance(data, list) or len(data) == 0:
-                    continue
-                if not isinstance(data[0], dict):
-                    continue
-                # Sprawdź czy to faktycznie lista ofert (musi mieć id i url/path)
-                if "id" not in data[0] and "url" not in data[0]:
-                    continue
+    if any(k in t for k in ["umbro", "kappa", "lotto", "diadora",
+                              "hummel", "le coq sportif", "admiral", "bukta"]):
+        score += 2.0
 
-                for entry in data:
-                    try:
-                        item_id = str(entry.get("id", ""))
-                        if not item_id or not item_id.isdigit():
-                            continue
-                        if item_id in seen_ids:
-                            continue
-                        seen_ids.add(item_id)
+    if any(k in t for k in ERA_KEYWORDS):
+        score += 1.5
 
-                        title = entry.get("title", "") or entry.get("name", "") or ""
-                        url   = entry.get("url", "") or f"https://www.vinted.pl/items/{item_id}"
-                        if not url.startswith("http"):
-                            url = "https://www.vinted.pl" + url
+    # Bonus za znane turnieje
+    if any(k in t for k in ["world cup", "euro", "champions league",
+                              "copa", "mundial", "mistrzostwa"]):
+        score += 1.0
 
-                        # Filtr czasu — tylko oferty z ostatnich 24h
-                        created = (
-                            entry.get("created_at_ts") or
-                            entry.get("created_at") or
-                            entry.get("last_push_up_at") or
-                            entry.get("updated_at_ts") or
-                            0
-                        )
-                        if created:
-                            try:
-                                ts = float(created)
-                                # Jeśli timestamp w milisekundach — przelicz
-                                if ts > 1e12:
-                                    ts = ts / 1000
-                                age_hours = (time.time() - ts) / 3600
-                                if age_hours > 24:
-                                    continue
-                            except:
-                                pass
-
-                        # cena — może być string lub float
-                        raw_price = entry.get("price", "") or entry.get("price_numeric", "")
-                        price = None
-                        try:
-                            price = float(str(raw_price).replace(",", ".").replace(" ", ""))
-                        except:
-                            pass
-
-                        # Zdjęcie — różne pola w zależności od wersji API
-                        photo_url = None
-                        photos = entry.get("photos") or entry.get("photo") or []
-                        if isinstance(photos, list) and photos:
-                            p = photos[0]
-                            if isinstance(p, dict):
-                                photo_url = (
-                                    p.get("url") or
-                                    p.get("full_size_url") or
-                                    p.get("thumbnails", [{}])[0].get("url") if p.get("thumbnails") else None
-                                )
-                        elif isinstance(photos, dict):
-                            photo_url = photos.get("url") or photos.get("full_size_url")
-
-                        if title:
-                            items.append({
-                                "id":    item_id,
-                                "title": title,
-                                "price": price,
-                                "url":   url,
-                                "photo": photo_url,
-                            })
-                    except:
-                        continue
-
-                if items:
-                    return items
-
-            except:
-                continue
-
-    # Fallback: szukaj linków i tytułów przez og:title / meta
-    if not items:
-        soup = BeautifulSoup(html, "html.parser")
-        for tag in soup.find_all("a", href=True):
-            href = tag["href"]
-            if "/items/" not in href:
-                continue
-            if not href.startswith("http"):
-                href = "https://www.vinted.pl" + href
-            try:
-                item_id = href.split("/items/")[1].split("-")[0].split("?")[0]
-                if not item_id.isdigit() or item_id in seen_ids:
-                    continue
-                seen_ids.add(item_id)
-                # Tytuł z atrybutu title lub aria-label
-                title = (
-                    tag.get("title") or
-                    tag.get("aria-label") or
-                    tag.get_text(" ", strip=True)
-                )
-                price = extract_price(title) if title else None
-                items.append({
-                    "id":    item_id,
-                    "title": title or "",
-                    "price": price,
-                    "url":   href,
-                    "photo": None,
-                })
-            except:
-                continue
-
-    return items
+    return min(score, 10.0)
 
 
-# ─────────────────────────────────────────
-#  🖼️ POBIERANIE SZCZEGÓŁÓW OFERTY (HTML)
-# ─────────────────────────────────────────
-def get_item_photo(item_id, item_url):
+def calculate_confidence(
+    price: float,
+    db_data: dict | None,
+    ai_data: dict,
+    market_price: float | None,
+    brand: str | None,
+    category: str,
+    learner: FeedbackLearner,
+    title: str = "",
+    description: str = "",
+) -> dict:
     """
-    Pobiera URL zdjęcia oferty przez Vinted API.
-    Zwraca URL zdjęcia lub None.
+    Oblicza confidence score (0–10).
+    Steps 4/5/7/8: vintage boost, football boost, flip boost,
+                   chaos bonus, anti-spam, fake filter.
     """
-    try:
-        api_url = f"https://www.vinted.pl/api/v2/items/{item_id}"
-        r = requests.get(api_url, headers={
-            **get_headers(),
-            "Accept": "application/json, text/plain, */*",
-            "X-Requested-With": "XMLHttpRequest",
-        }, timeout=10)
-        if r.status_code == 200:
-            data = r.json()
-            item = data.get("item", {})
-            photos = item.get("photos", [])
-            if photos:
-                p = photos[0]
-                url = p.get("full_size_url") or p.get("url") or p.get("thumb_url")
-                if url:
-                    return url
-    except:
-        pass
-    return None
 
+    # ── DB SCORE (0–10) ──────────────────────
+    db_score = 5.0
+    flip_profit = 0.0
+    fake_risk = False
+    trend = "stable"
 
-def get_item_details(item_url):
-    """
-    Pobiera (photo_url, description) dla oferty.
-    Używane w hidden_gem_mode do analizy AI.
-    Zwraca (None, None) przy błędzie.
-    """
-    try:
-        r = vinted_fetch(item_url, label="item_details")
-        if not r:
-            return None, None
-        from bs4 import BeautifulSoup as _BS
-        soup = _BS(r.text, "html.parser")
-        og_img    = soup.find("meta", property="og:image")
-        image_url = og_img["content"] if og_img else None
-        desc_tag    = soup.find("meta", attrs={"name": "description"})
-        description = desc_tag["content"] if desc_tag else ""
-        return image_url, description
-    except Exception as e:
-        print(f"Błąd get_item_details: {e}")
-        return None, None
+    if db_data:
+        avg = db_data["avg"]
+        ratio = price / avg if avg > 0 else 1.0
+        trend = db_data.get("trend", "stable")
 
-# ─────────────────────────────────────────
-#  📊 MEDIANA RYNKOWA (HTML scraping)
-# ─────────────────────────────────────────
-def get_market_median(search):
-    try:
-        r = vinted_fetch(search["url"], label=search["name"])
-        if not r:
-            return None
-
-        items  = parse_items_from_html(r.text)
-        prices = [
-            it["price"] for it in items
-            if it["price"] and it["price"] > search.get("min_price", 1)
-        ]
-
-        if len(prices) >= 3:
-            med = median(prices)
-            print(f"  📊 Mediana [{search['name']}]: {med:.0f} zł ({len(prices)} ofert)")
-            return med
-
-    except Exception as e:
-        print(f"Błąd mediany [{search['name']}]: {e}")
-    return None
-
-# ─────────────────────────────────────────
-#  🧱 BRICKLINK — ceny rynkowe LEGO
-#  Cache zapisywany do pliku JSON
-#  Odświeżamy ceny raz na 24h per set
-# ─────────────────────────────────────────
-BRICKLINK_CACHE_FILE = "bricklink_prices.json"
-BRICKLINK_CACHE_TTL  = 24 * 3600  # 24h
-
-_bl_cache = {}
-
-def load_bricklink_cache():
-    global _bl_cache
-    try:
-        if os.path.exists(BRICKLINK_CACHE_FILE):
-            with open(BRICKLINK_CACHE_FILE) as f:
-                _bl_cache = json.load(f)
-    except:
-        _bl_cache = {}
-
-def save_bricklink_cache():
-    try:
-        with open(BRICKLINK_CACHE_FILE, "w") as f:
-            json.dump(_bl_cache, f)
-    except:
-        pass
-
-def get_bricklink_price(set_number):
-    """
-    Pobiera średnią cenę sprzedaży setu z BrickLink (używane).
-    Zwraca cenę w PLN lub None.
-    Cache 24h — nie odpytujemy za każdym razem.
-    """
-    global _bl_cache
-    now = time.time()
-
-    # Sprawdź cache
-    if set_number in _bl_cache:
-        entry = _bl_cache[set_number]
-        if now - entry.get("ts", 0) < BRICKLINK_CACHE_TTL:
-            return entry.get("price_pln")
-
-    try:
-        # BrickLink price guide — publiczna strona bez logowania
-        # Używamy strony z cenami "used" (odpowiada Vinted)
-        url = f"https://www.bricklink.com/v2/catalog/catalogitem.page?S={set_number}-1"
-        r = requests.get(url, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept-Language": "en-US,en;q=0.9",
-        }, timeout=15)
-
-        if r.status_code != 200:
-            return None
-
-        # Szukamy ceny average w HTML — BrickLink pokazuje ją jako
-        # "Avg Price: $XX.XX" lub w meta tagach
-        text = r.text
-
-        # Szukaj average price dla "Used" (U) condition
-        avg_usd = None
-
-        # Format: pewne fragmenty HTML z ceną
-        patterns = [
-            r'avg_price["\s:]+\$?([\d,\.]+)',
-            r'Avg Price.*?\$([\d,\.]+)',
-            r'"avg_price":"([\d\.]+)"',
-            r'id="val_used_qty"[^>]*>.*?Avg.*?\$([\d\.]+)',
-        ]
-        for pat in patterns:
-            m = re.search(pat, text, re.IGNORECASE | re.DOTALL)
-            if m:
-                try:
-                    avg_usd = float(m.group(1).replace(",", ""))
-                    if avg_usd > 0:
-                        break
-                except:
-                    pass
-
-        # Alternatywnie — szukaj w JSON osadzonym w stronie
-        if not avg_usd:
-            json_match = re.search(r'"avg_price"\s*:\s*"?([\d\.]+)"?', text)
-            if json_match:
-                try:
-                    avg_usd = float(json_match.group(1))
-                except:
-                    pass
-
-        if avg_usd:
-            # Przelicz USD → PLN (kurs ~4.0)
-            price_pln = avg_usd * 4.0
-            _bl_cache[set_number] = {"price_pln": price_pln, "ts": now}
-            save_bricklink_cache()
-            print(f"  🧱 BrickLink #{set_number}: ${avg_usd:.2f} → {price_pln:.0f} zł")
-            return price_pln
-
-    except Exception as e:
-        print(f"  ⚠️ BrickLink error #{set_number}: {e}")
-
-    return None
-
-# ─────────────────────────────────────────
-#  🧱 WALIDACJA LEGO STAR WARS
-# ─────────────────────────────────────────
-def validate_lego_sw(title, description, ai_result):
-    """
-    Zwraca (is_valid, score, reasons, set_info)
-    score = 0-100 (im wyższy tym lepsza oferta)
-    """
-    text = (title + " " + (description or "")).lower()
-    reasons = []
-    score   = 0
-
-    # 1. Dyskwalifikacja — niekompletny
-    for kw in SW_INCOMPLETE_KEYWORDS:
-        if kw in text:
-            return False, 0, [f"⛔ niekompletny zestaw ({kw})"], {}
-
-    # 2. Wykryj numer setu
-    found_set = None
-    for num in SW_SET_NUMBERS:
-        if num in text:
-            found_set = num
-            score    += 40
-            reasons.append(f"✅ kultowy set #{num}")
-            break
-
-    # Szukaj też dowolnego numeru 75xxx (nowsze sety SW)
-    if not found_set:
-        sw_num = re.search(r"75\d{3}", text)
-        if sw_num:
-            found_set = sw_num.group()
-            score    += 25
-            reasons.append(f"✅ numer setu SW: #{found_set}")
-
-    # 3. Wykryj pojazd / miejsce
-    found_vehicle = None
-    for vehicle in SW_VEHICLES:
-        if vehicle in text:
-            found_vehicle = vehicle
-            score        += 20
-            reasons.append(f"✅ pojazd: {vehicle}")
-            break
-
-    # 4. Wykryj postać
-    found_char = None
-    for char in SW_CHARACTERS:
-        if char in text:
-            found_char = char
-            score     += 15
-            reasons.append(f"✅ postać: {char}")
-            break
-
-    # 5. Kompletność
-    is_complete = any(kw in text for kw in SW_COMPLETE_KEYWORDS)
-    if is_complete:
-        score   += 20
-        reasons.append("✅ opis sugeruje kompletny zestaw")
-    else:
-        # Brak słowa "kompletny" nie dyskwalifikuje, ale obniża score
-        score -= 10
-
-    # 6. Minifigurki w opisie
-    has_minifigs = any(w in text for w in ["minifigur", "figurk", "figure", "minifig"])
-    if has_minifigs:
-        score   += 15
-        reasons.append("✅ minifigurki wspomniane")
-
-    # 7. AI potwierdzenie
-    if ai_result:
-        if ai_result.get("is_hidden_gem") or "star wars" in ai_result.get("reason", "").lower():
-            score   += 15
-            reasons.append("🤖 AI potwierdza: Star Wars LEGO")
-
-    # Wymagamy WSZYSTKICH: Star Wars + LEGO + cokolwiek rozpoznane
-    has_sw   = "star wars" in text or "starwars" in text or "gwiezdne wojny" in text
-    has_lego = "lego" in text
-    has_anything = found_set or found_vehicle or found_char
-
-    if not has_sw:
-        return False, 0, ["⛔ brak 'star wars' w tytule"], {}
-    if not has_lego:
-        return False, 0, ["⛔ brak 'lego' w tytule"], {}
-    if not has_anything:
-        return False, 0, ["⛔ brak rozpoznanego setu/pojazdu/postaci"], {}
-
-    # Gry video — odrzuć
-    if any(g in text for g in ["nintendo", "xbox", "playstation", "ps4", "ps5", "nintendo ds", "nintendo switch", "pc game", "gra na "]):
-        return False, 0, ["⛔ gra video — odrzucono"], {}
-
-    set_info = {
-        "set_number":   found_set,
-        "vehicle":      found_vehicle,
-        "character":    found_char,
-        "complete":     is_complete,
-        "minifigs":     has_minifigs,
-        "bl_price_pln": None,
-    }
-
-    # Pobierz cenę BrickLink jeśli znamy numer setu
-    if found_set:
-        bl_price = get_bricklink_price(found_set)
-        if bl_price:
-            set_info["bl_price_pln"] = bl_price
-            reasons.append(f"🧱 BrickLink: ~{bl_price:.0f} zł")
-            score += 10
-
-    # Podnosimy próg — minimum 35 punktów
-    is_valid = score >= 35
-    return is_valid, score, reasons, set_info
-
-
-# ─────────────────────────────────────────
-#  ⚽ WALIDACJA KOSZULKI RETRO
-# ─────────────────────────────────────────
-def validate_football_jersey(title, description, ai_result):
-    text = (title + " " + (description or "")).lower()
-
-    # 1. Odrzuć repliki
-    for rep in REPLICA_KEYWORDS:
-        if rep in text:
-            return False, ["replika — odrzucono"]
-
-    # 2. Odrzuć oczywiste śmieci (tylko to co NA PEWNO nie jest koszulką piłkarską)
-    NOISE = [
-        "swag", "avant garde", "coquette", "drippy",
-        "gorset", "spódniczk", "koronkow", "halter", "babydoll",
-        "alt alternative", "japan style",
-        "sukienk", "kurtka jeans",
-        "racing", "motocycl", "moto ",   # koszulki motosportowe
-        "baseball cap", "czapka",
-    ]
-    for noise in NOISE:
-        if noise in text:
-            return False, [f"odrzucono: {noise.strip()}"]
-
-    # 3. Musi zawierać słowo związane z koszulką/jerseyem
-    JERSEY_WORDS = [
-        "koszulka", "jersey", "shirt", "trikot", "maillot",
-        "fodboldtrøje", "voetbalshirt", "mez ", " mez",
-        "tricou", "trøje", "tröja", "dres ", " kit",
-        "football top", "soccer top", "piłkarska", "pilkarska",
-        "fotbal", "fútbol", "calcio",
-    ]
-    is_jersey = any(w in text for w in JERSEY_WORDS)
-    if not is_jersey:
-        return False, ["brak słowa koszulka/jersey/shirt"]
-
-    # 4. Musi mieć markę LUB klub/reprezentację
-    has_brand = any(b in text for b in FOOTBALL_ORIGINAL_BRANDS)
-    has_club  = any(c in text for c in FOOTBALL_CLUBS)
-
-    if not has_brand and not has_club:
-        return False, ["brak marki piłkarskiej i klubu"]
-
-    # 5. Retro LUB klub — jedno z dwóch wystarczy
-    is_retro = any(d in text for d in RETRO_DECADES)
-
-    # Jeśli ma konkretny klub → akceptuj nawet bez słowa "retro"
-    if not is_retro and not has_club:
-        return False, ["brak retro/vintage i brak konkretnego klubu"]
-
-    reasons = []
-    if has_brand:  reasons.append("✅ marka")
-    if has_club:   reasons.append("✅ klub/reprezentacja")
-    if is_retro:   reasons.append("✅ retro/vintage")
-    return True, reasons
-
-
-
-# ─────────────────────────────────────────
-#  🧥 WALIDACJA CARHARTT
-# ─────────────────────────────────────────
-def validate_carhartt(title, description, search):
-    """
-    Zwraca (is_valid, model_name, max_price, reasons)
-    search = słownik wyszukiwania z carhartt_models i carhartt_max_price
-    """
-    text = (title + " " + (description or "")).lower()
-
-    # Musi zawierać Carhartt (lub typo)
-    if "carhartt" not in text:
-        typo_brand, _ = detect_typo_brand(text)
-        if typo_brand != "carhartt":
-            return False, None, 0, ["brak marki Carhartt"]
-
-    # Pobierz listę modeli i próg cenowy z wyszukiwania
-    required_models = search.get("carhartt_models", [])
-    max_price       = search.get("carhartt_max_price", 250)
-
-    # Sprawdź czy oferta zawiera jeden z wymaganych modeli
-    detected_model = None
-    for model_kw in required_models:
-        if model_kw in text:
-            detected_model = model_kw
-            break
-
-    if not detected_model:
-        if required_models:
-            # Wyszukiwanie wymaga konkretnego modelu — odrzuć
-            return False, None, 0, [f"brak modelu ({', '.join(required_models[:3])})"]
+        if ratio < 0.50:
+            db_score = 10.0
+        elif ratio < 0.60:
+            db_score = 9.0
+        elif ratio < 0.70:
+            db_score = 8.0
+        elif ratio < 0.80:
+            db_score = 6.5
+        elif ratio < 0.90:
+            db_score = 5.0
         else:
-            detected_model = "carhartt"
+            db_score = 3.0
 
-    reasons = [
-        f"✅ Carhartt {detected_model}",
-        f"✅ cena ≤ {max_price} zł",
-    ]
-    return True, detected_model, max_price, reasons
+        if brand in LUXURY_BRANDS and ratio < FAKE_LUXURY_RATIO:
+            fake_risk = True
+            db_score = max(db_score - 2.0, 0.0)
 
+        if brand in LUXURY_BRANDS and ratio < 0.30:
+            fake_risk = True
+            db_score = max(db_score - 3.0, 0.0)
 
-# ─────────────────────────────────────────
-#  🕵️ SPRAWDZANIE OFERT (HTML scraping)
-# ─────────────────────────────────────────
-def check_search(search, seen, market_price):
-    found    = []
-    all_ids  = []   # wszystkie ID widziane w tym cyklu
-    cnt_seen = cnt_price = cnt_kw = cnt_rejected = 0
-    # BOT #1 — limit znalezionych wewnątrz check_search (nie tylko w głównej pętli)
-    # MAX_ALERTS_PER_SEARCH w głównej pętli przycina DO wysyłki, ale found=20
-    # powoduje że engine ocenia 20 itemów niepotrzebnie
-    MAX_FOUND = MAX_ALERTS_PER_SEARCH * 2  # 10 — bufor na engine skip
-    # BOT #3 — dedup po title+price (Vinted zwraca ten sam item przez kilka wyszukiwań)
-    _seen_title_price: set[str] = set()
+        estimated = ai_data.get("estimated_value", avg)
+        flip_profit = max(estimated - price, 0.0)
 
-    try:
-        r = vinted_fetch(search["url"], label=search["name"])
-        if not r:
-            return [], []
-
-        items = parse_items_from_html(r.text)
-        print(f"[{search['name']}] Ofert na stronie: {len(items)}")
-        # Debug — pokaż pierwsze 2 tytuły żeby sprawdzić czy dane są poprawne
-        for dbg in items[:2]:
-            print(f"  🔍 '{dbg['title'][:60]}' | {dbg['price']} zł")
-
-        hidden_gem_mode = search.get("hidden_gem_mode", False)
-        football_mode   = search.get("football_mode", False)
-        lego_sw_mode    = search.get("lego_sw_mode", False)
-        carhartt_mode   = search.get("carhartt_mode", False)
-
-        for item in items:
-            if not item:
-                continue
-            try:
-                item_id = item.get("id", "")
-                title   = item.get("title", "")
-                href    = item.get("url", "")
-                price   = item.get("price")
-
-                if not item_id or item_id in seen:
-                    cnt_seen += 1
-                    continue
-
-                all_ids.append(item_id)  # zapamiętaj wszystkie widziane
-
-                if not title or not href:
-                    continue
-
-                # BOT #3 — odrzuć duplikaty tego samego tytułu+ceny w tym cyklu
-                # (ten sam item może trafić przez 2 wyszukiwania)
-                _dedup_key = f"{title.lower().strip()}_{int(price or 0)}"
-                if _dedup_key in _seen_title_price:
-                    cnt_seen += 1
-                    continue
-                _seen_title_price.add(_dedup_key)
-
-                # Globalny filtr wykluczeń (dzieci, minecraft, karty, gry)
-                title_lower = title.lower()
-                if any(ex in title_lower for ex in GLOBAL_EXCLUDE):
-                    continue
-
-                # Odrzuć zablokowane marki (H&M, Zara, Bershka itp.)
-                if any(b in title_lower for b in BLOCKED_BRANDS):
-                    continue
-
-                # Odrzuć wykluczone słowa kluczowe z danego wyszukiwania
-                exclude_kw = search.get("exclude_keywords", [])
-                if exclude_kw and any(ek in title_lower for ek in exclude_kw):
-                    continue
-
-                if not price or price < search.get("min_price", 1):
-                    cnt_price += 1
-                    continue
-
-                # ── FIX #2: SMART ITEM SCORING ──────────────
-                # Zastępuje prosty keyword filter systemem scoringowym.
-                # Każdy item dostaje item_score — odrzucamy poniżej progu.
-                VINTAGE_KW  = ["vintage", "retro", "90s", "80s", "70s", "y2k",
-                                "single stitch", "archive", "deadstock", "band tee",
-                                "tour", "old school", "heritage", "throwback"]
-                BRAND_KW    = [
-                    "nike", "adidas", "jordan", "supreme", "palace", "stussy",
-                    "bape", "carhartt", "arcteryx", "salomon", "corteiz",
-                    "represent", "broken planet", "denim tears", "essentials",
-                    "fear of god", "yeezy", "levi", "wrangler", "kappa",
-                    "umbro", "lotto", "diadora", "hummel", "funko", "lego",
-                    "puma", "reebok", "asics", "new balance", "vans",
-                ]
-                CATEGORY_KW = search.get("keywords", [])
-                TRASH_KW    = [
-                    "zara", "bershka", "h&m", "hm", "shein", "primark",
-                    "sinsay", "reserved", "stradivarius", "pull&bear",
-                    "mango", "mohito", "house brand", "terranova",
-                ]
-
-                t_lo = title_lower  # już wcześniej obliczone
-
-                item_score = 0
-                # +2 za wykrycie brandu
-                if any(b in t_lo for b in BRAND_KW):
-                    item_score += 2
-                # +2 za słowo z keywords danego wyszukiwania
-                if CATEGORY_KW and any(kw.lower() in t_lo for kw in CATEGORY_KW):
-                    item_score += 2
-                # +1 za vintage keyword
-                if any(v in t_lo for v in VINTAGE_KW):
-                    item_score += 1
-                # -2 za trash brand
-                if any(tr in t_lo for tr in TRASH_KW):
-                    item_score -= 2
-
-                # Tryby specjalne nie korzystają z item_score
-                # (mają własne walidatory)
-                if not lego_sw_mode and not carhartt_mode and not football_mode:
-                    # FIX #2: odrzuć jeśli zbyt niski score
-                    # hidden_gem_mode z AI — obniżony próg (AI może znaleźć gem bez brandów)
-                    effective_hidden = hidden_gem_mode and bool(ANTHROPIC_KEY)
-                    min_score = 1 if effective_hidden else 2
-                    if item_score < min_score:
-                        cnt_kw += 1
-                        if item_score < 0:
-                            pass  # trash brand — odrzucone przez BLOCKED_BRANDS wcześniej
-                        continue
-
-                # FIX #10 — verbose logging score
-                _item_score_val = item_score
-
-                # ── FIX #6: HARD FILTER — bad vintage ───────
-                # Odrzuć śmieciowe vintage bez brandu i bez słów kluczowych
-                # To eliminuje: losowe ubrania za 15 zł bez żadnej wartości flip
-                if (
-                    not lego_sw_mode and not carhartt_mode and not football_mode
-                    and price < 30
-                    and not any(b in t_lo for b in BRAND_KW)
-                    and not any(v in t_lo for v in VINTAGE_KW)
-                ):
-                    cnt_rejected += 1
-                    continue
-
-                # ocena cenowa
-                steal_threshold = STEAL_PRICES.get(search["category"], 9999)
-                is_steal_price  = price <= steal_threshold
-                is_below_market = False
-                discount_pct    = 0
-                if market_price and market_price > 0:
-                    discount_pct    = (1 - price / market_price) * 100
-                    saving          = market_price - price
-                    # Odrzuć jeśli oszczędność mniejsza niż MIN_SAVING_PLN
-                    is_below_market = (
-                        discount_pct >= MIN_DISCOUNT_PCT
-                        and saving >= MIN_SAVING_PLN
-                    )
-
-                # typo
-                typo_brand, typo_found = detect_typo_brand(title)
-                has_typo = typo_brand is not None
-
-                # walidacje specjalne
-                lego_sw_valid, lego_sw_score, lego_sw_reasons, lego_set_info = False, 0, [], {}
-                if lego_sw_mode:
-                    lego_sw_valid, lego_sw_score, lego_sw_reasons, lego_set_info = validate_lego_sw(title, None, None)
-                    # Podnosimy minimalny próg — żeby odrzucić śmieci
-                    if lego_sw_score < 40:
-                        lego_sw_valid = False
-                    # Max cena dla LEGO SW
-                    if price > 100:
-                        lego_sw_valid = False
-
-                football_valid, football_reasons = False, []
-                if football_mode:
-                    football_valid, football_reasons = validate_football_jersey(title, None, None)
-
-                carhartt_valid, carhartt_reasons, carhartt_model_name, carhartt_max = False, [], None, 0
-                if carhartt_mode:
-                    cv, cm, cmax, cr = validate_carhartt(title, None, search)
-                    if cv and price <= cmax:
-                        carhartt_valid, carhartt_model_name, carhartt_max, carhartt_reasons = True, cm, cmax, cr
-
-                # AI (tylko hidden gem)
-                is_hidden_gem, ai_brand, ai_reason, mismatch = False, None, "", False
-                if ANTHROPIC_KEY and hidden_gem_mode:
-                    img_url, desc = get_item_details(href)
-                    ai_res = analyze_with_ai(title, desc, img_url)
-                    if ai_res:
-                        is_hidden_gem = ai_res.get("is_hidden_gem", False)
-                        if ai_res.get("confidence", 0) < MIN_AI_CONFIDENCE:
-                            is_hidden_gem = False
-                        ai_brand  = ai_res.get("detected_brand")
-                        ai_reason = ai_res.get("reason", "")
-                        mismatch  = ai_res.get("mismatch", False)
-
-                # finalna decyzja
-                if lego_sw_mode:
-                    # LEGO SW — tylko przez walidator, cena nie wystarczy
-                    qualifies = lego_sw_valid
-                elif football_mode:
-                    # Koszulki — tylko przez walidator
-                    qualifies = football_valid
-                elif carhartt_mode:
-                    qualifies = carhartt_valid
-                elif hidden_gem_mode and not ANTHROPIC_KEY:
-                    # Hidden gem bez AI — tylko steal price z keywords
-                    qualifies = is_steal_price or is_below_market
-                else:
-                    # Tryb normalny — cena + typo + AI
-                    qualifies = (
-                        is_steal_price or is_below_market
-                        or has_typo or is_hidden_gem
-                    )
-                if not qualifies:
-                    cnt_rejected += 1
-                    continue
-
-                reasons = []
-                if lego_sw_valid:      reasons += lego_sw_reasons[:3]
-                if football_valid:     reasons += football_reasons[:3]
-                if carhartt_valid:     reasons.append(f"✅ model: {carhartt_model_name} | próg ≤{carhartt_max} zł")
-                if has_typo:           reasons.append(f"błędna pisownia: '{typo_found}' → {typo_brand}")
-                if mismatch:           reasons.append("zdjęcie ≠ opis (AI)")
-                if is_below_market:    reasons.append(f"-{discount_pct:.0f}% od mediany")
-                if is_steal_price:     reasons.append(f"cena steal <{steal_threshold} zł")
-                if ai_reason:          reasons.append(ai_reason)
-
-                found.append({
-                    "id": item_id, "title": title, "link": href,
-                    "price": price, "market_price": market_price,
-                    "discount_pct": discount_pct,
-                    "is_steal": is_steal_price, "is_below": is_below_market,
-                    "has_typo": has_typo, "typo_brand": typo_brand if has_typo else None,
-                    "is_hidden_gem": is_hidden_gem, "mismatch": mismatch,
-                    "ai_brand": ai_brand, "reasons": reasons,
-                    "lego_sw_valid": lego_sw_valid, "lego_sw_score": lego_sw_score,
-                    "lego_set_info": lego_set_info,
-                    "football_valid": football_valid,
-                    "carhartt_valid": carhartt_valid,
-                    "carhartt_model": carhartt_model_name,
-                    "carhartt_max": carhartt_max,
-                    "photo": item.get("photo"),
-                })
-
-                # BOT #1 — stop early gdy mamy wystarczająco dużo itemów
-                if len(found) >= MAX_FOUND:
-                    break
-
-            except Exception as e:
-                print(f"  ⚠️ item error: {e}")
-                continue
-
-    except Exception as e:
-        print(f"Błąd check_search [{search['name']}]: {e}")
-
-    print(f"  📊 widziane={cnt_seen} brak_ceny={cnt_price} brak_słów={cnt_kw} odrzucone={cnt_rejected} wysłane={len(found)}")
-    return found, all_ids
-
-
-# ─────────────────────────────────────────
-#  ✉️ FORMAT WIADOMOŚCI
-# ─────────────────────────────────────────
-CATEGORY_EMOJI = {
-    "sneakers": "👟",
-    "clothing": "👕",
-    "lego":     "🧱",
-    "funko":    "🎭",
-    "football": "⚽",
-    "carhartt": "🧥",
-}
-
-def format_message(search, item):
-    emoji = CATEGORY_EMOJI.get(search["category"], "🛍")
-    price = item["price"]
-    title = item["title"][:100]
-    link  = item["link"]
-    mp    = item.get("market_price")
-    disc  = item.get("discount_pct", 0)
-
-    # Nagłówek
-    if search.get("lego_sw_mode"):
-        if item.get("lego_sw_score", 0) >= 70:
-            header = "🚀 LEGO STAR WARS — KULTOWY SET!"
-        elif disc >= 40:
-            header = f"🧱 LEGO SW OKAZJA! -{disc:.0f}% taniej"
-        else:
-            header = "🧱 LEGO Star Wars — zestaw"
-    elif search.get("football_mode"):
-        if disc >= 40:
-            header = f"⚽ RETRO OKAZJA! -{disc:.0f}% taniej"
-        else:
-            header = "⚽ KOSZULKA RETRO — oryginal!"
-    elif search.get("carhartt_mode"):
-        model = (item.get("carhartt_model") or "").replace("_", " ").title()
-        header = f"🧥 CARHARTT {model}".strip()
-    elif item.get("mismatch"):
-        header = "🔮 HIDDEN GEM — zdjecie nie pasuje do opisu!"
-    elif item.get("has_typo"):
-        header = f"🔤 BLEDNA PISOWNIA -> moze byc {(item.get('typo_brand') or '').upper()}!"
-    elif item.get("is_hidden_gem"):
-        header = "💎 HIDDEN GEM wykryty przez AI!"
-    elif disc >= 60:
-        header = f"🚨 MEGA OKAZJA! -{disc:.0f}% ponizej rynku"
-    elif disc >= 40:
-        header = f"🔥 OKAZJA! -{disc:.0f}% ponizej rynku"
+        if trend == "rising":
+            db_score = min(db_score + 0.5, 10.0)
+        elif trend == "falling":
+            db_score = max(db_score - 0.5, 0.0)
     else:
-        header = f"💸 {emoji} NISKA CENA!"
+        estimated = ai_data.get("estimated_value", price * 1.5)
+        flip_profit = max(estimated - price, 0.0)
 
-    lines = [header, "", f"📦 {title}", "", f"💰 Cena: {price:.0f} zl"]
-
-    if mp:
-        lines.append(f"📊 Srednia: {mp:.0f} zl")
-        if disc > 0:
-            lines.append(f"✂️ Oszczedzasz: ~{mp - price:.0f} zl")
-
-    if search.get("lego_sw_mode"):
-        info = item.get("lego_set_info", {})
-        if info.get("set_number"):
-            lines.append(f"🔢 Set: #{info['set_number']}")
-        if info.get("vehicle"):
-            lines.append(f"🚀 {info['vehicle']}")
-        if info.get("character"):
-            lines.append(f"👤 {info['character']}")
-        if info.get("minifigs"):
-            lines.append("🟡 Minifigurki: tak")
-        # Cena BrickLink jako referencja rynkowa
-        bl_price = info.get("bl_price_pln")
-        if bl_price and bl_price > price:
-            saving_bl = bl_price - price
-            lines.append(f"🧱 BrickLink used: ~{bl_price:.0f} zl")
-            lines.append(f"💚 Oszczedzasz vs BrickLink: ~{saving_bl:.0f} zl")
-
-    reasons = item.get("reasons", [])
-    if reasons:
-        lines.append("")
-        for r in reasons[:2]:
-            lines.append(f"• {r}")
-
-    # ── Separator i nagłówek kategorii ──
-    CAT_LABEL = {
-        "sneakers": "👟 Sneakersy",
-        "clothing": "👕 Ubrania",
-        "lego":     "🧱 LEGO",
-        "lego_sw":  "⭐ LEGO Star Wars",
-        "funko":    "🎭 Funko Pop",
-        "football": "⚽ Koszulka Retro",
-        "carhartt": "🧥 Carhartt",
-    }
-    cat_label = CAT_LABEL.get(search["category"], "🛍")
-
-    # ── Typ alertu ──
-    if disc >= 60:
-        alert = f"🚨 MEGA OKAZJA  •  -{disc:.0f}% taniej"
-    elif disc >= 40:
-        alert = f"🔥 OKAZJA  •  -{disc:.0f}% taniej"
-    elif item.get("has_typo"):
-        alert = f"🔤 Błędna pisownia → {(item.get('typo_brand') or '').upper()}"
-    elif item.get("is_hidden_gem"):
-        alert = "💎 Hidden Gem"
-    elif search.get("lego_sw_mode") and item.get("lego_sw_score", 0) >= 70:
-        alert = "🚀 Kultowy set!"
-    elif search.get("football_mode"):
-        alert = "⚽ Oryginał retro"
-    elif search.get("carhartt_mode"):
-        model = (item.get("carhartt_model") or "").replace("_", " ").title()
-        alert = f"🧥 Carhartt {model}".strip()
-    else:
-        alert = "💸 Niska cena"
-
-    # ── Tytuł oferty — usuń "marka: X, stan: Y, rozmiar: Z" ──
-    clean_title = re.sub(r',?\s*(marka|stan|rozmiar):.*', '', title, flags=re.IGNORECASE).strip()
-    if not clean_title:
-        clean_title = title[:80]
-
-    # ── Składaj wiadomość ──
-    lines = [
-        f"{'─'*30}",
-        f"{alert}",
-        f"{cat_label}",
-        f"{'─'*30}",
-        f"",
-        f"📦  {clean_title}",
-        f"",
-        f"💰  Cena:       {price:.0f} zł",
-    ]
-
-    if mp and mp > price:
-        lines.append(f"📊  Śr. rynkowa: {mp:.0f} zł")
-        lines.append(f"✂️   Oszczędzasz: ~{mp - price:.0f} zł")
-
-    # LEGO SW szczegóły
-    if search.get("lego_sw_mode"):
-        info = item.get("lego_set_info", {})
-        if info.get("set_number"):
-            lines.append(f"🔢  Set:         #{info['set_number']}")
-        if info.get("vehicle"):
-            lines.append(f"🚀  Pojazd:      {info['vehicle']}")
-        if info.get("character"):
-            lines.append(f"👤  Postać:      {info['character']}")
-        if info.get("minifigs"):
-            lines.append(f"🟡  Minifigurki: tak")
-        bl = info.get("bl_price_pln")
-        if bl and bl > price:
-            lines.append(f"🧱  BrickLink:   ~{bl:.0f} zł")
-            lines.append(f"💚  vs BL:       ~{bl - price:.0f} zł taniej")
-
-    return "\n".join(lines)
-
-
-# ─────────────────────────────────────────
-#  🚀 GŁÓWNA PĘTLA
-# ─────────────────────────────────────────
-print("✅ BOT HIDDEN GEM FINDER URUCHOMIONY")
-
-load_bricklink_cache()
-refresh_session()
-
-send_message(
-    "━━━━━━━━━━━━━━━━━━━━━━━\n"
-    "🤖  VINTED BOT  •  ONLINE\n"
-    "━━━━━━━━━━━━━━━━━━━━━━━\n"
-    "\n"
-    f"📡  Monitoruję {len(SEARCHES)} wyszukiwań\n"
-    f"🎯  Próg okazji: -{MIN_DISCOUNT_PCT}% od mediany\n"
-    "\n"
-    "📦  Kategorie:\n"
-    "    👟  Nike / Adidas\n"
-    "    🧥  Carhartt (Trucker / Santa Fe / Detroit)\n"
-    "    🧱  LEGO  •  ⭐ LEGO Star Wars\n"
-    "    🎭  Funko Pop  •  🎭⭐ Funko Star Wars\n"
-    "    ⚽  Koszulki Retro 70s – 2003\n"
-    "    💎  Hidden Gem\n"
-    "\n"
-    "━━━━━━━━━━━━━━━━━━━━━━━"
-)
-
-seen          = load_seen()
-market_prices = {}
-cycle         = 0
-
-# Inicjalizacja silnika inteligencji
-engine = None
-if _ENGINE_AVAILABLE:
-    engine = Engine(anthropic_key=ANTHROPIC_KEY)
-    print(engine.stats())
-
-while True:
-    try:
-        # Co 50 cykli (~50 min) odśwież sesję Vinted
-        if cycle % 50 == 0:
-            refresh_session()
-
-        if cycle % 10 == 0:
-            print("\n📊 Aktualizuję mediany rynkowe...")
-            for i, search in enumerate(SEARCHES):
-                # Pomijamy hidden_gem_mode — nie mają sensu mediany
-                if search.get("hidden_gem_mode"):
-                    continue
-                print(f"  [{i+1}/{len(SEARCHES)}] {search['name']}...")
-                market_prices[search["name"]] = get_market_median(search)
-            print("📊 Mediany gotowe — startuje cykl")
-
-        cycle += 1
-        print(f"\n🔄 Cykl #{cycle}")
-
-        # Step 6 — zbieramy wyniki wszystkich wyszukiwań, sortujemy i wysyłamy top
-        cycle_candidates = []   # (confidence, search, item, eval_result)
-
-        for search in SEARCHES:
-            print(f"  ⏳ Sprawdzam: {search['name']}")
-            market_price = market_prices.get(search["name"])
-            new_items, all_ids = check_search(search, seen, market_price)
-            print(f"  ✔ Gotowe: {search['name']} — nowych: {len(new_items)}")
-
-            now = time.time()
-
-            is_special = (
-                search.get("football_mode") or
-                search.get("lego_sw_mode") or
-                search.get("carhartt_mode")
-            )
-
-            for item in new_items[:MAX_ALERTS_PER_SEARCH]:
-
-                # Tryby specjalne — bypass engine, od razu do wysyłki
-                if is_special:
-                    cycle_candidates.append((10.0, search, item, None, now))
-                    continue
-
-                # ── Engine evaluation ─────────────────
-                if engine:
-                    eval_result = engine.evaluate(item, search, market_price)
-                    conf        = eval_result["confidence"]
-                    has_db      = eval_result.get("db_data") is not None
-                    flip_speed  = eval_result.get("scoring", {}).get("flip_speed", "MEDIUM")
-                    flip_profit = eval_result.get("flip_profit", 0)
-
-                    # FIX #10 — verbose: loguj brand, score, powód odrzucenia
-                    detected_brand = eval_result.get("brand", "?")
-                    detected_cat   = eval_result.get("category", "?")
-
-                    # Skip gdy słaba confidence z danymi DB
-                    if has_db and conf < 6.5:
-                        print(f"  ⏭  Engine skip: conf={conf:.1f} brand={detected_brand} cat={detected_cat} | {item['title'][:35]}")
-                        seen[item["id"]] = now
-                        continue
-
-                    # FIX #9 — Quality filter: SLOW flip z małym zyskiem → skip
-                    if flip_speed == "SLOW" and flip_profit < 80:
-                        print(f"  ⏭  Quality skip (SLOW, profit={flip_profit:.0f}zł) | {item['title'][:35]}")
-                        seen[item["id"]] = now
-                        continue
-
-                    print(f"  ✅ Kandydat: conf={conf:.1f} speed={flip_speed} profit={flip_profit:.0f} brand={detected_brand} | {item['title'][:30]}")
-                    cycle_candidates.append((conf, search, item, eval_result, now))
-                else:
-                    # Bez engine — stary fallback
-                    msg = format_message(search, item)
-                    photo = item.get("photo") or get_item_photo(item["id"], item["link"])
-                    send_message(msg, photo_url=photo, item_link=item.get("link"))
-                    seen[item["id"]] = now
-                    print(f"  ✉️ {item['title'][:55]} | {item['price']:.0f} zł")
-
-        # Step 6 — sortuj DESC po confidence, wyślij max 10 per cykl
-        cycle_candidates.sort(key=lambda x: x[0], reverse=True)
-        sent_this_cycle = 0
-        MAX_PER_CYCLE   = 5   # FIX: max 3–5 wysokiej jakości dealów per cykl
-
-        for conf, search, item, eval_result, now in cycle_candidates:
-            if sent_this_cycle >= MAX_PER_CYCLE:
-                seen[item["id"]] = now
-                continue
-
-            photo = item.get("photo") or get_item_photo(item["id"], item["link"])
-
-            # Tryby specjalne (football/lego_sw/carhartt) — zawsze standardowy format
-            if eval_result is None:
-                msg = format_message(search, item)
-                send_message(msg, photo_url=photo, item_link=item.get("link"))
-                seen[item["id"]] = now
-                sent_this_cycle += 1
-                tag = "⚽" if search.get("football_mode") else "🧱"
-                print(f"  {tag} {item['title'][:55]} | {item['price']:.0f} zł")
-                continue
-
-            if eval_result["tier"] in ("INSANE", "GOOD"):
-                engine_msg = engine.format_alert(eval_result)
-                send_message(engine_msg, photo_url=photo, item_link=item.get("link"))
-                seen[item["id"]] = now
-                sent_this_cycle += 1
-                tier_tag = "🔴" if eval_result["tier"] == "INSANE" else "🟡"
-                print(f"  {tier_tag} Engine [{eval_result['tier']}] conf={conf:.1f} | {item['title'][:40]}")
-            elif eval_result.get("send_alert"):
-                msg = format_message(search, item)
-                send_message(msg, photo_url=photo, item_link=item.get("link"))
-                seen[item["id"]] = now
-                sent_this_cycle += 1
-                tag = "💎" if item.get("is_hidden_gem") else ("🔤" if item.get("has_typo") else "✉️")
-                print(f"  {tag} {item['title'][:55]} | {item['price']:.0f} zł")
+    # ── MARKET SCORE (0–10) ──────────────────
+    market_score = 5.0
+    if market_price and market_price > 0:
+        if market_price < 20:
+            market_score = 5.0
+        else:
+            ratio_m = price / market_price
+            if ratio_m < 0.50:
+                market_score = 10.0
+            elif ratio_m < 0.60:
+                market_score = 9.0
+            elif ratio_m < 0.70:
+                market_score = 8.0
+            elif ratio_m < 0.80:
+                market_score = 6.5
+            elif ratio_m < 0.90:
+                market_score = 5.0
             else:
-                seen[item["id"]] = now
+                market_score = 3.0
 
-        save_seen(seen)
-        time.sleep(60)
+    # ── AI SCORE (0–10) ──────────────────────
+    ai_score = float(ai_data.get("final_score", 5.0))
+    hype = ai_data.get("hype_score", 3)
+    if hype >= 8:
+        ai_score = min(ai_score + 1.0, 10.0)
+    elif hype >= 6:
+        ai_score = min(ai_score + 0.5, 10.0)
 
-    except Exception as e:
-        print(f"Błąd głównej pętli: {e}")
-        time.sleep(15)
+    rarity = ai_data.get("rarity", 3)
+    if rarity >= 8:
+        ai_score = min(ai_score + 1.0, 10.0)
+
+    if flip_profit > FLIP_MIN_PROFIT:
+        boost = min(flip_profit / 100.0, 1.5)
+        ai_score = min(ai_score + boost, 10.0)
+
+    # ── WEIGHTED CONFIDENCE ───────────────────
+    confidence = (
+        db_score     * 0.40 +
+        market_score * 0.30 +
+        ai_score     * 0.30
+    )
+
+    # ── STEP 4: VINTAGE BOOST ─────────────────
+    v_score = vintage_score(title, description)
+    if v_score >= 8:
+        confidence += 2.0
+    elif v_score >= 6:
+        confidence += 1.0
+
+    # ── STEP 4: FOOTBALL VINTAGE BOOST ────────
+    f_score = football_vintage_score(title) if category == "football" else 0.0
+    if f_score >= 6 and price < 100:
+        confidence += 2.0
+    elif f_score >= 5 and price < 150:
+        confidence += 1.5
+
+    # ── STEP 4: FLIP PROFIT BOOST ─────────────
+    if flip_profit > 300:
+        confidence += 2.0
+    elif flip_profit > 150:
+        confidence += 1.0
+
+    # ── STEP 4: HYPE + UNDERPRICED BOOST ──────
+    estimated_val = ai_data.get("estimated_value", price * 1.5)
+    if hype >= 8 and estimated_val > 0 and price < estimated_val * 0.70:
+        confidence += 1.0
+
+    # ── STEP 5: ANTI-SPAM PENALTIES ───────────
+    t_lower = title.lower()
+    if any(b in t_lower for b in ["shein", "zara", "h&m", "hm "]):
+        confidence -= 2.0
+    if price < 20:
+        confidence -= 1.0
+
+    # ── STEP 7: CHAOS BONUS ───────────────────
+    if brand is None:
+        if price < 100:
+            confidence += 0.5
+        if ai_score < 6:
+            confidence -= 1.0
+
+    # ── STEP 8: FAKE FILTER ───────────────────
+    if any(k in t_lower for k in ["replica", "replika", "fake", "kopia",
+                                    "podróbka", "bootleg", "inspired"]):
+        fake_risk = True
+        confidence -= 3.0
+
+    # ── SELF-LEARNING BONUS ───────────────────
+    if brand:
+        confidence += learner.get_brand_bonus(brand) * 0.3
+    confidence += learner.get_category_bonus(category) * 0.2
+
+    # ── CLAMP 0–10 ────────────────────────────
+    confidence = max(0.0, min(confidence, 10.0))
+
+    return {
+        "confidence":     round(confidence, 2),
+        "db_score":       round(db_score, 2),
+        "market_score":   round(market_score, 2),
+        "ai_score":       round(ai_score, 2),
+        "fake_risk":      fake_risk,
+        "flip_profit":    round(flip_profit, 2),
+        "trend":          trend,
+        "vintage_score":  round(v_score, 2),
+        "football_score": round(f_score, 2),
+    }
+
+
+# ─────────────────────────────────────────────────────
+#  🔔 ALERT TIER
+# ─────────────────────────────────────────────────────
+def get_alert_tier(confidence: float, ai_decision: str) -> str | None:
+    """
+    INSANE: conf >= 8.5 (prawdziwe okazje)
+    GOOD:   conf >= 7.0 LUB (BUY + conf >= 6.5)
+    WATCH:  conf >= 6.0
+    """
+    if confidence >= CONFIDENCE_INSANE:
+        return "INSANE"
+    if confidence >= CONFIDENCE_GOOD:
+        return "GOOD"
+    if ai_decision == "BUY" and confidence >= 6.5:
+        return "GOOD"
+    if confidence >= CONFIDENCE_WATCH:
+        return "WATCH"
+    return None
+
+
+# ─────────────────────────────────────────────────────
+#  🏗️ GŁÓWNA KLASA ENGINE
+# ─────────────────────────────────────────────────────
+class Engine:
+    """
+    Główny silnik inteligencji bota.
+
+    Użycie:
+        engine = Engine(anthropic_key="sk-ant-...")
+        result = engine.evaluate(item, search, market_price)
+        if result["send_alert"]:
+            msg = engine.format_alert(result)
+    """
+
+    def __init__(self, anthropic_key: str | None = None):
+        self.anthropic_key  = anthropic_key
+        self.db             = MarketDB()
+        self.raw            = RawStorage()
+        self.ai_cache       = AICache()
+        self.learner        = FeedbackLearner()
+        self._raw_count_at_last_build = len(self.raw.items)
+        # FIX #2 — deduplicacja alertów: ten sam item_id nie dostanie
+        # alertu dwa razy w tej samej sesji (np. gdy pojawia się w kilku wyszukiwaniach)
+        self._alerted_ids: set[str] = set()
+        print(f"🧠 Engine zainicjowany | DB: {len(self.db.db)} grup | AI: {'✅' if anthropic_key else '❌'}")
+
+    # ── GŁÓWNA METODA ────────────────────────
+    def evaluate(
+        self,
+        item: dict,
+        search: dict,
+        market_price: float | None,
+        use_ai: bool = True,
+    ) -> dict:
+        """
+        Ocenia ofertę i zwraca decyzję.
+
+        item: dict z kluczami id, title, price, link, ...
+        search: słownik wyszukiwania z bot.py
+        market_price: mediana z Vinted dla tego wyszukiwania
+        """
+        title    = item.get("title", "")
+        price    = item.get("price", 0) or 0
+        category = detect_category(title)
+        brand    = detect_brand(title)
+
+        # 1. Dodaj do surowych danych
+        self.raw.add(title, price, category)
+
+        # 2. Sprawdź czy budować DB
+        new_since = len(self.raw.items) - self._raw_count_at_last_build
+        if new_since >= DB_BUILD_EVERY:
+            self.db.build(self.raw.items)
+            self.raw.save()
+            self._raw_count_at_last_build = len(self.raw.items)
+
+        # 3. Lookup w bazie
+        db_data = self.db.lookup(title)
+        if not db_data and brand:
+            db_data = self.db.lookup_by_brand_category(brand, category)
+
+        # 4. AI analiza (z cache, tylko gdy potrzebna)
+        ai_data = None
+        if use_ai and self.anthropic_key:
+            # Użyj AI gdy: brak danych DB, lub cena anomalia, lub luksus
+            should_use_ai = (
+                db_data is None or
+                (db_data and price < db_data["avg"] * 0.65) or
+                brand in LUXURY_BRANDS or
+                brand in HYPE_BRANDS
+            )
+            if should_use_ai:
+                ai_data = analyze_item_ai(
+                    title=title,
+                    description=item.get("description", ""),
+                    price=price,
+                    db_data=db_data,
+                    anthropic_key=self.anthropic_key,
+                    ai_cache=self.ai_cache,
+                )
+                self.ai_cache.save()
+
+        # Fallback AI data (bez wywołania Claude)
+        if not ai_data:
+            ai_data = self._heuristic_ai(title, price, db_data, brand, category)
+
+        # 5. Confidence score
+        scoring = calculate_confidence(
+            price=price,
+            db_data=db_data,
+            ai_data=ai_data,
+            market_price=market_price,
+            brand=brand,
+            category=category,
+            learner=self.learner,
+            title=title,
+            description=item.get("description", ""),
+        )
+
+        # 6. Fake risk — zmniejsz confidence
+        if scoring["fake_risk"]:
+            # FIX #9 — silna kara za fake luxury
+            scoring["confidence"] = max(scoring["confidence"] - 2.0, 0.0)
+
+        # 7. Decyzja
+        confidence   = scoring["confidence"]
+        ai_decision  = ai_data.get("decision", "SKIP")
+        flip_profit  = scoring["flip_profit"]
+
+        # FIX #10 — confidence floor: poniżej 5 → zawsze SKIP
+        if confidence < 5.0:
+            ai_decision = "SKIP"
+
+        # Dodatkowy warunek: cena < 50% avg DB → zawsze alert
+        force_alert = (
+            db_data is not None and
+            price < db_data["avg"] * 0.50
+        )
+
+        tier = get_alert_tier(confidence, ai_decision)
+
+        # FIX #5 — redukcja spamu: wyślij alert tylko gdy spełnione warunki
+        raw_send = bool(tier) or force_alert
+        spam_filtered = (
+            confidence >= 6.5
+            or ai_decision == "BUY"
+            or (db_data is not None and price < db_data["avg"] * 0.50)
+            # FIX #5: mainstream brand bez DB → obniż próg do 5.5
+            # (nie do zera — wciąż filtrujemy śmieci)
+            or (brand in MAINSTREAM_BRANDS and confidence >= 5.5)
+        )
+
+        # FIX #2 — deduplicacja: nie wysyłaj alertu dwa razy dla tego samego item_id
+        item_id = str(item.get("id", ""))
+        already_alerted = item_id and item_id in self._alerted_ids
+        send_alert = raw_send and spam_filtered and not already_alerted
+        if send_alert and item_id:
+            self._alerted_ids.add(item_id)
+            # Trzymaj max 10 000 ID w pamięci (ochrona przed wyciekiem)
+            if len(self._alerted_ids) > 10_000:
+                self._alerted_ids = set(list(self._alerted_ids)[-5_000:])
+
+        return {
+            "send_alert":  send_alert,
+            "tier":        tier or ("GOOD" if force_alert else None),
+            "confidence":  confidence,
+            "scoring":     scoring,
+            "ai_data":     ai_data,
+            "db_data":     db_data,
+            "brand":       brand,
+            "category":    category,
+            "flip_profit": flip_profit,
+            "item":        item,
+            "market_price": market_price,
+        }
+
+    # ── HEURYSTYCZNY AI (bez Claude) ─────────
+    def _heuristic_ai(
+        self,
+        title: str,
+        price: float,
+        db_data: dict | None,
+        brand: str | None,
+        category: str,
+    ) -> dict:
+        """Prosta heurystyka gdy brak klucza AI.
+        FIX: wyższy bazowy score dla znanych brandów — żeby conf=5.6
+        nie blokowało wszystkiego przy pustej bazie DB.
+        """
+        t = title.lower()
+        hype = 8 if brand in HYPE_BRANDS else (6 if brand in LUXURY_BRANDS else 3)
+        rarity = 7 if any(w in t for w in ["rare", "rzadka", "kolekcjoner", "limited", "deadstock"]) else 3
+
+        # FIX #1 — bazowy score zależny od rozpoznania brandu
+        # FIX #3 — Funko bez DB dostawało base=6.5 → score=8.0 → BUY → GOOD/INSANE
+        # mimo braku jakichkolwiek danych rynkowych. Rozróżniamy:
+        # - Supreme/Palace/Jordan (streetwear hype) → 6.5 (mają realny rynek wtórny)
+        # - Funko/LEGO (kolekcjonerskie ale zmienne) → 6.0 (potrzebują potwierdzenia ceną)
+        # - Luxury → 6.0 (wymaga sygnału fake-risk)
+        # - Mainstream (Nike/Adidas ogólnie) → 5.8
+        # - Znana kategoria bez marki → 5.5
+        STREETWEAR_HYPE = {"supreme", "palace", "stussy", "bape", "a bathing ape",
+                           "kaws", "travis scott", "yeezy", "jordan", "nike sb",
+                           "sacai", "fragment", "fear of god", "wtaps"}
+        COLLECTOR_HYPE  = {"funko", "funko pop", "lego"}
+
+        if brand in STREETWEAR_HYPE:
+            base = 6.5   # mocny hype streetwear — rynek wtórny pewny
+        elif brand in COLLECTOR_HYPE or brand in (HYPE_BRANDS - STREETWEAR_HYPE):
+            base = 6.0   # kolekcjonerskie — potrzebują ceny rynkowej do pewności
+        elif brand in LUXURY_BRANDS:
+            base = 6.0
+        elif brand in MAINSTREAM_BRANDS:
+            base = 5.8
+        elif category in ("sneakers", "funko", "lego"):
+            base = 5.5   # znana kategoria ale bez marki
+        else:
+            base = 5.0
+
+        avg = db_data["avg"] if db_data else price * 1.5
+        underpriced = price < avg * 0.70
+        estimated = avg * 1.1 if db_data else price * 1.5
+
+        score = base
+        if underpriced:
+            score += 2.0
+        if hype >= 8:
+            score += 1.5
+        if rarity >= 7:
+            score += 1.0
+        score = min(score, 10.0)
+
+        if score >= 8:
+            decision = "BUY"
+        elif score >= 6:
+            decision = "WATCH"
+        else:
+            decision = "SKIP"
+
+        return {
+            "brand": brand,
+            "category": category,
+            "keywords": [],
+            "estimated_value": round(estimated, 2),
+            "rarity": rarity,
+            "hype_score": hype,
+            "underpriced": underpriced,
+            "final_score": round(score, 1),
+            "decision": decision,
+        }
+
+    # ── FORMAT ALERTU ────────────────────────
+    def format_alert(self, result: dict) -> str:
+        tier      = result["tier"]
+        conf      = result["confidence"]
+        item      = result["item"]
+        ai        = result["ai_data"]
+        db        = result["db_data"]
+        scoring   = result["scoring"]
+        price     = item.get("price", 0)
+        title     = item.get("title", "")
+        brand     = result.get("brand") or ""
+        flip      = result.get("flip_profit", 0)
+
+        # Tytuł bez metadanych Vinted
+        clean = re.sub(r',?\s*(marka|stan|rozmiar):.*', '', title, flags=re.IGNORECASE).strip()
+
+        # Tier emoji
+        if tier == "INSANE":
+            header = "🔴 INSANE DEAL"
+        elif tier == "GOOD":
+            header = "🟡 GOOD DEAL"
+        else:
+            header = "⚪ WATCH"
+
+        lines = [
+            f"{'━'*28}",
+            f"{header}  •  confidence: {conf:.1f}/10",
+            f"{'━'*28}",
+            "",
+            f"📦  {clean[:90]}",
+            "",
+            f"💰  Cena:       {price:.0f} zł",
+        ]
+
+        if db:
+            lines.append(f"📊  Śr. w bazie: {db['avg']:.0f} zł ({db['count']} ofert)")
+            disc = (1 - price / db["avg"]) * 100 if db["avg"] > 0 else 0
+            if disc > 0:
+                lines.append(f"✂️   Taniej o:   {disc:.0f}%  (~{db['avg']-price:.0f} zł)")
+
+        if result["market_price"]:
+            lines.append(f"📈  Mediana:     {result['market_price']:.0f} zł")
+
+        if flip > FLIP_MIN_PROFIT:
+            lines.append(f"💚  Flip profit: ~{flip:.0f} zł")
+
+        trend = scoring.get("trend", "stable")
+        if trend == "rising":
+            lines.append("📈  Trend:       rosnący ↑")
+        elif trend == "falling":
+            lines.append("📉  Trend:       malejący ↓")
+
+        if scoring.get("fake_risk"):
+            lines.append("⚠️   Uwaga:       ryzyko fałszywki!")
+
+        lines += [
+            "",
+            f"🤖  AI:   {ai.get('decision','?')}  •  score {ai.get('final_score',0):.1f}/10",
+            f"🔥  Hype: {ai.get('hype_score',0)}/10  "
+            f"•  Rarity: {ai.get('rarity',0)}/10",
+            "",
+            f"📊  DB:{scoring['db_score']:.1f}  "
+            f"Mkt:{scoring['market_score']:.1f}  "
+            f"AI:{scoring['ai_score']:.1f}",
+        ]
+
+        return "\n".join(lines)
+
+    # ── FEEDBACK ─────────────────────────────
+    def record_click(self, item_id: str, brand: str, category: str):
+        self.learner.record_click(item_id, brand, category)
+
+    def record_buy(self, item_id: str, brand: str, category: str):
+        self.learner.record_buy(item_id, brand, category)
+
+    # ── STATYSTYKI ───────────────────────────
+    def stats(self) -> str:
+        return (
+            f"🧠 Engine stats:\n"
+            f"  DB groups:   {len(self.db.db)}\n"
+            f"  Raw items:   {len(self.raw.items)}\n"
+            f"  AI cache:    {len(self.ai_cache.cache)}\n"
+            f"  Clicked:     {len(self.learner.data.get('clicked', []))}\n"
+            f"  Bought:      {len(self.learner.data.get('bought', []))}"
+        )
