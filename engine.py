@@ -87,23 +87,60 @@ _STOP_WORDS = {
     "the", "and", "for", "with", "de", "le", "la", "el",
 }
 
+# FIX #1 — dodatkowe słowa do usunięcia przed grupowaniem
+_COLOR_WORDS = {
+    "red", "black", "white", "blue", "green", "pink",
+    "yellow", "grey", "gray", "navy", "beige", "brown",
+    "orange", "purple", "cream", "czarny", "biały", "czerwony",
+    "niebieski", "zielony", "szary", "granatowy",
+}
+
+_NOISE_WORDS = {
+    "rare", "nowy", "new", "stan", "okazja", "sale",
+    "polecam", "tanio", "super", "hit", "top", "ideał",
+}
+
+
 def normalize_title(title: str) -> str:
     """
     Normalizuje tytuł do klucza grupowania.
-    'Supreme Box Logo Hoodie FW18 Red XL' → 'supreme_box_logo_hoodie'
+    'Supreme Box Logo Hoodie FW18 Red XL' → 'supreme_box_logo'
+    'LEGO Star Wars 75313'                → 'lego_75313'
     """
     t = title.lower()
+
+    # FIX #1a — special item detection PRZED resztą przetwarzania
+    if "box logo" in t or "bogo" in t:
+        return "supreme_box_logo"
+
+    # LEGO set number (4–6 cyfr)
+    lego_match = re.search(r'\b(\d{4,6})\b', t) if "lego" in t else None
+    if lego_match:
+        return f"lego_{lego_match.group(1)}"
+
+    # Nike Dunk
+    if "dunk" in t:
+        return "nike_dunk"
+
     # Usuń metadane Vinted
     t = re.sub(r',?\s*(marka|stan|rozmiar|brand|size|condition):.*', '', t)
     # Usuń rozmiary
     t = re.sub(r'\b(xs|s|m|l|xl|xxl|\d{2}/\d{2}|\d{2})\b', '', t)
     # Usuń lata i sezony
     t = re.sub(r'\b(fw|ss|aw|sp)\d{2,4}\b', '', t)
-    # Usuń znaki specjalne
+    # Usuń znaki specjalne i emoji
     t = re.sub(r'[^a-z0-9\s]', ' ', t)
-    # Tokenizuj
-    tokens = [w for w in t.split() if w not in _STOP_WORDS and len(w) > 2]
-    # Weź pierwsze 4 słowa jako klucz
+
+    # Tokenizuj — usuń stop words + kolory + noise
+    tokens = [
+        w for w in t.split()
+        if w not in _STOP_WORDS
+        and w not in _COLOR_WORDS
+        and w not in _NOISE_WORDS
+        and len(w) > 2
+    ]
+
+    # FIX #1b — max 3–4 znaczące tokeny
     key = "_".join(tokens[:4])
     return key or "unknown"
 
@@ -191,7 +228,10 @@ class MarketDB:
             pass
 
     def build(self, raw_items: list[dict]):
-        """Grupuje surowe itemy i oblicza statystyki cenowe."""
+        """Grupuje surowe itemy i oblicza statystyki cenowe.
+        FIX #2: Merguje nowe dane z istniejącą bazą (nie nadpisuje).
+        FIX #3: Filtruje outlier'y przez IQR przed liczeniem statystyk.
+        """
         groups: dict[str, list[float]] = defaultdict(list)
         group_history: dict[str, list[dict]] = defaultdict(list)
 
@@ -210,11 +250,15 @@ class MarketDB:
             if len(prices) < DB_MIN_SAMPLES:
                 continue
 
-            # Zachowaj historię cen do detekcji trendu
+            # FIX #3 — IQR outlier filter
+            prices = self._filter_outliers(prices)
+            if len(prices) < DB_MIN_SAMPLES:
+                continue
+
             history = sorted(group_history[key], key=lambda x: x["ts"])
             trend = self._detect_trend(history)
 
-            new_db[key] = {
+            new_entry = {
                 "avg":    round(mean(prices), 2),
                 "median": round(median(prices), 2),
                 "min":    round(min(prices), 2),
@@ -225,10 +269,46 @@ class MarketDB:
                 "updated": time.time(),
             }
 
+            # FIX #2 — merge z istniejącą bazą (weighted average)
+            if key in self.db:
+                old = self.db[key]
+                old_count = old.get("count", 0)
+                new_count = new_entry["count"]
+                total = old_count + new_count
+                if total > 0:
+                    new_entry["avg"] = round(
+                        (old["avg"] * old_count + new_entry["avg"] * new_count) / total, 2
+                    )
+                    new_entry["count"] = total
+                    new_entry["min"] = min(old.get("min", new_entry["min"]), new_entry["min"])
+                    new_entry["max"] = max(old.get("max", new_entry["max"]), new_entry["max"])
+                    # Mediana: użyj nowej (z aktualnych danych)
+                    # std: zachowaj nowe
+
+            new_db[key] = new_entry
+
+        # Zachowaj wpisy których nie ma w nowym buildzie (historyczne dane)
+        for key, data in self.db.items():
+            if key not in new_db:
+                new_db[key] = data
+
         self.db = new_db
         self.save()
         print(f"  📊 MarketDB zbudowana: {len(self.db)} grup")
         return new_db
+
+    def _filter_outliers(self, prices: list[float]) -> list[float]:
+        """FIX #3 — usuwa ceny poza zakresem Q1*0.5 .. Q3*1.5."""
+        if len(prices) < 4:
+            return prices
+        s = sorted(prices)
+        n = len(s)
+        q1 = s[n // 4]
+        q3 = s[(n * 3) // 4]
+        lo = q1 * 0.5
+        hi = q3 * 1.5
+        filtered = [p for p in s if lo < p < hi]
+        return filtered if len(filtered) >= DB_MIN_SAMPLES else prices
 
     def _detect_trend(self, history: list[dict]) -> str:
         """Wykrywa trend cenowy na podstawie historii."""
@@ -281,8 +361,9 @@ class AICache:
         except:
             pass
 
-    def get(self, title: str) -> dict | None:
-        key = normalize_title(title)
+    def get(self, title: str, price: float = 0) -> dict | None:
+        # FIX #4 — klucz = pełny tytuł + cena (brak kolizji między różnymi itemami)
+        key = f"{title.lower().strip()}_{round(price)}"
         entry = self.cache.get(key)
         if entry:
             # Cache ważny 24h
@@ -290,8 +371,9 @@ class AICache:
                 return entry["data"]
         return None
 
-    def set(self, title: str, data: dict):
-        key = normalize_title(title)
+    def set(self, title: str, data: dict, price: float = 0):
+        # FIX #4 — spójny klucz z get()
+        key = f"{title.lower().strip()}_{round(price)}"
         self.cache[key] = {"data": data, "ts": time.time()}
         # Trzymaj max 2000 wpisów
         if len(self.cache) > 2000:
@@ -407,8 +489,8 @@ def analyze_item_ai(
         decision: BUY / WATCH / SKIP
     }
     """
-    # Sprawdź cache
-    cached = ai_cache.get(title)
+    # Sprawdź cache — FIX #4: klucz = tytuł + cena
+    cached = ai_cache.get(title, price)
     if cached:
         return cached
 
@@ -458,7 +540,7 @@ Zasady oceny:
             "decision": "WATCH",
         }
 
-    ai_cache.set(title, result)
+    ai_cache.set(title, result, price)
     return result
 
 
@@ -516,6 +598,11 @@ def calculate_confidence(
             fake_risk = True
             db_score = max(db_score - 2.0, 0.0)
 
+        # FIX #9 — silniejsza detekcja fake luxury: poniżej 30% avg
+        if brand in LUXURY_BRANDS and ratio < 0.30:
+            fake_risk = True
+            db_score = max(db_score - 3.0, 0.0)  # dodatkowa kara -3
+
         # Flip profit
         estimated = ai_data.get("estimated_value", avg)
         flip_profit = max(estimated - price, 0.0)
@@ -529,19 +616,23 @@ def calculate_confidence(
     # ── MARKET SCORE (0–10) ──────────────────
     market_score = 5.0
     if market_price and market_price > 0:
-        ratio = price / market_price
-        if ratio < 0.50:
-            market_score = 10.0
-        elif ratio < 0.60:
-            market_score = 9.0
-        elif ratio < 0.70:
-            market_score = 8.0
-        elif ratio < 0.80:
-            market_score = 6.5
-        elif ratio < 0.90:
+        # FIX #7 — market_price unreliable below 20 zł
+        if market_price < 20:
             market_score = 5.0
         else:
-            market_score = 3.0
+            ratio = price / market_price
+            if ratio < 0.50:
+                market_score = 10.0
+            elif ratio < 0.60:
+                market_score = 9.0
+            elif ratio < 0.70:
+                market_score = 8.0
+            elif ratio < 0.80:
+                market_score = 6.5
+            elif ratio < 0.90:
+                market_score = 5.0
+            else:
+                market_score = 3.0
 
     # ── AI SCORE (0–10) ──────────────────────
     ai_score = float(ai_data.get("final_score", 5.0))
@@ -563,6 +654,13 @@ def calculate_confidence(
         boost = min(flip_profit / 100.0, 1.5)
         ai_score = min(ai_score + boost, 10.0)
 
+    # FIX #6 — flip profit bezpośrednio wpływa na confidence
+    flip_confidence_bonus = 0.0
+    if flip_profit > 500:
+        flip_confidence_bonus = 2.0
+    elif flip_profit > 200:
+        flip_confidence_bonus = 1.0
+
     # ── WEIGHTED CONFIDENCE ───────────────────
     confidence = (
         db_score     * 0.40 +
@@ -570,10 +668,15 @@ def calculate_confidence(
         ai_score     * 0.30
     )
 
+    # FIX #6 — flip profit bonus (po ważeniu)
+    confidence += flip_confidence_bonus
+
     # ── SELF-LEARNING BONUS ───────────────────
     if brand:
         confidence += learner.get_brand_bonus(brand) * 0.3
     confidence += learner.get_category_bonus(category) * 0.2
+
+    # FIX #6 — clamp do max 10
     confidence = min(confidence, 10.0)
 
     return {
@@ -699,12 +802,17 @@ class Engine:
 
         # 6. Fake risk — zmniejsz confidence
         if scoring["fake_risk"]:
+            # FIX #9 — silna kara za fake luxury
             scoring["confidence"] = max(scoring["confidence"] - 2.0, 0.0)
 
         # 7. Decyzja
         confidence   = scoring["confidence"]
         ai_decision  = ai_data.get("decision", "SKIP")
         flip_profit  = scoring["flip_profit"]
+
+        # FIX #10 — confidence floor: poniżej 5 → zawsze SKIP
+        if confidence < 5.0:
+            ai_decision = "SKIP"
 
         # Dodatkowy warunek: cena < 50% avg DB → zawsze alert
         force_alert = (
@@ -713,7 +821,15 @@ class Engine:
         )
 
         tier = get_alert_tier(confidence, ai_decision)
-        send_alert = bool(tier) or force_alert
+
+        # FIX #5 — redukcja spamu: wyślij alert tylko gdy spełnione warunki
+        raw_send = bool(tier) or force_alert
+        spam_filtered = (
+            confidence >= 6.5
+            or ai_decision == "BUY"
+            or (db_data is not None and price < db_data["avg"] * 0.50)
+        )
+        send_alert = raw_send and spam_filtered
 
         return {
             "send_alert":  send_alert,
