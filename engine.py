@@ -34,19 +34,22 @@ from collections import defaultdict
 
 
 # ─────────────────────────────────────────────────────
-#  📁 PLIKI
+#  📁 PLIKI — /tmp przeżywa restarty na Railway
 # ─────────────────────────────────────────────────────
-DB_FILE          = "market_db.json"
-RAW_FILE         = "raw_items.json"
-FEEDBACK_FILE    = "feedback.json"
-AI_CACHE_FILE    = "ai_cache.json"
+_DATA_DIR = os.getenv("DATA_DIR", "/tmp/vinted_bot")
+os.makedirs(_DATA_DIR, exist_ok=True)
+
+DB_FILE          = os.path.join(_DATA_DIR, "market_db.json")
+RAW_FILE         = os.path.join(_DATA_DIR, "raw_items.json")
+FEEDBACK_FILE    = os.path.join(_DATA_DIR, "feedback.json")
+AI_CACHE_FILE    = os.path.join(_DATA_DIR, "ai_cache.json")
 
 # ─────────────────────────────────────────────────────
 #  ⚙️ PROGI
 # ─────────────────────────────────────────────────────
 CONFIDENCE_INSANE  = 8.5   # 🔴 INSANE DEAL
 CONFIDENCE_GOOD    = 7.0   # 🟡 GOOD DEAL
-CONFIDENCE_WATCH   = 5.5   # ⚪ WATCH
+CONFIDENCE_WATCH   = 6.0   # ⚪ WATCH (podwyższone z 5.5)
 
 DB_MIN_SAMPLES     = 3     # min próbek żeby użyć DB
 DB_BUILD_EVERY     = 150   # buduj DB co N nowych itemów
@@ -836,21 +839,15 @@ def calculate_confidence(
 # ─────────────────────────────────────────────────────
 def get_alert_tier(confidence: float, ai_decision: str) -> str | None:
     """
-    Zwraca tier alertu lub None jeśli nie wysyłać.
-    FIX #3: doprecyzowane progi — BUY bez solidnego conf nie awansuje do GOOD.
-    Skala:
-      INSANE = conf >= 8.5 LUB (BUY + conf >= 7.0)
-      GOOD   = conf >= 7.0 LUB (BUY + conf >= 6.2)  ← podniesiony z 5.5
-      WATCH  = conf >= 5.5
-    Funko bez DB: base=6.0 → score≈8.0 → BUY, conf≈6.1 → WATCH (nie GOOD)
+    INSANE: conf >= 8.5 (prawdziwe okazje)
+    GOOD:   conf >= 7.0 LUB (BUY + conf >= 6.5)
+    WATCH:  conf >= 6.0
     """
     if confidence >= CONFIDENCE_INSANE:
         return "INSANE"
-    if ai_decision == "BUY" and confidence >= CONFIDENCE_GOOD:
-        return "INSANE"
     if confidence >= CONFIDENCE_GOOD:
         return "GOOD"
-    if ai_decision == "BUY" and confidence >= 6.2:   # podniesiony próg BUY→GOOD
+    if ai_decision == "BUY" and confidence >= 6.5:
         return "GOOD"
     if confidence >= CONFIDENCE_WATCH:
         return "WATCH"
