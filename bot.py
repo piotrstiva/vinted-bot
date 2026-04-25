@@ -41,12 +41,12 @@ MIN_SAVING_PLN   = 6       # minimalna oszczędność w zł (odrzuć 1-5 zł ró
 MAX_ALERTS_PER_SEARCH = 5  # max powiadomień per wyszukiwanie per cykl
 
 STEAL_PRICES = {
-    "sneakers": 120,
-    "clothing":  30,
-    "lego":      60,
-    "funko":     25,
-    "football":  50,
-    "lego_sw":   80,
+    "sneakers": 80,    # buty markowe poniżej 80 zł → steal
+    "clothing":  20,   # ubrania poniżej 20 zł → steal (było 30 — za dużo false)
+    "lego":      40,   # LEGO poniżej 40 zł → steal
+    "funko":     15,   # Funko poniżej 15 zł → steal
+    "football":  35,   # koszulka retro poniżej 35 zł → steal
+    "lego_sw":   50,   # LEGO SW poniżej 50 zł → steal
     "carhartt": 250,
 }
 
@@ -743,7 +743,9 @@ SEARCHES = [
 # ─────────────────────────────────────────
 #  💾 PAMIĘĆ  (z automatycznym czyszczeniem)
 # ─────────────────────────────────────────
-SEEN_FILE      = "seen_items.json"
+_DATA_DIR      = os.getenv("DATA_DIR", "/tmp/vinted_bot")
+os.makedirs(_DATA_DIR, exist_ok=True)
+SEEN_FILE      = os.path.join(_DATA_DIR, "seen_items.json")
 SEEN_MAX_DAYS  = 30   # pamiętamy ID przez 30 dni — blokuje stare oferty
 
 def load_seen():
@@ -1306,7 +1308,7 @@ def get_market_median(search):
 #  Cache zapisywany do pliku JSON
 #  Odświeżamy ceny raz na 24h per set
 # ─────────────────────────────────────────
-BRICKLINK_CACHE_FILE = "bricklink_prices.json"
+BRICKLINK_CACHE_FILE = os.path.join(_DATA_DIR, "bricklink_prices.json")
 BRICKLINK_CACHE_TTL  = 24 * 3600  # 24h
 
 _bl_cache = {}
@@ -2022,35 +2024,54 @@ while True:
             now = time.time()
             for item in new_items[:MAX_ALERTS_PER_SEARCH]:
 
+                photo = item.get("photo") or get_item_photo(item["id"], item["link"])
+
                 # ── Engine evaluation ─────────────────
                 if engine:
                     eval_result = engine.evaluate(item, search, market_price)
+                    conf  = eval_result["confidence"]
+                    tier  = eval_result["tier"]
+                    has_db = eval_result.get("db_data") is not None
 
-                    # Jeśli engine decyduje żeby nie wysyłać — pomiń
-                    # (tylko dla trybów normalnych, nie dla football/lego_sw)
                     is_special = (
                         search.get("football_mode") or
                         search.get("lego_sw_mode") or
                         search.get("carhartt_mode")
                     )
-                    if not is_special and not eval_result["send_alert"]:
-                        print(f"  ⏭  Engine skip: conf={eval_result['confidence']:.1f} | {item['title'][:40]}")
-                        seen[item["id"]] = now
-                        continue
 
-                    # Użyj formatu engine dla dobrych deali
-                    if eval_result["tier"] in ("INSANE", "GOOD"):
+                    # INSANE / GOOD → engine format
+                    if tier in ("INSANE", "GOOD"):
                         engine_msg = engine.format_alert(eval_result)
-                        photo = item.get("photo") or get_item_photo(item["id"], item["link"])
                         send_message(engine_msg, photo_url=photo, item_link=item.get("link"))
                         seen[item["id"]] = now
-                        tier_tag = "🔴" if eval_result["tier"] == "INSANE" else "🟡"
-                        print(f"  {tier_tag} Engine [{eval_result['tier']}] conf={eval_result['confidence']:.1f} | {item['title'][:40]}")
+                        tag = "🔴" if tier == "INSANE" else "🟡"
+                        print(f"  {tag} [{tier}] conf={conf:.1f} | {item['title'][:45]}")
                         continue
 
-                # ── Fallback: standardowy format ──────
+                    # WATCH → standardowy format (informacyjny)
+                    if tier == "WATCH":
+                        msg = format_message(search, item)
+                        send_message(msg, photo_url=photo, item_link=item.get("link"))
+                        seen[item["id"]] = now
+                        print(f"  ⚪ [WATCH] conf={conf:.1f} | {item['title'][:45]}")
+                        continue
+
+                    # Engine skip — TYLKO gdy mamy dane DB i tryb normalny
+                    if not is_special and has_db:
+                        print(f"  ⏭  Engine skip: conf={conf:.1f} | {item['title'][:40]}")
+                        seen[item["id"]] = now
+                        continue
+
+                    # Brak danych DB (bot nowy) → standardowy format
+                    if not is_special and not has_db:
+                        msg = format_message(search, item)
+                        send_message(msg, photo_url=photo, item_link=item.get("link"))
+                        seen[item["id"]] = now
+                        print(f"  ✉️  [no-DB] {item['title'][:50]} | {item['price']:.0f} zł")
+                        continue
+
+                # ── Tryby specjalne (football/lego_sw/carhartt) ──
                 msg = format_message(search, item)
-                photo = item.get("photo") or get_item_photo(item["id"], item["link"])
                 send_message(msg, photo_url=photo, item_link=item.get("link"))
                 seen[item["id"]] = now
                 tag = "💎" if item.get("is_hidden_gem") else ("🔤" if item.get("has_typo") else "✉️")
