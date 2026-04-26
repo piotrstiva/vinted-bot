@@ -49,12 +49,22 @@ AI_CACHE_FILE    = os.path.join(_DATA_DIR, "ai_cache.json")
 # ─────────────────────────────────────────────────────
 CONFIDENCE_INSANE  = 8.5   # 🔴 INSANE DEAL
 CONFIDENCE_GOOD    = 7.0   # 🟡 GOOD DEAL
-CONFIDENCE_WATCH   = 6.0   # ⚪ WATCH (podwyższone z 5.5)
+CONFIDENCE_WATCH   = 5.5   # ⚪ WATCH — obniżone z 6.0 (więcej alertów)
 
-DB_MIN_SAMPLES     = 3     # min próbek żeby użyć DB
-DB_BUILD_EVERY     = 150   # buduj DB co N nowych itemów
-FLIP_MIN_PROFIT    = 30    # min zysk flip (PLN) żeby liczyć
-FAKE_LUXURY_RATIO  = 0.35  # cena < 35% avg → podejrzenie fake
+DB_MIN_SAMPLES     = 5     # Part 2.7 — minimum próbek (podwyższone dla jakości)
+DB_BUILD_EVERY     = 100   # buduj DB co N nowych itemów (częściej)
+FLIP_MIN_PROFIT    = 25    # Part 1 — obniżone z 30 → 25 zł
+FAKE_LUXURY_RATIO  = 0.35
+
+# Part 2 — rolling window
+DB_MAX_SAMPLES     = 50    # max próbek per klucz
+DB_MAX_AGE_HOURS   = 48    # wyrzuć próbki starsze niż 48h
+
+# Part 2.9 — vintage price premium
+VINTAGE_PRICE_MULT = 1.2   # vintage rynek * 1.2
+
+# Part 1 — debug mode
+DEBUG_ALERTS       = True
 
 LUXURY_BRANDS = {
     "gucci", "louis vuitton", "prada", "hermes", "balenciaga",
@@ -229,6 +239,91 @@ class RawStorage:
 # ─────────────────────────────────────────────────────
 #  🧱 MARKET DATABASE
 # ─────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
+#  🧱 MARKET DATABASE — High-Quality Smart DB
+# ─────────────────────────────────────────────────────
+
+# Part 2.3 — vintage detection
+_VINTAGE_DETECT_KW = [
+    "vintage", "90s", "80s", "70s", "y2k", "single stitch",
+    "made in usa", "made in italy", "retro", "old", "archive",
+    "deadstock", "band tee", "tour shirt", "rap tee",
+]
+
+def _is_vintage(title: str) -> bool:
+    t = title.lower()
+    return any(k in t for k in _VINTAGE_DETECT_KW)
+
+
+# Part 2.2 — item type detection for smart key
+_ITEM_TYPES = [
+    ("hoodie",   ["hoodie", "bluza", "sweatshirt", "hooded"]),
+    ("tee",      ["t-shirt", "tshirt", "tee", "koszulka", "t shirt"]),
+    ("jacket",   ["jacket", "kurtka", "windbreaker", "bomber", "anorak", "parka"]),
+    ("coat",     ["coat", "płaszcz", "overcoat", "trench"]),
+    ("jeans",    ["jeans", "denim", "dżinsy"]),
+    ("cargo",    ["cargo", "parachute pants"]),
+    ("shirt",    ["shirt", "koszula", "flannel"]),
+    ("sneakers", ["sneakers", "buty", "shoes", "kicks", "trainers"]),
+    ("jersey",   ["jersey", "football shirt", "koszulka piłkarska"]),
+    ("cap",      ["cap", "hat", "czapka", "beanie"]),
+    ("bag",      ["bag", "torba", "backpack", "plecak"]),
+]
+
+def _detect_item_type(title: str) -> str:
+    t = title.lower()
+    for item_type, keywords in _ITEM_TYPES:
+        if any(k in t for k in keywords):
+            return item_type
+    return "clothing"
+
+
+def build_market_key(title: str, brand: str | None, is_vint: bool) -> str:
+    """
+    Part 2.2 — Smart key generation.
+    Prevents DB fragmentation — groups by brand+type+era.
+
+    Examples:
+      nike_hoodie_modern
+      vintage_band_tee
+      stussy_jacket_vintage
+      football_shirt_90s
+    """
+    item_type = _detect_item_type(title)
+    era       = "vintage" if is_vint else "modern"
+
+    if brand:
+        return f"{brand}_{item_type}_{era}"
+    else:
+        # brak brandu — grupuj po typie+erze
+        return f"{item_type}_{era}"
+
+
+def should_add_to_db(item: dict, item_score: int) -> bool:
+    """
+    Part 2.1 — Quality gate: tylko wysokiej jakości dane wchodzą do DB.
+    Zapobiega uczeniu się na śmieciach.
+    """
+    price     = item.get("price", 0) or 0
+    title     = item.get("title", "")
+    brand     = detect_brand(title)
+    is_vint   = _is_vintage(title)
+
+    # Za słaby item score (oceniony w check_search)
+    if item_score < 3:
+        return False
+
+    # Za tania cena — za dużo szumu
+    if price < 30:
+        return False
+
+    # Brak brandu I nie vintage → śmieć
+    if brand is None and not is_vint:
+        return False
+
+    return True
+
+
 class MarketDB:
     def __init__(self):
         self.db: dict[str, dict] = {}
@@ -251,93 +346,131 @@ class MarketDB:
             pass
 
     def build(self, raw_items: list[dict]):
-        """Grupuje surowe itemy i oblicza statystyki cenowe.
-        FIX #2: Merguje nowe dane z istniejącą bazą (nie nadpisuje).
-        FIX #3: Filtruje outlier'y przez IQR przed liczeniem statystyk.
         """
-        groups: dict[str, list[float]] = defaultdict(list)
-        group_history: dict[str, list[dict]] = defaultdict(list)
+        Part 2 — High-Quality DB build.
+        - Smart keys (brand+type+era)
+        - Quality gate (should_add_to_db)
+        - Rolling window (48h, max 50 samples)
+        - Outlier filter (median ±50%)
+        - Vintage premium (+20%)
+        """
+        now = time.time()
+        max_age = DB_MAX_AGE_HOURS * 3600
+
+        # Grupowanie po smart key
+        groups:  dict[str, list[dict]] = defaultdict(list)
 
         for item in raw_items:
-            key = normalize_title(item["title"])
-            if key == "unknown":
+            title   = item.get("title", "")
+            price   = item.get("price", 0) or 0
+            brand   = detect_brand(title)
+            is_vint = _is_vintage(title)
+            score   = item.get("item_score", 0)
+
+            # Part 2.1 — quality gate
+            if not should_add_to_db(item, score):
                 continue
-            groups[key].append(item["price"])
-            group_history[key].append({
-                "price": item["price"],
-                "ts": item.get("ts", 0),
+
+            key = build_market_key(title, brand, is_vint)
+            groups[key].append({
+                "price":     price,
+                "ts":        item.get("ts", now),
+                "is_vintage": is_vint,
             })
 
         new_db = {}
-        for key, prices in groups.items():
+        for key, samples in groups.items():
+            # Part 2.5 — rolling window: wyrzuć stare próbki
+            samples = [s for s in samples if now - s["ts"] < max_age]
+
+            # Part 2.5 — max samples
+            if len(samples) > DB_MAX_SAMPLES:
+                samples = sorted(samples, key=lambda x: x["ts"])[-DB_MAX_SAMPLES:]
+
+            if len(samples) < DB_MIN_SAMPLES:
+                continue
+
+            prices = [s["price"] for s in samples]
+
+            # Part 2.6 — outlier filter (median-based)
+            prices = self._clean_prices(prices)
             if len(prices) < DB_MIN_SAMPLES:
                 continue
 
-            # FIX #3 — IQR outlier filter
-            prices = self._filter_outliers(prices)
-            if len(prices) < DB_MIN_SAMPLES:
-                continue
+            # Part 2.8 — robust price calculation
+            med   = median(prices)
+            p25   = sorted(prices)[len(prices) // 4]
+            p75   = sorted(prices)[(len(prices) * 3) // 4]
+            avg_p = mean(prices)
 
-            history = sorted(group_history[key], key=lambda x: x["ts"])
-            trend = self._detect_trend(history)
+            # Part 2.9 — vintage premium
+            is_vint_key = "vintage" in key
+            market_price = med * VINTAGE_PRICE_MULT if is_vint_key else med
+
+            # Trend detection
+            history = sorted(samples, key=lambda x: x["ts"])
+            trend   = self._detect_trend([{"price": s["price"], "ts": s["ts"]} for s in history])
 
             new_entry = {
-                "avg":    round(mean(prices), 2),
-                "median": round(median(prices), 2),
-                "min":    round(min(prices), 2),
-                "max":    round(max(prices), 2),
-                "std":    round(stdev(prices) if len(prices) > 1 else 0, 2),
-                "count":  len(prices),
-                "trend":  trend,
-                "updated": time.time(),
+                "avg":          round(avg_p, 2),
+                "median":       round(med, 2),
+                "market_price": round(market_price, 2),  # Part 2.9
+                "p25":          round(p25, 2),
+                "p75":          round(p75, 2),
+                "min":          round(min(prices), 2),
+                "max":          round(max(prices), 2),
+                "std":          round(stdev(prices) if len(prices) > 1 else 0, 2),
+                "count":        len(prices),
+                "trend":        trend,
+                "is_vintage":   is_vint_key,
+                "updated":      now,
             }
 
-            # FIX #2 — merge z istniejącą bazą (weighted average)
+            # Merge z istniejącą bazą
             if key in self.db:
                 old = self.db[key]
-                old_count = old.get("count", 0)
-                new_count = new_entry["count"]
-                total = old_count + new_count
+                old_n = old.get("count", 0)
+                new_n = new_entry["count"]
+                total = old_n + new_n
                 if total > 0:
                     new_entry["avg"] = round(
-                        (old["avg"] * old_count + new_entry["avg"] * new_count) / total, 2
+                        (old["avg"] * old_n + new_entry["avg"] * new_n) / total, 2
                     )
                     new_entry["count"] = total
                     new_entry["min"] = min(old.get("min", new_entry["min"]), new_entry["min"])
                     new_entry["max"] = max(old.get("max", new_entry["max"]), new_entry["max"])
-                    # Mediana: użyj nowej (z aktualnych danych)
-                    # std: zachowaj nowe
 
             new_db[key] = new_entry
 
-        # Zachowaj wpisy których nie ma w nowym buildzie (historyczne dane)
+        # Zachowaj historyczne wpisy
         for key, data in self.db.items():
             if key not in new_db:
                 new_db[key] = data
 
         self.db = new_db
         self.save()
-        print(f"  📊 MarketDB zbudowana: {len(self.db)} grup")
+        vint_keys = sum(1 for k in new_db if "vintage" in k)
+        print(f"  📊 MarketDB: {len(new_db)} grup ({vint_keys} vintage)")
         return new_db
 
-    def _filter_outliers(self, prices: list[float]) -> list[float]:
-        """FIX #3 — usuwa ceny poza zakresem Q1*0.5 .. Q3*1.5."""
-        if len(prices) < 4:
+    def _clean_prices(self, prices: list[float]) -> list[float]:
+        """Part 2.6 — usuwa outlier'y względem mediany (±50%)."""
+        if len(prices) < 3:
             return prices
-        s = sorted(prices)
-        n = len(s)
-        q1 = s[n // 4]
-        q3 = s[(n * 3) // 4]
-        lo = q1 * 0.5
-        hi = q3 * 1.5
-        filtered = [p for p in s if lo < p < hi]
-        return filtered if len(filtered) >= DB_MIN_SAMPLES else prices
+        med = median(prices)
+        lo  = med * 0.5
+        hi  = med * 1.5
+        cleaned = [p for p in prices if lo < p < hi]
+        return cleaned if len(cleaned) >= 2 else prices
+
+    def _filter_outliers(self, prices: list[float]) -> list[float]:
+        """IQR fallback (używany gdzie nie ma median-based)."""
+        return self._clean_prices(prices)
 
     def _detect_trend(self, history: list[dict]) -> str:
-        """Wykrywa trend cenowy na podstawie historii."""
         if len(history) < 4:
             return "stable"
-        prices = [h["price"] for h in history[-6:]]  # ostatnie 6
+        prices = [h["price"] for h in history[-6:]]
         mid = len(prices) // 2
         avg_old = mean(prices[:mid])
         avg_new = mean(prices[mid:])
@@ -347,16 +480,29 @@ class MarketDB:
             return "falling"
         return "stable"
 
-    def lookup(self, title: str) -> dict | None:
-        key = normalize_title(title)
-        return self.db.get(key)
+    def lookup(self, title: str, brand: str | None = None, category: str | None = None) -> dict | None:
+        """
+        Szuka najpierw smart key (brand+type+era),
+        potem fallback po starym normalize_title.
+        """
+        is_vint = _is_vintage(title)
+        smart_key = build_market_key(title, brand, is_vint)
+        if smart_key in self.db:
+            return self.db[smart_key]
+        # Fallback — stary klucz
+        old_key = normalize_title(title)
+        if old_key in self.db:
+            return self.db[old_key]
+        # Fallback brand+category
+        if brand and category:
+            bc_key = f"{brand}_{category}"
+            if bc_key in self.db:
+                return self.db[bc_key]
+        return None
 
     def lookup_by_brand_category(self, brand: str, category: str) -> dict | None:
-        """Fallback — znajdź dane dla marki+kategorii."""
-        query = f"{brand}_{category}"
-        # Szukaj najbliższego klucza
         for key, data in self.db.items():
-            if brand in key and data.get("count", 0) >= 5:
+            if brand in key and data.get("count", 0) >= DB_MIN_SAMPLES:
                 return data
         return None
 
@@ -689,8 +835,10 @@ def calculate_confidence(
     trend = "stable"
 
     if db_data:
-        avg = db_data["avg"]
-        ratio = price / avg if avg > 0 else 1.0
+        avg   = db_data["avg"]
+        # Part 2.9 — użyj market_price z DB (już zawiera vintage premium)
+        db_mkt = db_data.get("market_price", avg)
+        ratio = price / db_mkt if db_mkt > 0 else 1.0
         trend = db_data.get("trend", "stable")
 
         if ratio < 0.50:
@@ -714,16 +862,34 @@ def calculate_confidence(
             fake_risk = True
             db_score = max(db_score - 3.0, 0.0)
 
-        estimated = ai_data.get("estimated_value", avg)
+        estimated   = ai_data.get("estimated_value", db_mkt)
         flip_profit = max(estimated - price, 0.0)
+
+        # Part 2.10 — deal_score
+        deal_score = (db_mkt - price) / db_mkt if db_mkt > 0 else 0.0
+        if deal_score > 0.5:
+            deal_tag = "STEAL"
+        elif deal_score > 0.3:
+            deal_tag = "GOOD"
+        else:
+            deal_tag = "WEAK"
+
+        # Part 2.11 — anomaly detection
+        anomaly_score = 0
+        if price < db_mkt * 0.6:
+            anomaly_score += 2
 
         if trend == "rising":
             db_score = min(db_score + 0.5, 10.0)
         elif trend == "falling":
             db_score = max(db_score - 0.5, 0.0)
     else:
-        estimated = ai_data.get("estimated_value", price * 1.5)
+        db_mkt      = None
+        estimated   = ai_data.get("estimated_value", price * 1.5)
         flip_profit = max(estimated - price, 0.0)
+        deal_score  = 0.0
+        deal_tag    = "WEAK"
+        anomaly_score = 0
 
     # ── MARKET SCORE (0–10) ──────────────────
     market_score = 5.0
@@ -813,6 +979,10 @@ def calculate_confidence(
         fake_risk = True
         confidence -= 3.0
 
+    # ── PART 2.11: ANOMALY BOOST ─────────────
+    if anomaly_score >= 2:
+        confidence += 1.5
+
     # ── SELF-LEARNING BONUS ───────────────────
     if brand:
         confidence += learner.get_brand_bonus(brand) * 0.3
@@ -831,12 +1001,70 @@ def calculate_confidence(
         "trend":          trend,
         "vintage_score":  round(v_score, 2),
         "football_score": round(f_score, 2),
+        "deal_score":     round(deal_score, 4),
+        "deal_tag":       deal_tag,
+        "anomaly_score":  anomaly_score,
     }
 
 
 # ─────────────────────────────────────────────────────
-#  🔔 ALERT TIER
+#  💎 GRAIL DETECTION — Part 3
 # ─────────────────────────────────────────────────────
+GRAIL_KEYWORDS = [
+    "single stitch", "made in usa", "made in italy",
+    "90s", "80s", "70s", "tour", "promo", "rare",
+    "deadstock", "harley davidson", "band tee", "band shirt",
+    "rap tee", "grateful dead", "nirvana", "metallica",
+    "bootleg tee", "unofficial", "concert tee", "concert shirt",
+]
+
+GRAIL_BRANDS = [
+    "screen stars", "hanes", "fruit of the loom", "delta pro weight",
+    "delta", "gildan", "brockum", "liquid blue", "nutmeg",
+    "anvil", "tultex", "jerzees", "artex", "signal sport",
+    "salem sportswear", "logo 7", "chalk line",
+]
+
+
+def grail_score(title: str, anomaly_sc: int, deal_tag: str) -> tuple[int, bool]:
+    """
+    Part 3 — Grail scoring.
+    Returns (score, is_grail).
+    is_grail = True → force alert, min_profit = 10
+    """
+    t     = title.lower()
+    score = 0
+
+    # Grail brand (vintage basic tee brand)
+    if any(b in t for b in GRAIL_BRANDS):
+        score += 2
+
+    # Grail keywords
+    kw_hits = sum(1 for k in GRAIL_KEYWORDS if k in t)
+    if kw_hits >= 1:
+        score += 2
+    if kw_hits >= 2:
+        score += 1  # bonus za kombinację
+
+    # Anomaly pricing (dużo poniżej mediany)
+    if anomaly_sc >= 2:
+        score += 2
+
+    # Dodatkowe sygnały
+    if "band" in t or "movie" in t or "film" in t:
+        score += 1
+    if "tour" in t:
+        score += 1
+    if "single stitch" in t:
+        score += 1
+    if deal_tag == "STEAL":
+        score += 1
+
+    is_grail = score >= 4
+    return score, is_grail
+
+
+
 def get_alert_tier(confidence: float, ai_decision: str) -> str | None:
     """
     INSANE: conf >= 8.5 (prawdziwe okazje)
@@ -962,12 +1190,17 @@ class Engine:
         confidence   = scoring["confidence"]
         ai_decision  = ai_data.get("decision", "SKIP")
         flip_profit  = scoring["flip_profit"]
+        deal_tag     = scoring.get("deal_tag", "WEAK")
+        anomaly_sc   = scoring.get("anomaly_score", 0)
 
-        # FIX #10 — confidence floor: poniżej 5 → zawsze SKIP
+        # Confidence floor
         if confidence < 5.0:
             ai_decision = "SKIP"
 
-        # Dodatkowy warunek: cena < 50% avg DB → zawsze alert
+        # Part 3 — Grail detection
+        g_score, is_grail = grail_score(title, anomaly_sc, deal_tag)
+
+        # Force alert: cena < 50% avg DB
         force_alert = (
             db_data is not None and
             price < db_data["avg"] * 0.50
@@ -975,39 +1208,50 @@ class Engine:
 
         tier = get_alert_tier(confidence, ai_decision)
 
-        # FIX #5 — redukcja spamu: wyślij alert tylko gdy spełnione warunki
-        raw_send = bool(tier) or force_alert
-        spam_filtered = (
-            confidence >= 6.5
-            or ai_decision == "BUY"
-            or (db_data is not None and price < db_data["avg"] * 0.50)
-            # FIX #5: mainstream brand bez DB → obniż próg do 5.5
-            # (nie do zera — wciąż filtrujemy śmieci)
-            or (brand in MAINSTREAM_BRANDS and confidence >= 5.5)
+        # Part 1 — Relaxed send_alert:
+        # wysyłaj gdy: conf >= 5.5 AND profit >= 25
+        # LUB grail detected (min profit = 10)
+        # LUB force_alert (dużo poniżej avg)
+        min_profit = 10 if is_grail else FLIP_MIN_PROFIT
+
+        send_alert = (
+            (confidence >= 5.5 and flip_profit >= min_profit)
+            or force_alert
+            or is_grail
         )
 
-        # FIX #2 — deduplicacja: nie wysyłaj alertu dwa razy dla tego samego item_id
+        # Part 1 — debug
+        if DEBUG_ALERTS:
+            tag = "💎 GRAIL" if is_grail else tier or "—"
+            print(f"  📤 {'SEND' if send_alert else 'SKIP'}: conf={confidence:.1f} "
+                  f"profit={flip_profit:.0f} deal={deal_tag} grail={g_score} "
+                  f"tier={tag} | {title[:35]}")
+
+        # Deduplicacja sesyjna
         item_id = str(item.get("id", ""))
-        already_alerted = item_id and item_id in self._alerted_ids
-        send_alert = raw_send and spam_filtered and not already_alerted
         if send_alert and item_id:
-            self._alerted_ids.add(item_id)
-            # Trzymaj max 10 000 ID w pamięci (ochrona przed wyciekiem)
-            if len(self._alerted_ids) > 10_000:
-                self._alerted_ids = set(list(self._alerted_ids)[-5_000:])
+            if item_id in self._alerted_ids:
+                send_alert = False
+            else:
+                self._alerted_ids.add(item_id)
+                if len(self._alerted_ids) > 10_000:
+                    self._alerted_ids = set(list(self._alerted_ids)[-5_000:])
 
         return {
-            "send_alert":  send_alert,
-            "tier":        tier or ("GOOD" if force_alert else None),
-            "confidence":  confidence,
-            "scoring":     scoring,
-            "ai_data":     ai_data,
-            "db_data":     db_data,
-            "brand":       brand,
-            "category":    category,
-            "flip_profit": flip_profit,
-            "item":        item,
-            "market_price": market_price,
+            "send_alert":    send_alert,
+            "tier":          "💎 GRAIL" if is_grail else (tier or ("GOOD" if force_alert else None)),
+            "confidence":    confidence,
+            "scoring":       scoring,
+            "ai_data":       ai_data,
+            "db_data":       db_data,
+            "brand":         brand,
+            "category":      category,
+            "flip_profit":   flip_profit,
+            "item":          item,
+            "market_price":  market_price,
+            "is_grail":      is_grail,
+            "grail_score":   g_score,
+            "deal_tag":      deal_tag,
         }
 
     # ── HEURYSTYCZNY AI (bez Claude) ─────────
@@ -1101,13 +1345,23 @@ class Engine:
         # Tytuł bez metadanych Vinted
         clean = re.sub(r',?\s*(marka|stan|rozmiar):.*', '', title, flags=re.IGNORECASE).strip()
 
-        # Tier emoji
-        if tier == "INSANE":
+        # Tier emoji + grail override
+        is_grail = result.get("is_grail", False)
+        grail_sc = result.get("grail_score", 0)
+        deal_tag = result.get("deal_tag", "")
+
+        if is_grail:
+            header = f"💎 GRAIL DETECTED  (score={grail_sc})"
+        elif tier == "INSANE":
             header = "🔴 INSANE DEAL"
         elif tier == "GOOD":
             header = "🟡 GOOD DEAL"
         else:
             header = "⚪ WATCH"
+
+        if deal_tag and deal_tag != "WEAK":
+            deal_badges = {"STEAL": "🔥 STEAL", "GOOD": "✅ GOOD PRICE"}
+            header += f"  ·  {deal_badges.get(deal_tag, deal_tag)}"
 
         lines = [
             f"{'━'*28}",
