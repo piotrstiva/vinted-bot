@@ -1037,6 +1037,11 @@ def calculate_confidence(
     if hype >= 8 and estimated_val > 0 and price < estimated_val * 0.70:
         confidence += 1.0
 
+    # Fix #5 — hard cap po boostach żeby śmieciowe itemy nie dostawały 10.0
+    # Bez DB i bez brandu → max 8.0 (nie ma potwierdzenia z rynku)
+    if not db_data and brand is None:
+        confidence = min(confidence, 8.0)
+
     # ── STEP 5: ANTI-SPAM PENALTIES ───────────
     t_lower = title.lower()
     if any(b in t_lower for b in ["shein", "zara", "h&m", "hm "]):
@@ -1058,8 +1063,20 @@ def calculate_confidence(
         confidence -= 3.0
 
     # ── PART 2.11: ANOMALY BOOST ─────────────
-    if anomaly_score >= 2:
+    # Fix #5 — anomaly boost tylko gdy mamy brand lub prawdziwe vintage keyword
+    # (zapobiega conf=10 na śmieciowych "y2k streetwear" bez brandu)
+    _has_real_signal = (
+        brand is not None or
+        any(k in title.lower() for k in [
+            "single stitch", "made in usa", "made in italy",
+            "deadstock", "band tee", "tour shirt", "harley davidson",
+            "screen stars", "hanes", "gildan", "fruit of the loom",
+        ])
+    )
+    if anomaly_score >= 2 and _has_real_signal:
         confidence += 1.5
+    elif anomaly_score >= 2:
+        confidence += 0.5  # słaby boost bez sygnału jakości
 
     # ── SELF-LEARNING BONUS ───────────────────
     if brand:
