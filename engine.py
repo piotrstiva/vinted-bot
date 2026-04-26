@@ -1220,12 +1220,11 @@ class Engine:
             or is_grail
         )
 
-        # Part 1 — debug
+        # Part 1 — debug — tylko krótki log bez SEND/SKIP (bot decyduje o wysyłce)
         if DEBUG_ALERTS:
             tag = "💎 GRAIL" if is_grail else tier or "—"
-            print(f"  📤 {'SEND' if send_alert else 'SKIP'}: conf={confidence:.1f} "
-                  f"profit={flip_profit:.0f} deal={deal_tag} grail={g_score} "
-                  f"tier={tag} | {title[:35]}")
+            print(f"  🔎 conf={confidence:.1f} profit={flip_profit:.0f} "
+                  f"deal={deal_tag} grail={g_score} | {title[:40]}")
 
         # Deduplicacja sesyjna
         item_id = str(item.get("id", ""))
