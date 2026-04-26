@@ -579,6 +579,82 @@ BRAND_TYPOS = {
 SEARCHES = [
 
     # ══════════════════════════════════════
+    #  💎 TIER 0 — GRAIL SNIPER
+    #  Bezpośredni snajper na rarytasy vintage
+    #  Niski score wymagany — AI/grail filter decyduje
+    # ══════════════════════════════════════
+    {
+        "name":     "Single Stitch Vintage",
+        "url":      "https://www.vinted.pl/catalog?search_text=single+stitch+vintage&catalog[]=4&order=newest_first&currency=PLN&price_to=400",
+        "category": "clothing",
+        "keywords": ["single stitch"],
+        "min_price": 15,
+        "layer": "grail",
+        "vintage_mode": True,
+        "grail_mode": True,
+    },
+    {
+        "name":     "Band Tee Vintage Tour",
+        "url":      "https://www.vinted.pl/catalog?search_text=band+tee+vintage+tour&catalog[]=4&order=newest_first&currency=PLN&price_to=400",
+        "category": "clothing",
+        "keywords": ["band", "tee", "tour", "vintage"],
+        "min_price": 15,
+        "layer": "grail",
+        "vintage_mode": True,
+        "grail_mode": True,
+    },
+    {
+        "name":     "Nirvana Shirt Vintage",
+        "url":      "https://www.vinted.pl/catalog?search_text=nirvana+shirt+vintage&catalog[]=4&order=newest_first&currency=PLN&price_to=500",
+        "category": "clothing",
+        "keywords": ["nirvana", "shirt", "tee"],
+        "min_price": 15,
+        "layer": "grail",
+        "vintage_mode": True,
+        "grail_mode": True,
+    },
+    {
+        "name":     "Metallica Shirt Vintage",
+        "url":      "https://www.vinted.pl/catalog?search_text=metallica+shirt+vintage&catalog[]=4&order=newest_first&currency=PLN&price_to=500",
+        "category": "clothing",
+        "keywords": ["metallica", "shirt", "tee", "tour"],
+        "min_price": 15,
+        "layer": "grail",
+        "vintage_mode": True,
+        "grail_mode": True,
+    },
+    {
+        "name":     "Harley Davidson Vintage",
+        "url":      "https://www.vinted.pl/catalog?search_text=harley+davidson+vintage+shirt&catalog[]=4&order=newest_first&currency=PLN&price_to=400",
+        "category": "clothing",
+        "keywords": ["harley", "davidson", "vintage"],
+        "min_price": 15,
+        "layer": "grail",
+        "vintage_mode": True,
+        "grail_mode": True,
+    },
+    {
+        "name":     "Made In USA Vintage",
+        "url":      "https://www.vinted.pl/catalog?search_text=made+in+usa+vintage+shirt&catalog[]=4&order=newest_first&currency=PLN&price_to=400",
+        "category": "clothing",
+        "keywords": ["made in usa", "vintage"],
+        "min_price": 15,
+        "layer": "grail",
+        "vintage_mode": True,
+        "grail_mode": True,
+    },
+    {
+        "name":     "Rap Tee Vintage",
+        "url":      "https://www.vinted.pl/catalog?search_text=rap+tee+vintage&catalog[]=4&order=newest_first&currency=PLN&price_to=500",
+        "category": "clothing",
+        "keywords": ["rap", "tee", "vintage", "shirt"],
+        "min_price": 15,
+        "layer": "grail",
+        "vintage_mode": True,
+        "grail_mode": True,
+    },
+
+    # ══════════════════════════════════════
     #  🥇 LAYER 1 — WIDE BRAND (Core Data)
     # ══════════════════════════════════════
     {
@@ -1962,19 +2038,20 @@ def check_search(search, seen, market_price):
                     cnt_price += 1
                     continue
 
-                # ── FIX #2: SMART ITEM SCORING ──────────────
-                # Zastępuje prosty keyword filter systemem scoringowym.
-                # Każdy item dostaje item_score — odrzucamy poniżej progu.
+                # ── PART 5: SMART ITEM SCORING ──────────────
                 VINTAGE_KW  = ["vintage", "retro", "90s", "80s", "70s", "y2k",
                                 "single stitch", "archive", "deadstock", "band tee",
-                                "tour", "old school", "heritage", "throwback"]
+                                "tour", "old school", "heritage", "throwback",
+                                "made in usa", "made in italy", "rare", "promo",
+                                "concert", "bootleg", "rap tee"]
                 BRAND_KW    = [
                     "nike", "adidas", "jordan", "supreme", "palace", "stussy",
                     "bape", "carhartt", "arcteryx", "salomon", "corteiz",
                     "represent", "broken planet", "denim tears", "essentials",
                     "fear of god", "yeezy", "levi", "wrangler", "kappa",
-                    "umbro", "lotto", "diadora", "hummel", "funko", "lego",
+                    "umbro", "lotto", "diadora", "hummel", "fila", "funko", "lego",
                     "puma", "reebok", "asics", "new balance", "vans",
+                    "harley davidson", "harley", "metallica", "nirvana", "grateful dead",
                 ]
                 CATEGORY_KW = search.get("keywords", [])
                 TRASH_KW    = [
@@ -1983,43 +2060,40 @@ def check_search(search, seen, market_price):
                     "mango", "mohito", "house brand", "terranova",
                 ]
 
-                t_lo = title_lower  # już wcześniej obliczone
+                t_lo = title_lower
 
                 item_score = 0
-                # +2 za wykrycie brandu
                 if any(b in t_lo for b in BRAND_KW):
                     item_score += 2
-                # +2 za słowo z keywords danego wyszukiwania
                 if CATEGORY_KW and any(kw.lower() in t_lo for kw in CATEGORY_KW):
                     item_score += 2
-                # +1 za vintage keyword
                 if any(v in t_lo for v in VINTAGE_KW):
-                    item_score += 1
-                # -2 za trash brand
+                    item_score += 2   # Part 5: vintage = +2 (było +1)
+                if price < 50:
+                    item_score += 1   # Part 5: tania cena = bonus
                 if any(tr in t_lo for tr in TRASH_KW):
                     item_score -= 2
 
-                # Tryby specjalne nie korzystają z item_score
-                # (mają własne walidatory)
+                grail_mode = search.get("grail_mode", False)
+
                 if not lego_sw_mode and not carhartt_mode and not football_mode:
-                    # FIX #2: odrzuć jeśli zbyt niski score
-                    # hidden_gem_mode z AI — obniżony próg (AI może znaleźć gem bez brandów)
                     effective_hidden = hidden_gem_mode and bool(ANTHROPIC_KEY)
-                    min_score = 1 if effective_hidden else 2
+                    # Part 5 — progi: grail=1, chaos=1, hidden=1, normal=2
+                    if grail_mode or effective_hidden or search.get("layer") == "chaos":
+                        min_score = 1
+                    else:
+                        min_score = 2
                     if item_score < min_score:
                         cnt_kw += 1
-                        if item_score < 0:
-                            pass  # trash brand — odrzucone przez BLOCKED_BRANDS wcześniej
                         continue
 
-                # FIX #10 — verbose logging score
                 _item_score_val = item_score
 
-                # ── FIX #6: HARD FILTER — bad vintage ───────
-                # Odrzuć śmieciowe vintage bez brandu i bez słów kluczowych
-                # To eliminuje: losowe ubrania za 15 zł bez żadnej wartości flip
+                # ── PART 6: ANTI-SPAM ─────────────────────
+                # Odrzuć: brak zysku + brak brandu + brak vintage → śmieć
                 if (
-                    not lego_sw_mode and not carhartt_mode and not football_mode
+                    not lego_sw_mode and not carhartt_mode
+                    and not football_mode and not grail_mode
                     and price < 30
                     and not any(b in t_lo for b in BRAND_KW)
                     and not any(v in t_lo for v in VINTAGE_KW)
@@ -2126,6 +2200,8 @@ def check_search(search, seen, market_price):
                     "carhartt_model": carhartt_model_name,
                     "carhartt_max": carhartt_max,
                     "photo": item.get("photo"),
+                    "item_score": _item_score_val,   # Part 2.1 — dla should_add_to_db
+                    "ts": time.time(),                # Part 2.5 — dla rolling window
                 })
 
                 # BOT #1 — stop early gdy mamy wystarczająco dużo itemów
@@ -2375,29 +2451,34 @@ while True:
 
                 # ── Engine evaluation ─────────────────
                 if engine:
-                    eval_result = engine.evaluate(item, search, market_price)
-                    conf        = eval_result["confidence"]
-                    has_db      = eval_result.get("db_data") is not None
-                    flip_speed  = eval_result.get("scoring", {}).get("flip_speed", "MEDIUM")
-                    flip_profit = eval_result.get("flip_profit", 0)
-
-                    # FIX #10 — verbose: loguj brand, score, powód odrzucenia
+                    eval_result    = engine.evaluate(item, search, market_price)
+                    conf           = eval_result["confidence"]
+                    has_db         = eval_result.get("db_data") is not None
+                    flip_speed     = eval_result.get("scoring", {}).get("flip_speed", "MEDIUM")
+                    flip_profit    = eval_result.get("flip_profit", 0)
+                    is_grail       = eval_result.get("is_grail", False)
                     detected_brand = eval_result.get("brand", "?")
                     detected_cat   = eval_result.get("category", "?")
+                    deal_tag       = eval_result.get("deal_tag", "WEAK")
 
-                    # Skip gdy słaba confidence z danymi DB
-                    if has_db and conf < 6.5:
-                        print(f"  ⏭  Engine skip: conf={conf:.1f} brand={detected_brand} cat={detected_cat} | {item['title'][:35]}")
+                    # Part 1 — relaxed skip: tylko poniżej 5.5 z DB I bez graila
+                    if has_db and conf < 5.5 and not is_grail:
+                        if DEBUG_ALERTS:
+                            print(f"  ⏭  skip conf={conf:.1f} brand={detected_brand} | {item['title'][:35]}")
                         seen[item["id"]] = now
                         continue
 
-                    # FIX #9 — Quality filter: SLOW flip z małym zyskiem → skip
-                    if flip_speed == "SLOW" and flip_profit < 80:
-                        print(f"  ⏭  Quality skip (SLOW, profit={flip_profit:.0f}zł) | {item['title'][:35]}")
+                    # Part 1 — SLOW flip: obniżony próg z 80 → 30 zł
+                    if flip_speed == "SLOW" and flip_profit < 30 and not is_grail:
+                        if DEBUG_ALERTS:
+                            print(f"  ⏭  SLOW skip profit={flip_profit:.0f}zł | {item['title'][:35]}")
                         seen[item["id"]] = now
                         continue
 
-                    print(f"  ✅ Kandydat: conf={conf:.1f} speed={flip_speed} profit={flip_profit:.0f} brand={detected_brand} | {item['title'][:30]}")
+                    if DEBUG_ALERTS:
+                        grail_tag = " 💎GRAIL" if is_grail else ""
+                        print(f"  ✅ conf={conf:.1f} {flip_speed} profit={flip_profit:.0f} {deal_tag}{grail_tag} brand={detected_brand} | {item['title'][:28]}")
+
                     cycle_candidates.append((conf, search, item, eval_result, now))
                 else:
                     # Bez engine — stary fallback
@@ -2429,13 +2510,15 @@ while True:
                 print(f"  {tag} {item['title'][:55]} | {item['price']:.0f} zł")
                 continue
 
-            if eval_result["tier"] in ("INSANE", "GOOD"):
+            if eval_result["tier"] in ("INSANE", "GOOD", "💎 GRAIL") or eval_result.get("is_grail"):
                 engine_msg = engine.format_alert(eval_result)
+                if DEBUG_ALERTS:
+                    print(f"  📤 TG SEND: {engine_msg[:80]}")
                 send_message(engine_msg, photo_url=photo, item_link=item.get("link"))
                 seen[item["id"]] = now
                 sent_this_cycle += 1
-                tier_tag = "🔴" if eval_result["tier"] == "INSANE" else "🟡"
-                print(f"  {tier_tag} Engine [{eval_result['tier']}] conf={conf:.1f} | {item['title'][:40]}")
+                tier_tag = "💎" if eval_result.get("is_grail") else ("🔴" if eval_result["tier"] == "INSANE" else "🟡")
+                print(f"  {tier_tag} [{eval_result['tier']}] conf={conf:.1f} | {item['title'][:40]}")
             elif eval_result.get("send_alert"):
                 msg = format_message(search, item)
                 send_message(msg, photo_url=photo, item_link=item.get("link"))
