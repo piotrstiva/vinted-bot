@@ -188,13 +188,32 @@ def detect_category(title: str) -> str:
 
 def detect_brand(title: str) -> str | None:
     t = title.lower()
-    all_brands = (
-        list(LUXURY_BRANDS) + list(HYPE_BRANDS) +
-        ["nike", "adidas", "puma", "reebok", "lego", "funko"]
-    )
-    for brand in sorted(all_brands, key=len, reverse=True):
+    # Posortowane od najdłuższych — żeby "new balance" przed "balance"
+    ALL_KNOWN_BRANDS = sorted([
+        # Luxury
+        *list(LUXURY_BRANDS),
+        # Hype
+        *list(HYPE_BRANDS),
+        # Mainstream — Fix 2: rozszerzone
+        "nike", "adidas", "puma", "reebok", "lego", "funko",
+        "new balance", "vans", "converse", "asics", "fila",
+        "champion", "levi", "levis", "levi's", "wrangler",
+        "lee ", "lee cooper", "dickies", "carhartt",
+        "ralph lauren", "polo", "lacoste", "fred perry",
+        "kappa", "umbro", "lotto", "diadora", "hummel",
+        "le coq sportif", "ellesse", "sergio tacchini",
+        "tommy hilfiger", "calvin klein", "guess",
+        "columbia", "patagonia", "arc'teryx", "arcteryx",
+        "the north face", "tnf", "salomon",
+        "timberland", "dr martens", "birkenstock",
+        "harley davidson", "harley",
+        "starter", "russell athletic", "fruit of the loom",
+        "hanes", "gildan", "screen stars", "delta",
+    ], key=len, reverse=True)
+
+    for brand in ALL_KNOWN_BRANDS:
         if brand in t:
-            return brand
+            return brand.strip()
     return None
 
 
