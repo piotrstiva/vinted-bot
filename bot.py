@@ -39,6 +39,7 @@ MIN_DISCOUNT_PCT = 40      # % poniżej mediany → okazja
 MIN_AI_CONFIDENCE = 60     # % pewności AI że to ukryta okazja
 MIN_SAVING_PLN   = 6       # minimalna oszczędność w zł (odrzuć 1-5 zł różnicę)
 MAX_ALERTS_PER_SEARCH = 5  # max powiadomień per wyszukiwanie per cykl
+DEBUG_ALERTS          = True  # FIX: loguj decyzje engine (conf, profit, grail)
 
 STEAL_PRICES = {
     "sneakers": 120,
@@ -2434,7 +2435,12 @@ while True:
             new_items, all_ids = check_search(search, seen, market_price)
             print(f"  ✔ Gotowe: {search['name']} — nowych: {len(new_items)}")
 
+            # FIX 2 — oznacz WSZYSTKIE widziane ID jako seen
+            # (nie tylko wysłane) żeby nie wracały co cykl
             now = time.time()
+            for _id in all_ids:
+                if _id not in seen:
+                    seen[_id] = now
 
             is_special = (
                 search.get("football_mode") or
