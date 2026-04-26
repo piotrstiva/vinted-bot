@@ -821,9 +821,11 @@ SEARCHES = [
     },
     {
         "name":     "New Balance 1906R",
-        "url":      "https://www.vinted.pl/catalog?search_text=new+balance+1906&catalog[]=1206&order=newest_first&currency=PLN&price_to=500",
+        # Fix 4 — dodaj model 1906r do query, nie tylko "1906" (łapało kurtki)
+        "url":      "https://www.vinted.pl/catalog?search_text=new+balance+1906r&catalog[]=1206&order=newest_first&currency=PLN&price_to=500",
         "category": "sneakers",
         "keywords": ["new balance", "1906"],
+        "exclude_keywords": ["jacket", "kurtka", "hoodie", "bluza", "spodnie", "joggers"],
         "min_price": 80,
         "layer": "targeted",
     },
@@ -836,6 +838,11 @@ SEARCHES = [
         "url":      "https://www.vinted.pl/catalog?search_text=vintage+t+shirt&catalog[]=4&order=newest_first&currency=PLN&price_to=300",
         "category": "clothing",
         "keywords": ["vintage", "t-shirt", "tshirt", "tee"],
+        # Fix 3 — odrzuć sukienki, spodnie, bluzki które nie są t-shirtami
+        "exclude_keywords": [
+            "sukienka", "dress", "spodnie", "jeans", "spodenki",
+            "bluzka", "sweter", "sweterek", "kardigan", "top na",
+        ],
         "min_price": 15,
         "layer": "chaos",
         "vintage_mode": True,
@@ -845,7 +852,8 @@ SEARCHES = [
         "url":      "https://www.vinted.pl/catalog?search_text=single+stitch&order=newest_first&currency=PLN&price_to=400",
         "category": "clothing",
         "keywords": ["single stitch"],
-        "min_price": 20,
+        "exclude_keywords": ["sukienka", "dress", "spodnie", "jeans", "kurtka", "jacket"],
+        "min_price": 15,
         "layer": "chaos",
         "vintage_mode": True,
     },
@@ -854,6 +862,12 @@ SEARCHES = [
         "url":      "https://www.vinted.pl/catalog?search_text=vintage+hoodie&catalog[]=4&order=newest_first&currency=PLN&price_to=400",
         "category": "clothing",
         "keywords": ["vintage", "hoodie", "bluza"],
+        # Fix 3 — sukienki/spodnie/bluzki wiosenne nie są hoodie
+        "exclude_keywords": [
+            "sukienka", "dress", "spodnie", "spodenki", "jeans",
+            "bluzka", "bluzki", "zestaw", "top ", "kamizelka",
+            "sweterek", "sweter", "kardigan", "koszula",
+        ],
         "min_price": 20,
         "layer": "chaos",
         "vintage_mode": True,
@@ -863,6 +877,11 @@ SEARCHES = [
         "url":      "https://www.vinted.pl/catalog?search_text=retro+jacket&catalog[]=4&order=newest_first&currency=PLN&price_to=500",
         "category": "clothing",
         "keywords": ["retro", "jacket", "kurtka"],
+        # Fix 3 — sukienki i spodnie to nie kurtki
+        "exclude_keywords": [
+            "sukienka", "dress", "spodnie", "jeans", "spodenki",
+            "bluzka", "sweter", "sweterek", "top ",
+        ],
         "min_price": 30,
         "layer": "chaos",
         "vintage_mode": True,
@@ -872,6 +891,7 @@ SEARCHES = [
         "url":      "https://www.vinted.pl/catalog?search_text=vintage+adidas&order=newest_first&currency=PLN&price_to=400",
         "category": "clothing",
         "keywords": ["adidas", "vintage"],
+        "exclude_keywords": ["sukienka", "dress"],
         "min_price": 20,
         "layer": "chaos",
         "vintage_mode": True,
@@ -881,6 +901,11 @@ SEARCHES = [
         "url":      "https://www.vinted.pl/catalog?search_text=90s+jacket&catalog[]=4&order=newest_first&currency=PLN&price_to=500",
         "category": "clothing",
         "keywords": ["90s", "jacket", "kurtka"],
+        # Fix 3 — beżowy kardigan / bezrękawnik futerko to nie jacket
+        "exclude_keywords": [
+            "sukienka", "dress", "spodnie", "jeans", "kamizelka",
+            "sweter", "sweterek", "kardigan", "bluzka", "top ",
+        ],
         "min_price": 25,
         "layer": "chaos",
         "vintage_mode": True,
@@ -890,6 +915,7 @@ SEARCHES = [
         "url":      "https://www.vinted.pl/catalog?search_text=baggy+jeans+vintage&catalog[]=4&order=newest_first&currency=PLN&price_to=300",
         "category": "clothing",
         "keywords": ["baggy", "jeans", "vintage"],
+        "exclude_keywords": ["sukienka", "dress", "bluzka", "top ", "kurtka"],
         "min_price": 20,
         "layer": "chaos",
         "vintage_mode": True,
@@ -899,6 +925,7 @@ SEARCHES = [
         "url":      "https://www.vinted.pl/catalog?search_text=leather+jacket+vintage&catalog[]=4&order=newest_first&currency=PLN&price_to=800",
         "category": "clothing",
         "keywords": ["leather", "skórzana", "kurtka", "vintage"],
+        "exclude_keywords": ["sukienka", "dress", "spodnie", "bluzka", "top "],
         "min_price": 50,
         "layer": "chaos",
         "vintage_mode": True,
@@ -2091,13 +2118,16 @@ def check_search(search, seen, market_price):
                 _item_score_val = item_score
 
                 # ── PART 6: ANTI-SPAM ─────────────────────
-                # Odrzuć: brak zysku + brak brandu + brak vintage → śmieć
+                # Spec: if profit < 15 and not brand and not vintage → reject
+                _has_brand   = any(b in t_lo for b in BRAND_KW)
+                _has_vintage = any(v in t_lo for v in VINTAGE_KW)
+                _est_profit  = max((market_price or 0) * 1.5 - price, 0) if market_price else 0
+
                 if (
                     not lego_sw_mode and not carhartt_mode
                     and not football_mode and not grail_mode
-                    and price < 30
-                    and not any(b in t_lo for b in BRAND_KW)
-                    and not any(v in t_lo for v in VINTAGE_KW)
+                    and not _has_brand and not _has_vintage
+                    and (price < 30 or _est_profit < 15)
                 ):
                     cnt_rejected += 1
                     continue
@@ -2497,7 +2527,7 @@ while True:
         # Step 6 — sortuj DESC po confidence, wyślij max 10 per cykl
         cycle_candidates.sort(key=lambda x: x[0], reverse=True)
         sent_this_cycle = 0
-        MAX_PER_CYCLE   = 5   # FIX: max 3–5 wysokiej jakości dealów per cykl
+        MAX_PER_CYCLE   = 5
 
         for conf, search, item, eval_result, now in cycle_candidates:
             if sent_this_cycle >= MAX_PER_CYCLE:
@@ -2506,7 +2536,7 @@ while True:
 
             photo = item.get("photo") or get_item_photo(item["id"], item["link"])
 
-            # Tryby specjalne (football/lego_sw/carhartt) — zawsze standardowy format
+            # Tryby specjalne (football/lego_sw/carhartt)
             if eval_result is None:
                 msg = format_message(search, item)
                 send_message(msg, photo_url=photo, item_link=item.get("link"))
@@ -2516,23 +2546,49 @@ while True:
                 print(f"  {tag} {item['title'][:55]} | {item['price']:.0f} zł")
                 continue
 
-            if eval_result["tier"] in ("INSANE", "GOOD", "💎 GRAIL") or eval_result.get("is_grail"):
+            tier        = eval_result.get("tier")
+            is_grail    = eval_result.get("is_grail", False)
+            flip_profit = eval_result.get("flip_profit", 0)
+            confidence  = eval_result.get("confidence", 0)
+
+            # Part 7 — DEBUG_ALERTS: wysyłaj wszystko powyżej minimalnych progów
+            if DEBUG_ALERTS and flip_profit >= 15 and confidence >= 5.0:
+                engine_msg = engine.format_alert(eval_result)
+                print(f"  📤 TG SEND [DEBUG]: conf={confidence:.1f} profit={flip_profit:.0f} | {item['title'][:50]}")
+                send_message(engine_msg, photo_url=photo, item_link=item.get("link"))
+                seen[item["id"]] = now
+                sent_this_cycle += 1
+                continue
+
+            # Fix 1 — minimalne progi profitu per tier (zapobiega spam 10 zł)
+            MIN_PROFIT_TIER = {
+                "INSANE":    10,
+                "💎 GRAIL":  10,
+                "GOOD":      25,
+                "WATCH":     40,
+            }
+            min_p = MIN_PROFIT_TIER.get(tier, 40)
+            if is_grail:
+                min_p = 10   # grail override
+
+            if flip_profit < min_p and not is_grail:
+                print(f"  ⏭  profit skip ({flip_profit:.0f}<{min_p}zł) | {item['title'][:40]}")
+                seen[item["id"]] = now
+                continue
+
+            # Fix 1 — tylko INSANE/GOOD/GRAIL wysyłamy przez engine format
+            # WATCH i poniżej → tylko jeśli grail
+            if tier in ("INSANE", "GOOD", "💎 GRAIL") or is_grail:
                 engine_msg = engine.format_alert(eval_result)
                 if DEBUG_ALERTS:
                     print(f"  📤 TG SEND: {engine_msg[:80]}")
                 send_message(engine_msg, photo_url=photo, item_link=item.get("link"))
                 seen[item["id"]] = now
                 sent_this_cycle += 1
-                tier_tag = "💎" if eval_result.get("is_grail") else ("🔴" if eval_result["tier"] == "INSANE" else "🟡")
-                print(f"  {tier_tag} [{eval_result['tier']}] conf={conf:.1f} | {item['title'][:40]}")
-            elif eval_result.get("send_alert"):
-                msg = format_message(search, item)
-                send_message(msg, photo_url=photo, item_link=item.get("link"))
-                seen[item["id"]] = now
-                sent_this_cycle += 1
-                tag = "💎" if item.get("is_hidden_gem") else ("🔤" if item.get("has_typo") else "✉️")
-                print(f"  {tag} {item['title'][:55]} | {item['price']:.0f} zł")
+                tier_tag = "💎" if is_grail else ("🔴" if tier == "INSANE" else "🟡")
+                print(f"  {tier_tag} [{tier}] conf={conf:.1f} profit={flip_profit:.0f} | {item['title'][:40]}")
             else:
+                # WATCH / brak tier → pomijamy (zbyt słabe)
                 seen[item["id"]] = now
 
         save_seen(seen)
