@@ -993,7 +993,11 @@ SEARCHES = [
         "name":     "Soccer Jersey",
         "url":      "https://www.vinted.pl/catalog?search_text=soccer+jersey&catalog[]=4&order=newest_first&currency=PLN&price_to=300",
         "category": "football",
-        "keywords": ["jersey", "shirt"],
+        "keywords": ["jersey", "shirt", "soccer"],
+        "exclude_keywords": [
+            "kurtka", "jacket", "katana", "jeans", "jeanso",
+            "spodnie", "bluza", "hoodie", "coat",
+        ],
         "min_price": 15,
         "layer": "football",
         "football_mode": True,
@@ -1517,30 +1521,56 @@ def parse_items_from_html(html):
                             continue
                         seen_ids.add(item_id)
 
+                        # Fix #6 — debug: raz pokaż klucze pierwszego itemu żeby wiedzieć
+                        # jakie pola zwraca Vinted (pomaga wykryć właściwe pole czasu)
+                        if len(seen_ids) == 1 and not items:
+                            ts_keys = [k for k in entry.keys()
+                                       if any(t in k.lower() for t in
+                                              ["time", "date", "at", "ts", "push", "create", "update", "active"])]
+                            if ts_keys:
+                                print(f"  🕐 Vinted TS fields: {ts_keys} | vals: {[entry.get(k) for k in ts_keys[:4]]}")
+                            else:
+                                print(f"  🕐 Vinted keys (first 10): {list(entry.keys())[:10]}")
+
                         title = entry.get("title", "") or entry.get("name", "") or ""
                         url   = entry.get("url", "") or f"https://www.vinted.pl/items/{item_id}"
                         if not url.startswith("http"):
                             url = "https://www.vinted.pl" + url
 
-                        # Filtr czasu — tylko oferty z ostatnich 24h
+                        # Fix #6 — Vinted używa różnych nazw pola czasu w zależności od endpointu
                         created = (
                             entry.get("created_at_ts") or
                             entry.get("created_at") or
                             entry.get("last_push_up_at") or
+                            entry.get("last_push_up_at_ts") or
                             entry.get("updated_at_ts") or
+                            entry.get("updated_at") or
+                            entry.get("pushed_up_at") or
+                            entry.get("active_at") or
                             0
                         )
+
+                        # Spróbuj też ISO string: "2024-01-15T12:34:56+00:00"
+                        ts_final = None
                         if created:
                             try:
-                                ts = float(created)
-                                # Jeśli timestamp w milisekundach — przelicz
-                                if ts > 1e12:
-                                    ts = ts / 1000
-                                age_hours = (time.time() - ts) / 3600
-                                if age_hours > 24:
-                                    continue
-                            except:
-                                pass
+                                ts = float(str(created).replace(",", ""))
+                                ts_final = ts / 1000 if ts > 1e12 else ts
+                            except (ValueError, TypeError):
+                                # Spróbuj jako ISO string
+                                try:
+                                    from datetime import datetime, timezone
+                                    s = str(created).replace("Z", "+00:00")
+                                    dt = datetime.fromisoformat(s)
+                                    ts_final = dt.timestamp()
+                                except:
+                                    pass
+
+                        # Filtr czasu — tylko oferty z ostatnich 24h (gdy mamy ts)
+                        if ts_final:
+                            age_hours = (time.time() - ts_final) / 3600
+                            if age_hours > 24:
+                                continue
 
                         # cena — może być string lub float
                         raw_price = entry.get("price", "") or entry.get("price_numeric", "")
@@ -1571,9 +1601,7 @@ def parse_items_from_html(html):
                                 "price":      price,
                                 "url":        url,
                                 "photo":      photo_url,
-                                # Part 1 — sniping: zachowaj timestamp do filtrowania wieku
-                                "created_at_ts": float(created) / (1000 if float(created) > 1e12 else 1)
-                                    if created else None,
+                                "created_at_ts": ts_final,  # Fix #6 — już przeliczony
                             })
                     except:
                         continue
@@ -2592,8 +2620,14 @@ while True:
                     detected_cat   = eval_result.get("category", "?")
                     deal_tag       = eval_result.get("deal_tag", "WEAK")
 
-                    # Part 1 — relaxed skip: tylko poniżej 5.5 z DB I bez graila
-                    if has_db and conf < 5.5 and not is_grail:
+                    # Fix #2 — nie skipuj znanych brandów vintage tylko z powodu niskiego conf
+                    # DB może zaniżać wartość rzadkich modeli (ranger jacket, trucker itp.)
+                    is_known_brand = detected_brand in {
+                        "carhartt", "arcteryx", "arc'teryx", "salomon",
+                        "supreme", "palace", "stussy", "stone island",
+                        "cp company", "corteiz", "represent",
+                    }
+                    if has_db and conf < 5.5 and not is_grail and not is_known_brand:
                         if DEBUG_ALERTS:
                             print(f"  ⏭  skip conf={conf:.1f} brand={detected_brand} | {item['title'][:35]}")
                         seen[item["id"]] = now
@@ -2647,7 +2681,7 @@ while True:
             confidence  = eval_result.get("confidence", 0)
 
             # Part 7 — DEBUG_ALERTS: wysyłaj wszystko powyżej minimalnych progów
-            if DEBUG_ALERTS and flip_profit >= 15 and confidence >= 5.0:
+            if DEBUG_ALERTS and flip_profit >= 25 and confidence >= 5.5:
                 engine_msg = engine.format_alert(eval_result)
                 print(f"  📤 TG SEND [DEBUG]: conf={confidence:.1f} profit={flip_profit:.0f} | {item['title'][:50]}")
                 send_message(engine_msg, photo_url=photo, item_link=item.get("link"))
