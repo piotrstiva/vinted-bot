@@ -30,6 +30,7 @@ import os
 import time
 import requests
 from statistics import mean, median, stdev
+import statistics   # dla statistics.median w add_sample
 from collections import defaultdict
 
 
@@ -472,7 +473,65 @@ class MarketDB:
         print(f"  📊 MarketDB: {len(new_db)} grup ({vint_keys} vintage)")
         return new_db
 
-    def _clean_prices(self, prices: list[float]) -> list[float]:
+    MAX_SAMPLES    = 50
+    MAX_AGE_HOURS  = 48
+
+    def add_sample(self, key: str, price: float):
+        """
+        Part 2 spec — dodaje próbkę do bazy w czasie rzeczywistym.
+        Rolling window: wyrzuca stare (>48h) i przycina do MAX_SAMPLES.
+        Używany gdy item przejdzie quality gate — aktualizuje DB on-the-fly.
+        """
+        now = time.time()
+        if key not in self.db:
+            self.db[key] = {
+                "avg": price, "median": price, "market_price": price,
+                "p25": price, "p75": price, "min": price, "max": price,
+                "std": 0, "count": 1, "trend": "stable",
+                "is_vintage": "vintage" in key,
+                "updated": now,
+                "_samples": [],
+            }
+
+        entry = self.db[key]
+        samples = entry.get("_samples", [])
+
+        # Dodaj nową próbkę
+        samples.append({"price": price, "ts": now})
+
+        # Rolling window — usuń stare
+        samples = [
+            s for s in samples
+            if now - s["ts"] < self.MAX_AGE_HOURS * 3600
+        ]
+
+        # Cap size
+        samples = samples[-self.MAX_SAMPLES:]
+
+        prices = sorted(s["price"] for s in samples)
+        n      = len(prices)
+
+        if n >= 2:
+            med   = statistics.median(prices)
+            low_p = prices[int(n * 0.25)]
+            hi_p  = prices[int(n * 0.75)]
+            is_vk = "vintage" in key
+            entry.update({
+                "avg":          round(sum(prices) / n, 2),
+                "median":       round(med, 2),
+                "market_price": round(med * (VINTAGE_PRICE_MULT if is_vk else 1.0), 2),
+                "p25":          round(low_p, 2),
+                "p75":          round(hi_p, 2),
+                "min":          round(prices[0], 2),
+                "max":          round(prices[-1], 2),
+                "count":        n,
+                "updated":      now,
+            })
+
+        entry["_samples"] = samples
+        self.db[key] = entry
+
+
         """Part 2.6 — usuwa outlier'y względem mediany (±50%)."""
         if len(prices) < 3:
             return prices
@@ -1157,8 +1216,15 @@ class Engine:
             self.raw.save()
             self._raw_count_at_last_build = len(self.raw.items)
 
-        # 3. Lookup w bazie
-        db_data = self.db.lookup(title)
+        # 3. Lookup w bazie + add_sample (Part 2 — on-the-fly DB update)
+        is_vint   = _is_vintage(title)
+        smart_key = build_market_key(title, brand, is_vint)
+
+        # add_sample: aktualizuj DB dla każdego quality item który engine ocenia
+        if price and price >= 30 and (brand or is_vint):
+            self.db.add_sample(smart_key, price)
+
+        db_data = self.db.lookup(title, brand=brand, category=category)
         if not db_data and brand:
             db_data = self.db.lookup_by_brand_category(brand, category)
 
