@@ -41,6 +41,12 @@ MIN_SAVING_PLN   = 6       # minimalna oszczędność w zł (odrzuć 1-5 zł ró
 MAX_ALERTS_PER_SEARCH = 5  # max powiadomień per wyszukiwanie per cykl
 DEBUG_ALERTS          = True  # FIX: loguj decyzje engine (conf, profit, grail)
 
+# ─────────────────────────────────────────
+#  ⚡ SNIPER MODE
+# ─────────────────────────────────────────
+MAX_ITEM_AGE_MINUTES  = 30   # Part 2 — odrzuć itemy starsze niż X min (zmień na 10–15 gdy OK)
+SLEEP_BETWEEN_CYCLES  = 15   # Part 5 — szybszy loop (było 60s)
+
 STEAL_PRICES = {
     "sneakers": 120,
     "clothing":  30,
@@ -1560,11 +1566,14 @@ def parse_items_from_html(html):
 
                         if title:
                             items.append({
-                                "id":    item_id,
-                                "title": title,
-                                "price": price,
-                                "url":   url,
-                                "photo": photo_url,
+                                "id":         item_id,
+                                "title":      title,
+                                "price":      price,
+                                "url":        url,
+                                "photo":      photo_url,
+                                # Part 1 — sniping: zachowaj timestamp do filtrowania wieku
+                                "created_at_ts": float(created) / (1000 if float(created) > 1e12 else 1)
+                                    if created else None,
                             })
                     except:
                         continue
@@ -1993,6 +2002,47 @@ def validate_carhartt(title, description, search):
 
 
 # ─────────────────────────────────────────
+#  ⚡ SNIPER — pomocnicze funkcje czasu
+# ─────────────────────────────────────────
+def parse_item_age_minutes(item: dict) -> int:
+    """
+    Part 1 — oblicza wiek oferty w minutach.
+    Używa created_at_ts (Unix timestamp) z item dict.
+    Zwraca 9999 gdy brak danych (= stary item, zostanie odrzucony).
+    """
+    ts = item.get("created_at_ts")
+    if not ts:
+        return 9999
+    try:
+        age_sec = time.time() - float(ts)
+        return max(0, int(age_sec / 60))
+    except:
+        return 9999
+
+
+def parse_item_age_minutes_from_text(created_at_text: str) -> int:
+    """
+    Fallback — parsuje tekst w stylu '5 minutes ago', '2 hours ago'.
+    """
+    t = created_at_text.lower()
+    nums = re.findall(r'\d+', t)
+    if not nums:
+        return 9999
+    n = int(nums[0])
+    if "min" in t:
+        return n
+    if "hour" in t or " h" in t:
+        return n * 60
+    if "day" in t:
+        return n * 1440
+    return 9999
+
+
+# Part 4 — in-memory seen set (szybszy niż disk dla sniping)
+_SNIPER_SEEN: set[str] = set()
+
+
+# ─────────────────────────────────────────
 #  🕵️ SPRAWDZANIE OFERT (HTML scraping)
 # ─────────────────────────────────────────
 def check_search(search, seen, market_price):
@@ -2013,9 +2063,30 @@ def check_search(search, seen, market_price):
 
         items = parse_items_from_html(r.text)
         print(f"[{search['name']}] Ofert na stronie: {len(items)}")
+
+        # Part 3 — sortuj od najnowszych (najniższy wiek = najświeższy)
+        items = sorted(items, key=lambda x: parse_item_age_minutes(x))
+
+        # Part 2 — hard time filter: odrzuć stare itemy
+        fresh_items = []
+        for it in items:
+            age = parse_item_age_minutes(it)
+            if age <= MAX_ITEM_AGE_MINUTES:
+                fresh_items.append(it)
+            # Gdy brak ts (age=9999) przepuść — nie mamy danych
+            elif age == 9999:
+                fresh_items.append(it)
+        items = fresh_items
+
+        if not items:
+            print(f"  ⏰ Brak świeżych ofert (< {MAX_ITEM_AGE_MINUTES} min)")
+            return [], []
+
         # Debug — pokaż pierwsze 2 tytuły żeby sprawdzić czy dane są poprawne
         for dbg in items[:2]:
-            print(f"  🔍 '{dbg['title'][:60]}' | {dbg['price']} zł")
+            age_dbg = parse_item_age_minutes(dbg)
+            age_str = f"{age_dbg}min" if age_dbg < 9999 else "?"
+            print(f"  🔍 '{dbg['title'][:60]}' | {dbg['price']} zł | ⏱ {age_str}")
 
         hidden_gem_mode = search.get("hidden_gem_mode", False)
         football_mode   = search.get("football_mode", False)
@@ -2030,6 +2101,20 @@ def check_search(search, seen, market_price):
                 title   = item.get("title", "")
                 href    = item.get("url", "")
                 price   = item.get("price")
+
+                # Part 4 — in-memory sniper seen (szybszy niż disk seen)
+                if item_id in _SNIPER_SEEN:
+                    cnt_seen += 1
+                    continue
+                _SNIPER_SEEN.add(item_id)
+                # Trzymaj małą pamięć
+                if len(_SNIPER_SEEN) > 5000:
+                    _SNIPER_SEEN.clear()
+
+                # Part 7 — debug age
+                age_min = parse_item_age_minutes(item)
+                if age_min < 9999 and DEBUG_ALERTS:
+                    print(f"  📤 NEW ITEM: {title[:60]} | age={age_min}min | {price} zł")
 
                 if not item_id or item_id in seen:
                     cnt_seen += 1
@@ -2233,6 +2318,7 @@ def check_search(search, seen, market_price):
                     "photo": item.get("photo"),
                     "item_score": _item_score_val,   # Part 2.1 — dla should_add_to_db
                     "ts": time.time(),                # Part 2.5 — dla rolling window
+                    "age_min": age_min,               # Part 6 — sniper age boost
                 })
 
                 # BOT #1 — stop early gdy mamy wystarczająco dużo itemów
@@ -2488,6 +2574,15 @@ while True:
                 # ── Engine evaluation ─────────────────
                 if engine:
                     eval_result    = engine.evaluate(item, search, market_price)
+                    # Part 6 — SNIPER BOOST: bardzo świeże itemy (≤ 3 min) → boost
+                    age_min = item.get("age_min", 9999)
+                    if age_min <= 3:
+                        eval_result = dict(eval_result)
+                        eval_result["confidence"]  = min(eval_result["confidence"] + 1.0, 10.0)
+                        eval_result["flip_profit"] = eval_result.get("flip_profit", 0) + 5
+                        if DEBUG_ALERTS:
+                            print(f"  ⚡ SNIPER BOOST (age={age_min}min) | {item['title'][:40]}")
+
                     conf           = eval_result["confidence"]
                     has_db         = eval_result.get("db_data") is not None
                     flip_speed     = eval_result.get("scoring", {}).get("flip_speed", "MEDIUM")
@@ -2592,7 +2687,7 @@ while True:
                 seen[item["id"]] = now
 
         save_seen(seen)
-        time.sleep(60)
+        time.sleep(SLEEP_BETWEEN_CYCLES)
 
     except Exception as e:
         print(f"Błąd głównej pętli: {e}")
