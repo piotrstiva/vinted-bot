@@ -1465,75 +1465,92 @@ class Engine:
             description=item.get("description", ""),
         )
 
-        # ── Part 1: FRESHNESS SYSTEM ────────────────────────────
+        # ── FRESHNESS SYSTEM — 3-TIER ────────────────────────────
         _has_brand   = bool(brand)
         _has_vintage = _is_vintage(title)
         item_age_ts  = item.get("created_at_ts")
-        item_age_minutes = int((time.time() - item_age_ts) / 60) if item_age_ts else None
-        item_age_hours   = (item_age_minutes / 60) if item_age_minutes is not None else None
+        # If no ts: treat as AGED tier (360 min) — keeps DB learning alive
+        item_age_minutes = int((time.time() - item_age_ts) / 60) if item_age_ts else 360
 
-        # PART 1 — CRITICAL: skip items with no age data
-        if item_age_minutes is None:
-            return {
-                "send_alert": False, "tier": None,
-                "confidence": 0, "scoring": scoring,
-                "ai_data": ai_data, "db_data": db_data,
-                "brand": brand, "category": category,
-                "flip_profit": scoring.get("flip_profit", 0), "item": item,
-                "market_price": market_price, "is_grail": False,
-                "grail_score": 0, "deal_tag": "WEAK",
-                "flip_speed": "MEDIUM", "item_age_min": None,
-                "undervalue_ratio": 1.0,
-                "_skip_reason": "no_age_data",
-            }
-
-        # PART 3 — Grail detection (needed before hard filters)
+        # ── Grail + undervalue needed before freshness gate ──────
         anomaly_sc   = scoring.get("anomaly_score", 0)
         deal_tag     = scoring.get("deal_tag", "WEAK")
         g_score, is_grail = grail_score(title, anomaly_sc, deal_tag)
 
-        # PART 8 — Smart undervaluation (needed before hard filters)
         estimated_market_price = (
             scoring.get("market_price_db") or
             (db_data["avg"] if db_data else None) or
             ai_data.get("estimated_value")
         )
-        # PART 6 — Heuristic pricing when no DB data
         if not estimated_market_price:
             if brand in PREMIUM_BRANDS:
                 estimated_market_price = price * 1.6
             elif "vintage" in title.lower():
                 estimated_market_price = price * 1.4
-        undervalue_ratio = (price / estimated_market_price) if estimated_market_price else 1.0
+        undervalue_ratio  = (price / estimated_market_price) if estimated_market_price else 1.0
         strong_undervalue = undervalue_ratio < 0.6
 
-        # PART 1 — Hard freshness filter: >60min → skip unless grail or strong undervalue
-        if item_age_minutes > 60:
-            if not is_grail and not strong_undervalue:
+        # ── PART 2 — DB learning always happens regardless of freshness ──
+        if brand and category:
+            smart_key_learn = build_market_key(title, brand, _is_vintage(title))
+            if smart_key_learn and price >= 30:
+                self.db.add_sample(smart_key_learn, price)
+
+        # ── TIER ASSIGNMENT & CONFIDENCE BOOST ──────────────────
+        confidence  = scoring["confidence"]
+        flip_speed  = "MEDIUM"
+
+        if item_age_minutes <= 10:
+            # 🟢 TIER 1 — ULTRA FRESH
+            freshness_tier = "ULTRA"
+            confidence     = min(confidence + 3.0, 10.0)
+            flip_speed     = "FAST"
+        elif item_age_minutes <= 60:
+            # 🟡 TIER 2 — FRESH
+            freshness_tier = "FRESH"
+            confidence     = min(confidence + 1.0, 10.0)
+        elif item_age_minutes <= 360:
+            # 🔵 TIER 3 — AGED (1–6 hours): only allow if grail or strong undervalue
+            freshness_tier = "AGED"
+            if not strong_undervalue and not is_grail:
+                # Still let DB learn, then skip alert
+                if DEBUG_ALERTS:
+                    print(f"  ⏭  AGED skip (age={item_age_minutes}m, no undervalue/grail) | {title[:35]}")
                 return {
                     "send_alert": False, "tier": None,
-                    "confidence": scoring["confidence"], "scoring": scoring,
+                    "confidence": confidence, "scoring": scoring,
                     "ai_data": ai_data, "db_data": db_data,
                     "brand": brand, "category": category,
                     "flip_profit": scoring.get("flip_profit", 0), "item": item,
-                    "market_price": market_price, "is_grail": False,
+                    "market_price": market_price, "is_grail": is_grail,
                     "grail_score": g_score, "deal_tag": deal_tag,
                     "flip_speed": "SLOW", "item_age_min": item_age_minutes,
                     "undervalue_ratio": round(undervalue_ratio, 3),
-                    "_skip_reason": "too_old",
+                    "_skip_reason": "aged_no_signal",
+                    "freshness_tier": freshness_tier,
                 }
+        else:
+            # ❌ HARD REJECT — older than 6 hours
+            freshness_tier = "STALE"
+            if DEBUG_ALERTS:
+                print(f"  ❌ STALE reject (age={item_age_minutes}m) | {title[:35]}")
+            return {
+                "send_alert": False, "tier": None,
+                "confidence": confidence, "scoring": scoring,
+                "ai_data": ai_data, "db_data": db_data,
+                "brand": brand, "category": category,
+                "flip_profit": scoring.get("flip_profit", 0), "item": item,
+                "market_price": market_price, "is_grail": False,
+                "grail_score": g_score, "deal_tag": deal_tag,
+                "flip_speed": "SLOW", "item_age_min": item_age_minutes,
+                "undervalue_ratio": round(undervalue_ratio, 3),
+                "_skip_reason": "stale",
+                "freshness_tier": freshness_tier,
+            }
 
-        # PART 1 — Boost very fresh items
-        confidence  = scoring["confidence"]
-        flip_speed  = "MEDIUM"
-        if item_age_minutes <= 5:
-            confidence = min(confidence + 3.0, 10.0)
-            flip_speed = "FAST"
-        elif item_age_minutes <= 10:
-            confidence = min(confidence + 2.0, 10.0)
-            flip_speed = "FAST"
-        elif item_age_minutes <= 30:
-            confidence = min(confidence + 0.5, 10.0)
+        # PART 4 — Debug freshness log
+        if DEBUG_ALERTS:
+            print(f"  ⏱ age={item_age_minutes}m tier={freshness_tier} | {title[:40]}")
 
         ai_decision  = ai_data.get("decision", "SKIP")
         flip_profit  = scoring["flip_profit"]
@@ -1733,6 +1750,7 @@ class Engine:
             "flip_speed":    flip_speed,
             "item_age_min":  item_age_minutes,
             "undervalue_ratio": round(undervalue_ratio, 3),
+            "freshness_tier": freshness_tier,
         }
 
     # ── HEURYSTYCZNY AI (bez Claude) ─────────
