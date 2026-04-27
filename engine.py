@@ -54,7 +54,7 @@ CONFIDENCE_WATCH   = 5.5   # ⚪ WATCH — obniżone z 6.0 (więcej alertów)
 
 DB_MIN_SAMPLES     = 5     # Part 2.7 — minimum próbek (podwyższone dla jakości)
 DB_BUILD_EVERY     = 100   # buduj DB co N nowych itemów (częściej)
-FLIP_MIN_PROFIT    = 30    # Fix #6 — min profit = 30 zł (twarda granica)
+FLIP_MIN_PROFIT    = 25    # Part 5 — obniżone z 30 → 25 zł
 FAKE_LUXURY_RATIO  = 0.35
 
 # Part 2 — rolling window
@@ -1407,9 +1407,15 @@ class Engine:
             description=item.get("description", ""),
         )
 
+        # ── Part 1: DEFINE VARIABLES BEFORE ANY FILTERING ──────────
+        _has_brand   = bool(brand)
+        _has_vintage = _is_vintage(title)
+        item_age_ts  = item.get("created_at_ts")
+        item_age_minutes = int((time.time() - item_age_ts) / 60) if item_age_ts else 9999
+        item_age_hours   = item_age_minutes / 60
+
         # 6. Fake risk — zmniejsz confidence
         if scoring["fake_risk"]:
-            # FIX #9 — silna kara za fake luxury
             scoring["confidence"] = max(scoring["confidence"] - 2.0, 0.0)
 
         # 7. Decyzja
@@ -1423,8 +1429,34 @@ class Engine:
         if confidence < 5.0:
             ai_decision = "SKIP"
 
-        # Part 3 — Grail detection
+        # Part 3 — Grail detection (przed flip_min żeby is_grail był zdefiniowany)
         g_score, is_grail = grail_score(title, anomaly_sc, deal_tag)
+
+        # Part 5 — FLIP_MIN_PROFIT = 25
+        flip_min = 10 if is_grail else FLIP_MIN_PROFIT
+
+        # Part 6 — Fresh listing boost (≤ 10 min → +2 confidence, FAST speed)
+        flip_speed = "MEDIUM"
+        if item_age_minutes <= 10:
+            confidence = min(confidence + 2.0, 10.0)
+            flip_speed = "FAST"
+        elif item_age_minutes <= 30:
+            confidence = min(confidence + 0.5, 10.0)
+
+        # Part 7 — Old listing filter (> 24h → skip unless grail or strong deal)
+        if item_age_hours > 24 and item_age_minutes < 9999:
+            deal_score = scoring.get("deal_score", 0)
+            strong_undervalue = deal_score > 0.4
+            if not is_grail and not strong_undervalue:
+                return {
+                    "send_alert": False, "tier": None,
+                    "confidence": confidence, "scoring": scoring,
+                    "ai_data": ai_data, "db_data": db_data,
+                    "brand": brand, "category": category,
+                    "flip_profit": flip_profit, "item": item,
+                    "market_price": market_price, "is_grail": False,
+                    "grail_score": g_score, "deal_tag": deal_tag,
+                }
 
         # Force alert: cena < 50% avg DB
         force_alert = (
@@ -1434,14 +1466,46 @@ class Engine:
 
         tier = get_alert_tier(confidence, ai_decision)
 
-        # Fix #8 — BLOCK items without brand and without grail signal
-        if not brand and not is_grail:
-            send_alert = False
-            if DEBUG_ALERTS:
-                print(f"  ⛔ no-brand skip: {title[:40]}")
-        else:
-            min_profit = 10 if is_grail else FLIP_MIN_PROFIT
+        # Part 8 — Smart undervaluation
+        estimated_market_price = (
+            scoring.get("market_price_db") or
+            (db_data["avg"] if db_data else None) or
+            ai_data.get("estimated_value")
+        )
+        undervalue_ratio = (price / estimated_market_price) if estimated_market_price else 1.0
 
+        # Part 8 — Undervalue boosts
+        if undervalue_ratio < 0.6:
+            confidence = min(confidence + 2.0, 10.0)
+            deal_tag = "STEAL"
+        elif undervalue_ratio < 0.75:
+            confidence = min(confidence + 1.0, 10.0)
+            if deal_tag == "WEAK":
+                deal_tag = "GOOD"
+
+        # Part 3 — High value mode (items 150+ zł)
+        high_value = price >= 150
+        if high_value and estimated_market_price:
+            if price < estimated_market_price * 0.75:
+                confidence = min(confidence + 2.0, 10.0)
+                flip_profit = max(flip_profit, estimated_market_price * 0.25)
+
+        # Part 4 — Fallback category key for DB (vintage without brand)
+        if not brand and _has_vintage and category:
+            fallback_key = f"{category}_generic"
+            if fallback_key not in self.db.db:
+                self.db.add_sample(fallback_key, price)
+
+        # Part 2 — Relaxed no-brand rule (allows good vintage)
+        if not _has_brand:
+            if not is_grail and confidence < 7.0:
+                send_alert = False
+                if DEBUG_ALERTS:
+                    print(f"  ⛔ no-brand (conf={confidence:.1f}<7): {title[:35]}")
+            else:
+                # Good vintage without brand — allow
+                send_alert = True
+        else:
             effective_price  = scoring.get("effective_price", price)
             market_price_db  = scoring.get("market_price_db")
             price_undervalue = (
@@ -1449,18 +1513,25 @@ class Engine:
                 effective_price < market_price_db * 0.85
             )
 
-            # Fix #6+7 — FINAL ALERT RULE: profit >= 30 AND confidence >= 6
-            send_alert = (
-                (flip_profit >= 30 and confidence >= 6.0)
-                or (is_grail and flip_profit >= 10)
-                or (price_undervalue and confidence >= 6.0)
-                or (force_alert and confidence >= 5.5)
-            )
+            # Part 9 — Grail override
+            if is_grail:
+                send_alert = flip_profit >= 10
+            else:
+                # Final alert rule
+                send_alert = (
+                    (flip_profit >= flip_min and confidence >= 6.0)
+                    or (price_undervalue and confidence >= 5.5)
+                    or (high_value and undervalue_ratio < 0.75 and confidence >= 5.0)
+                    or (force_alert and confidence >= 5.5)
+                )
 
+        # Part 10 — Debug logging
         if DEBUG_ALERTS:
-            tag = "💎 GRAIL" if is_grail else tier or "—"
-            print(f"  🔎 conf={confidence:.1f} profit={flip_profit:.0f} "
-                  f"deal={deal_tag} grail={g_score} brand={brand} | {title[:35]}")
+            age_str = f"{item_age_minutes}m" if item_age_minutes < 9999 else "?"
+            action  = "📤 SEND" if send_alert else "⏭  SKIP"
+            print(f"  {action} | price={price:.0f} profit={flip_profit:.0f} "
+                  f"conf={confidence:.1f} brand={brand or '—'} "
+                  f"age={age_str} grail={g_score} | {title[:30]}")
 
         # Deduplicacja sesyjna
         item_id = str(item.get("id", ""))
@@ -1487,6 +1558,9 @@ class Engine:
             "is_grail":      is_grail,
             "grail_score":   g_score,
             "deal_tag":      deal_tag,
+            "flip_speed":    flip_speed,
+            "item_age_min":  item_age_minutes,
+            "undervalue_ratio": round(undervalue_ratio, 3),
         }
 
     # ── HEURYSTYCZNY AI (bez Claude) ─────────
@@ -1617,7 +1691,12 @@ class Engine:
         price     = item.get("price", 0)
         title     = item.get("title", "")
         brand     = result.get("brand") or ""
-        flip      = result.get("flip_profit", 0)
+        flip        = result.get("flip_profit", 0)
+        flip_speed  = result.get("flip_speed", "MEDIUM")
+        age_min     = result.get("item_age_min", 9999)
+        uv_ratio    = result.get("undervalue_ratio", 1.0)
+        age_str     = f"{age_min}min" if age_min < 9999 else "?"
+        speed_emoji = {"FAST": "⚡", "MEDIUM": "📦", "SLOW": "🐢"}.get(flip_speed, "📦")
 
         # Tytuł bez metadanych Vinted
         clean = re.sub(r',?\s*(marka|stan|rozmiar):.*', '', title, flags=re.IGNORECASE).strip()
@@ -1660,7 +1739,17 @@ class Engine:
             lines.append(f"📈  Mediana:     {result['market_price']:.0f} zł")
 
         if flip > FLIP_MIN_PROFIT:
-            lines.append(f"💚  Flip profit: ~{flip:.0f} zł")
+            lines.append(f"💚  Flip profit: ~{flip:.0f} zł  {speed_emoji} {flip_speed}")
+
+        # Part 10 — age + undervalue in alert
+        meta = []
+        if age_min < 9999:
+            meta.append(f"⏱ {age_str}")
+        if uv_ratio < 1.0:
+            pct = int((1 - uv_ratio) * 100)
+            meta.append(f"📉 -{pct}% vs rynek")
+        if meta:
+            lines.append("   ".join(meta))
 
         trend = scoring.get("trend", "stable")
         if trend == "rising":
