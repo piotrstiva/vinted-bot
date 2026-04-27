@@ -131,6 +131,46 @@ VINTAGE_BRANDS = {
 HYPE_BRANDS.update(PREMIUM_BRANDS)
 
 # ─────────────────────────────────────────────────────
+#  🚫 PART 2 — FAKE MERCH FILTER
+# ─────────────────────────────────────────────────────
+FAKE_MERCH_BRANDS = {"alternative", "hm", "h&m", "zara", "bershka", "sinsay", "reserved"}
+MERCH_KEYWORDS    = ["nirvana", "metallica", "harley", "band", "movie", "tour", "acdc", "ac/dc"]
+
+# ─────────────────────────────────────────────────────
+#  🎸 PART 3 — REAL VINTAGE SIGNALS (strict)
+# ─────────────────────────────────────────────────────
+REAL_VINTAGE_KEYWORDS = [
+    "single stitch",
+    "made in usa",
+    "screen stars",
+    "fruit of the loom",
+    "hanes",
+    "brockum",
+    "liquid blue",
+    "deadstock",
+    "band tee",
+    "tour tee",
+    "concert tee",
+    "rap tee",
+    "nutmeg",
+    "salem sportswear",
+]
+
+# ─────────────────────────────────────────────────────
+#  ⚽ PART 4 — FOOTBALL QUALITY FILTERS
+# ─────────────────────────────────────────────────────
+BAD_FOOTBALL_KEYWORDS  = ["damska", "women", "crop", "baby", "kids", "dziecięca", "dziewczęca"]
+GOOD_FOOTBALL_CLUBS    = ["barcelona", "arsenal", "milan", "real madrid", "chelsea", "manchester",
+                           "juventus", "liverpool", "ajax", "dortmund", "psg", "atletico"]
+GOOD_FOOTBALL_BRANDS   = {"nike", "adidas", "umbro", "kappa", "puma", "lotto", "diadora",
+                           "hummel", "le coq sportif", "reebok", "score draw", "admiral"}
+
+# ─────────────────────────────────────────────────────
+#  🧱 PART 5 — LEGO FILTERS
+# ─────────────────────────────────────────────────────
+LEGO_MINIFIG_KEYWORDS = ["minifig", "figur", "figurk", "minifigurk"]
+
+# ─────────────────────────────────────────────────────
 #  🔤 NORMALIZACJA TYTUŁU
 # ─────────────────────────────────────────────────────
 _STOP_WORDS = {
@@ -152,6 +192,24 @@ _NOISE_WORDS = {
     "rare", "nowy", "new", "stan", "okazja", "sale",
     "polecam", "tanio", "super", "hit", "top", "ideał",
 }
+
+
+# ─────────────────────────────────────────────────────
+#  🔧 HELPER FUNCTIONS
+# ─────────────────────────────────────────────────────
+def contains_keywords(text: str, keywords: list) -> bool:
+    """True if any keyword from the list appears in the lowercased text."""
+    t = text.lower()
+    return any(k.lower() in t for k in keywords)
+
+
+def contains_year(text: str, year_from: int, year_to: int) -> bool:
+    """True if any 4-digit year in range [year_from, year_to] appears in text."""
+    years = re.findall(r'\b(1\d{3}|20\d{2})\b', text)
+    for y in years:
+        if year_from <= int(y) <= year_to:
+            return True
+    return False
 
 
 def normalize_title(title: str) -> str:
@@ -1407,74 +1465,176 @@ class Engine:
             description=item.get("description", ""),
         )
 
-        # ── Part 1: DEFINE VARIABLES BEFORE ANY FILTERING ──────────
+        # ── Part 1: FRESHNESS SYSTEM ────────────────────────────
         _has_brand   = bool(brand)
         _has_vintage = _is_vintage(title)
         item_age_ts  = item.get("created_at_ts")
-        item_age_minutes = int((time.time() - item_age_ts) / 60) if item_age_ts else 9999
-        item_age_hours   = item_age_minutes / 60
+        item_age_minutes = int((time.time() - item_age_ts) / 60) if item_age_ts else None
+        item_age_hours   = (item_age_minutes / 60) if item_age_minutes is not None else None
 
-        # 6. Fake risk — zmniejsz confidence
-        if scoring["fake_risk"]:
-            scoring["confidence"] = max(scoring["confidence"] - 2.0, 0.0)
+        # PART 1 — CRITICAL: skip items with no age data
+        if item_age_minutes is None:
+            return {
+                "send_alert": False, "tier": None,
+                "confidence": 0, "scoring": scoring,
+                "ai_data": ai_data, "db_data": db_data,
+                "brand": brand, "category": category,
+                "flip_profit": scoring.get("flip_profit", 0), "item": item,
+                "market_price": market_price, "is_grail": False,
+                "grail_score": 0, "deal_tag": "WEAK",
+                "flip_speed": "MEDIUM", "item_age_min": None,
+                "undervalue_ratio": 1.0,
+                "_skip_reason": "no_age_data",
+            }
 
-        # 7. Decyzja
-        confidence   = scoring["confidence"]
-        ai_decision  = ai_data.get("decision", "SKIP")
-        flip_profit  = scoring["flip_profit"]
-        deal_tag     = scoring.get("deal_tag", "WEAK")
+        # PART 3 — Grail detection (needed before hard filters)
         anomaly_sc   = scoring.get("anomaly_score", 0)
-
-        # Confidence floor
-        if confidence < 5.0:
-            ai_decision = "SKIP"
-
-        # Part 3 — Grail detection (przed flip_min żeby is_grail był zdefiniowany)
+        deal_tag     = scoring.get("deal_tag", "WEAK")
         g_score, is_grail = grail_score(title, anomaly_sc, deal_tag)
 
-        # Part 5 — FLIP_MIN_PROFIT = 25
-        flip_min = 10 if is_grail else FLIP_MIN_PROFIT
+        # PART 8 — Smart undervaluation (needed before hard filters)
+        estimated_market_price = (
+            scoring.get("market_price_db") or
+            (db_data["avg"] if db_data else None) or
+            ai_data.get("estimated_value")
+        )
+        # PART 6 — Heuristic pricing when no DB data
+        if not estimated_market_price:
+            if brand in PREMIUM_BRANDS:
+                estimated_market_price = price * 1.6
+            elif "vintage" in title.lower():
+                estimated_market_price = price * 1.4
+        undervalue_ratio = (price / estimated_market_price) if estimated_market_price else 1.0
+        strong_undervalue = undervalue_ratio < 0.6
 
-        # Part 6 — Fresh listing boost (≤ 10 min → +2 confidence, FAST speed)
-        flip_speed = "MEDIUM"
-        if item_age_minutes <= 10:
+        # PART 1 — Hard freshness filter: >60min → skip unless grail or strong undervalue
+        if item_age_minutes > 60:
+            if not is_grail and not strong_undervalue:
+                return {
+                    "send_alert": False, "tier": None,
+                    "confidence": scoring["confidence"], "scoring": scoring,
+                    "ai_data": ai_data, "db_data": db_data,
+                    "brand": brand, "category": category,
+                    "flip_profit": scoring.get("flip_profit", 0), "item": item,
+                    "market_price": market_price, "is_grail": False,
+                    "grail_score": g_score, "deal_tag": deal_tag,
+                    "flip_speed": "SLOW", "item_age_min": item_age_minutes,
+                    "undervalue_ratio": round(undervalue_ratio, 3),
+                    "_skip_reason": "too_old",
+                }
+
+        # PART 1 — Boost very fresh items
+        confidence  = scoring["confidence"]
+        flip_speed  = "MEDIUM"
+        if item_age_minutes <= 5:
+            confidence = min(confidence + 3.0, 10.0)
+            flip_speed = "FAST"
+        elif item_age_minutes <= 10:
             confidence = min(confidence + 2.0, 10.0)
             flip_speed = "FAST"
         elif item_age_minutes <= 30:
             confidence = min(confidence + 0.5, 10.0)
 
-        # Part 7 — Old listing filter (> 24h → skip unless grail or strong deal)
-        if item_age_hours > 24 and item_age_minutes < 9999:
-            deal_score = scoring.get("deal_score", 0)
-            strong_undervalue = deal_score > 0.4
-            if not is_grail and not strong_undervalue:
+        ai_decision  = ai_data.get("decision", "SKIP")
+        flip_profit  = scoring["flip_profit"]
+
+        # PART 2 — FAKE MERCH FILTER
+        t_lower = title.lower()
+        fake_merch = (
+            brand in FAKE_MERCH_BRANDS and
+            contains_keywords(title, MERCH_KEYWORDS)
+        )
+        if fake_merch:
+            confidence = max(confidence - 5.0, 0.0)
+            if DEBUG_ALERTS:
+                print(f"  🚫 FAKE MERCH: brand={brand} title={title[:40]}")
+
+        # PART 3 — REAL VINTAGE SIGNAL BOOST
+        if contains_keywords(title, REAL_VINTAGE_KEYWORDS):
+            confidence = min(confidence + 3.0, 10.0)
+
+        # PART 4 — FOOTBALL QUALITY FILTER
+        if category == "jersey" or search.get("football_mode"):
+            # Reject bad football items
+            if contains_keywords(title, BAD_FOOTBALL_KEYWORDS):
+                if DEBUG_ALERTS:
+                    print(f"  ⛔ BAD FOOTBALL KW: {title[:40]}")
                 return {
                     "send_alert": False, "tier": None,
                     "confidence": confidence, "scoring": scoring,
                     "ai_data": ai_data, "db_data": db_data,
                     "brand": brand, "category": category,
                     "flip_profit": flip_profit, "item": item,
-                    "market_price": market_price, "is_grail": False,
+                    "market_price": market_price, "is_grail": is_grail,
                     "grail_score": g_score, "deal_tag": deal_tag,
+                    "flip_speed": flip_speed, "item_age_min": item_age_minutes,
+                    "undervalue_ratio": round(undervalue_ratio, 3),
+                    "_skip_reason": "bad_football",
+                }
+            # Require at least one quality signal
+            good_club_match  = contains_keywords(title, GOOD_FOOTBALL_CLUBS)
+            good_brand_match = brand in GOOD_FOOTBALL_BRANDS
+            year_match       = contains_year(title, 1990, 2010)
+            if not (good_club_match or good_brand_match or year_match):
+                if DEBUG_ALERTS:
+                    print(f"  ⛔ NO QUALITY FOOTBALL SIGNAL: {title[:40]}")
+                return {
+                    "send_alert": False, "tier": None,
+                    "confidence": confidence, "scoring": scoring,
+                    "ai_data": ai_data, "db_data": db_data,
+                    "brand": brand, "category": category,
+                    "flip_profit": flip_profit, "item": item,
+                    "market_price": market_price, "is_grail": is_grail,
+                    "grail_score": g_score, "deal_tag": deal_tag,
+                    "flip_speed": flip_speed, "item_age_min": item_age_minutes,
+                    "undervalue_ratio": round(undervalue_ratio, 3),
+                    "_skip_reason": "low_quality_football",
                 }
 
-        # Force alert: cena < 50% avg DB
-        force_alert = (
-            db_data is not None and
-            price < db_data["avg"] * 0.50
-        )
+        # PART 5 — LEGO SYSTEM
+        if "lego" in t_lower or search.get("lego_sw_mode") or search.get("category") == "lego":
+            is_minifig = contains_keywords(title, LEGO_MINIFIG_KEYWORDS)
+            is_set     = any(char.isdigit() for char in title)
+            is_sw_lego = "star wars" in t_lower
+            if is_minifig:
+                if price > 25:
+                    if DEBUG_ALERTS:
+                        print(f"  ⛔ LEGO MINIFIG TOO EXPENSIVE price={price}: {title[:40]}")
+                    return {
+                        "send_alert": False, "tier": None,
+                        "confidence": confidence, "scoring": scoring,
+                        "ai_data": ai_data, "db_data": db_data,
+                        "brand": brand, "category": category,
+                        "flip_profit": flip_profit, "item": item,
+                        "market_price": market_price, "is_grail": is_grail,
+                        "grail_score": g_score, "deal_tag": deal_tag,
+                        "flip_speed": flip_speed, "item_age_min": item_age_minutes,
+                        "undervalue_ratio": round(undervalue_ratio, 3),
+                        "_skip_reason": "lego_minifig_overpriced",
+                    }
+            if is_set:
+                confidence = min(confidence + 2.0, 10.0)
+            if is_sw_lego:
+                confidence = min(confidence + 2.0, 10.0)
 
-        tier = get_alert_tier(confidence, ai_decision)
+        # PART 7 — CONTEXTUAL SCORING (additive on top of confidence)
+        ctx_score = 0
+        if brand:
+            ctx_score += 2
+        if contains_keywords(title, REAL_VINTAGE_KEYWORDS):
+            ctx_score += 3
+        if strong_undervalue:
+            ctx_score += 2
+        if price >= 150:
+            ctx_score += 2
+        if item_age_minutes <= 5:
+            ctx_score += 3
+        if fake_merch:
+            ctx_score -= 5
+        # Blend: ctx_score drives a small nudge rather than overriding confidence
+        confidence = min(max(confidence + ctx_score * 0.15, 0.0), 10.0)
 
-        # Part 8 — Smart undervaluation
-        estimated_market_price = (
-            scoring.get("market_price_db") or
-            (db_data["avg"] if db_data else None) or
-            ai_data.get("estimated_value")
-        )
-        undervalue_ratio = (price / estimated_market_price) if estimated_market_price else 1.0
-
-        # Part 8 — Undervalue boosts
+        # PART 8 — UNDERVALUE BOOSTS
         if undervalue_ratio < 0.6:
             confidence = min(confidence + 2.0, 10.0)
             deal_tag = "STEAL"
@@ -1483,27 +1643,41 @@ class Engine:
             if deal_tag == "WEAK":
                 deal_tag = "GOOD"
 
-        # Part 3 — High value mode (items 150+ zł)
+        # Confidence floor
+        if confidence < 5.0:
+            ai_decision = "SKIP"
+
+        # Part 5 — FLIP_MIN_PROFIT = 25
+        flip_min = 10 if is_grail else FLIP_MIN_PROFIT
+
+        # Force alert: price < 50% avg DB
+        force_alert = (
+            db_data is not None and
+            price < db_data["avg"] * 0.50
+        )
+
+        tier = get_alert_tier(confidence, ai_decision)
+
+        # High value mode (items 150+ zł)
         high_value = price >= 150
         if high_value and estimated_market_price:
             if price < estimated_market_price * 0.75:
                 confidence = min(confidence + 2.0, 10.0)
                 flip_profit = max(flip_profit, estimated_market_price * 0.25)
 
-        # Part 4 — Fallback category key for DB (vintage without brand)
+        # Fallback category key for DB (vintage without brand)
         if not brand and _has_vintage and category:
             fallback_key = f"{category}_generic"
             if fallback_key not in self.db.db:
                 self.db.add_sample(fallback_key, price)
 
-        # Part 2 — Relaxed no-brand rule (allows good vintage)
+        # PART 8 — FINAL ALERT LOGIC
         if not _has_brand:
             if not is_grail and confidence < 7.0:
                 send_alert = False
                 if DEBUG_ALERTS:
                     print(f"  ⛔ no-brand (conf={confidence:.1f}<7): {title[:35]}")
             else:
-                # Good vintage without brand — allow
                 send_alert = True
         else:
             effective_price  = scoring.get("effective_price", price)
@@ -1512,26 +1686,24 @@ class Engine:
                 market_price_db is not None and
                 effective_price < market_price_db * 0.85
             )
-
-            # Part 9 — Grail override
             if is_grail:
                 send_alert = flip_profit >= 10
             else:
-                # Final alert rule
+                # PART 8 — upgraded final alert rule
                 send_alert = (
-                    (flip_profit >= flip_min and confidence >= 6.0)
+                    (flip_profit >= 25 and confidence >= 6.0)
+                    or (is_grail and flip_profit >= 10)
+                    or (strong_undervalue and confidence >= 6.0)
                     or (price_undervalue and confidence >= 5.5)
                     or (high_value and undervalue_ratio < 0.75 and confidence >= 5.0)
                     or (force_alert and confidence >= 5.5)
                 )
 
-        # Part 10 — Debug logging
+        # PART 9 — DEBUG LOGGING
         if DEBUG_ALERTS:
-            age_str = f"{item_age_minutes}m" if item_age_minutes < 9999 else "?"
+            age_str = f"{item_age_minutes}m"
             action  = "📤 SEND" if send_alert else "⏭  SKIP"
-            print(f"  {action} | price={price:.0f} profit={flip_profit:.0f} "
-                  f"conf={confidence:.1f} brand={brand or '—'} "
-                  f"age={age_str} grail={g_score} | {title[:30]}")
+            print(f"  {action} | {title[:50]} | price={price} | profit={flip_profit:.0f} | conf={confidence:.1f} | age={age_str}m")
 
         # Deduplicacja sesyjna
         item_id = str(item.get("id", ""))
