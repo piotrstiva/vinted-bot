@@ -54,7 +54,7 @@ CONFIDENCE_WATCH   = 5.5   # ⚪ WATCH — obniżone z 6.0 (więcej alertów)
 
 DB_MIN_SAMPLES     = 5     # Part 2.7 — minimum próbek (podwyższone dla jakości)
 DB_BUILD_EVERY     = 100   # buduj DB co N nowych itemów (częściej)
-FLIP_MIN_PROFIT    = 25    # Part 1 — obniżone z 30 → 25 zł
+FLIP_MIN_PROFIT    = 30    # Fix #6 — min profit = 30 zł (twarda granica)
 FAKE_LUXURY_RATIO  = 0.35
 
 # Part 2 — rolling window
@@ -198,12 +198,40 @@ def normalize_title(title: str) -> str:
     return key or "unknown"
 
 
-def detect_category(title: str) -> str:
+def detect_category(title: str) -> str | None:
+    """
+    Fix #3 — Strict category detection.
+    Returns None for unknown items → caller should block them from DB.
+    """
     t = title.lower()
-    for cat, keywords in CATEGORY_MAP.items():
-        if any(kw in t for kw in keywords):
-            return cat
-    return "other"
+
+    # Strict item type detection per spec
+    if any(k in t for k in ["t-shirt", "tshirt", "tee ", " tee", "band tee", "tour tee"]):
+        return "tshirt"
+    if any(k in t for k in ["hoodie", "hooded", "sweatshirt", "zip up", "crewneck"]):
+        return "hoodie"
+    if any(k in t for k in ["jacket", "kurtka", "bomber", "varsity", "windbreaker",
+                              "anorak", "parka", "trucker", "chore coat", "work jacket"]):
+        return "jacket"
+    if any(k in t for k in ["coat", "płaszcz", "overcoat", "trench", "shearling", "kożuch"]):
+        return "coat"
+    if any(k in t for k in ["jeans", "denim", "dżinsy", "spodnie jeansowe"]):
+        return "jeans"
+    if any(k in t for k in ["cargo", "cargo pants", "cargo pant"]):
+        return "cargo"
+    if any(k in t for k in ["shirt", "koszula", "flannel", "oxford shirt"]):
+        return "shirt"
+    if any(k in t for k in ["sneakers", "shoes", "buty", "trainers", "kicks"]):
+        return "sneakers"
+    if any(k in t for k in ["jersey", "football shirt", "koszulka piłkarska"]):
+        return "jersey"
+    if any(k in t for k in ["cap", "hat", "czapka", "beanie", "snapback"]):
+        return "cap"
+    if any(k in t for k in ["bag", "backpack", "plecak", "torba"]):
+        return "bag"
+
+    # Fix #3 — BLOCK: zwróć None dla nierozpoznanych kategorii
+    return None
 
 
 def detect_brand(title: str) -> str | None:
@@ -337,47 +365,50 @@ def _detect_item_type(title: str) -> str:
     return "clothing"
 
 
-def build_market_key(title: str, brand: str | None, is_vint: bool) -> str:
+def build_market_key(title: str, brand: str | None, is_vint: bool) -> str | None:
     """
-    Part 2.2 — Smart key generation.
-    Prevents DB fragmentation — groups by brand+type+era.
+    Fix #2 — Strict key system.
+    HARD RULE: if not brand → return None → DO NOT store in DB.
 
     Examples:
-      nike_hoodie_modern
-      vintage_band_tee
-      stussy_jacket_vintage
-      football_shirt_90s
+      nike_tshirt_modern
+      harley_tshirt_vintage
+      stussy_jacket_modern
     """
+    # Fix #2 — brak brandu = nie przechowuj
+    if not brand:
+        return None
+
     item_type = _detect_item_type(title)
     era       = "vintage" if is_vint else "modern"
-
-    if brand:
-        return f"{brand}_{item_type}_{era}"
-    else:
-        # brak brandu — grupuj po typie+erze
-        return f"{item_type}_{era}"
+    # Normalizuj brand (usuń spacje i znaki specjalne)
+    brand_key = re.sub(r"[^a-z0-9]", "", brand.lower())
+    return f"{brand_key}_{item_type}_{era}"
 
 
 def should_add_to_db(item: dict, item_score: int) -> bool:
     """
-    Part 2.1 — Quality gate: tylko wysokiej jakości dane wchodzą do DB.
-    Zapobiega uczeniu się na śmieciach.
+    Fix #2 — Strict quality gate.
+    HARD RULES:
+    - brand required (no brand = do not store)
+    - category must be known (not None)
+    - min price 30 zł
     """
-    price     = item.get("price", 0) or 0
-    title     = item.get("title", "")
-    brand     = detect_brand(title)
-    is_vint   = _is_vintage(title)
+    price    = item.get("price", 0) or 0
+    title    = item.get("title", "")
+    brand    = detect_brand(title)
+    category = detect_category(title)
 
-    # Za słaby item score (oceniony w check_search)
-    if item_score < 3:
+    # Fix #2 — HARD: brak brandu → nie przechowuj
+    if not brand:
         return False
 
-    # Za tania cena — za dużo szumu
+    # Fix #3 — HARD: nieznana kategoria → nie przechowuj
+    if not category:
+        return False
+
+    # Minimalna cena
     if price < 30:
-        return False
-
-    # Brak brandu I nie vintage → śmieć
-    if brand is None and not is_vint:
         return False
 
     return True
@@ -515,12 +546,12 @@ class MarketDB:
     MAX_SAMPLES    = 50
     MAX_AGE_HOURS  = 48
 
-    def add_sample(self, key: str, price: float):
+    def add_sample(self, key: str | None, price: float):
         """
-        Part 2 spec — dodaje próbkę do bazy w czasie rzeczywistym.
-        Rolling window: wyrzuca stare (>48h) i przycina do MAX_SAMPLES.
-        Używany gdy item przejdzie quality gate — aktualizuje DB on-the-fly.
+        Fix #2 — strict: jeśli key=None (brak brandu) → nie dodawaj.
         """
+        if not key:
+            return  # Fix #2 — HARD: brak klucza = brak brandu = nie przechowuj
         now = time.time()
         if key not in self.db:
             self.db[key] = {
@@ -599,14 +630,14 @@ class MarketDB:
 
     def lookup(self, title: str, brand: str | None = None, category: str | None = None) -> dict | None:
         """
-        Szuka najpierw smart key (brand+type+era),
-        potem fallback po starym normalize_title.
+        Fix #2 — szuka po strict key (brand+type+era).
+        Jeśli brak brandu → smart_key=None → brak danych → zwróć None.
         """
-        is_vint = _is_vintage(title)
+        is_vint   = _is_vintage(title)
         smart_key = build_market_key(title, brand, is_vint)
-        if smart_key in self.db:
+        if smart_key and smart_key in self.db:
             return self.db[smart_key]
-        # Fallback — stary klucz
+        # Fallback — stary klucz (kompatybilność wsteczna)
         old_key = normalize_title(title)
         if old_key in self.db:
             return self.db[old_key]
@@ -1085,10 +1116,34 @@ def calculate_confidence(
     if hype >= 8 and estimated_val > 0 and price < estimated_val * 0.70:
         confidence += 1.0
 
-    # Fix #5 — hard cap po boostach żeby śmieciowe itemy nie dostawały 10.0
-    # Bez DB i bez brandu → max 8.0 (nie ma potwierdzenia z rynku)
-    if not db_data and brand is None:
-        confidence = min(confidence, 8.0)
+    # Fix #7 — CLEAN CONFIDENCE gdy brak danych DB (nie pozwól na fake conf=9.8)
+    # Structured scoring per spec zamiast chaotycznych boostów
+    if not db_data:
+        structured_conf = 0.0
+        if brand:
+            structured_conf += 3.0
+        item_cat = detect_category(title)
+        if item_cat:
+            structured_conf += 2.0
+        if flip_profit > 50:
+            structured_conf += 2.0
+        elif flip_profit > 30:
+            structured_conf += 1.0
+        # grail check — użyj v_score jako proxy
+        if v_score >= 6:
+            structured_conf += 2.0
+        # trash penalty
+        _trash_in_title = any(x in title.lower() for x in [
+            "top,", "top z", "blouse", "dress", "cute", "coquette",
+            "sukienka", "bluzka", "kombinezon", "crop top",
+        ])
+        if _trash_in_title:
+            structured_conf -= 4.0
+        # Użyj structured_conf zamiast chaotycznego weighted average
+        confidence = max(0.0, min(structured_conf, 10.0))
+
+    # Fix #7 — clamp 0–10
+    confidence = max(0.0, min(confidence, 10.0))
 
     # ── STEP 5: ANTI-SPAM PENALTIES ───────────
     t_lower = title.lower()
@@ -1158,10 +1213,27 @@ def calculate_confidence(
 # ─────────────────────────────────────────────────────
 GRAIL_KEYWORDS = [
     "single stitch", "made in usa", "made in italy",
-    "90s", "80s", "70s", "tour", "promo", "rare",
-    "deadstock", "harley davidson", "band tee", "band shirt",
-    "rap tee", "grateful dead", "nirvana", "metallica",
-    "bootleg tee", "unofficial", "concert tee", "concert shirt",
+    "90s", "80s", "70s", "tour", "promo",
+    "band", "band tee", "movie", "film",
+    "harley davidson", "grateful dead", "nirvana", "metallica",
+    "rap tee", "bootleg tee", "concert tee", "concert shirt",
+]
+
+# Fix #4 — REAL grail keywords (strict subset — nie "vintage" alone)
+REAL_GRAIL_KEYWORDS = [
+    "single stitch",
+    "made in usa",
+    "90s",
+    "80s",
+    "tour",
+    "promo",
+    "band",
+    "movie",
+    "harley davidson",
+    "deadstock",
+    "rap tee",
+    "concert tee",
+    "bootleg",
 ]
 
 GRAIL_BRANDS = [
@@ -1174,9 +1246,9 @@ GRAIL_BRANDS = [
 
 def grail_score(title: str, anomaly_sc: int, deal_tag: str) -> tuple[int, bool]:
     """
-    Part 3 — Grail scoring.
-    Returns (score, is_grail).
-    is_grail = True → force alert, min_profit = 10
+    Fix #4 — Strict grail scoring.
+    Uses REAL_GRAIL_KEYWORDS only (not loose "vintage").
+    is_grail requires score >= 3 (raised from 4 → stricter threshold).
     """
     t     = title.lower()
     score = 0
@@ -1185,14 +1257,14 @@ def grail_score(title: str, anomaly_sc: int, deal_tag: str) -> tuple[int, bool]:
     if any(b in t for b in GRAIL_BRANDS):
         score += 2
 
-    # Grail keywords
-    kw_hits = sum(1 for k in GRAIL_KEYWORDS if k in t)
+    # Fix #4 — tylko REAL_GRAIL_KEYWORDS (nie "vintage" alone)
+    kw_hits = sum(1 for k in REAL_GRAIL_KEYWORDS if k in t)
     if kw_hits >= 1:
         score += 2
     if kw_hits >= 2:
         score += 1  # bonus za kombinację
 
-    # Anomaly pricing (dużo poniżej mediany)
+    # Anomaly pricing
     if anomaly_sc >= 2:
         score += 2
 
@@ -1206,7 +1278,8 @@ def grail_score(title: str, anomaly_sc: int, deal_tag: str) -> tuple[int, bool]:
     if deal_tag == "STEAL":
         score += 1
 
-    is_grail = score >= 4
+    # Fix #4 — STRICT: grail_score < 3 → is_grail = False
+    is_grail = score >= 3
     return score, is_grail
 
 
@@ -1286,10 +1359,10 @@ class Engine:
 
         # 3. Lookup w bazie + add_sample (Part 2 — on-the-fly DB update)
         is_vint   = _is_vintage(title)
-        smart_key = build_market_key(title, brand, is_vint)
+        smart_key = build_market_key(title, brand, is_vint)  # None gdy brak brandu
 
-        # add_sample: aktualizuj DB dla każdego quality item który engine ocenia
-        if price and price >= 30 and (brand or is_vint):
+        # Fix #2: add_sample jest None-safe — ignoruje key=None (brak brandu)
+        if price and price >= 30:
             self.db.add_sample(smart_key, price)
 
         db_data = self.db.lookup(title, brand=brand, category=category)
@@ -1361,32 +1434,33 @@ class Engine:
 
         tier = get_alert_tier(confidence, ai_decision)
 
-        # Part 1 — Relaxed send_alert:
-        # wysyłaj gdy: conf >= 5.5 AND profit >= 25
-        # LUB grail detected (min profit = 10)
-        # LUB force_alert (dużo poniżej avg)
-        min_profit = 10 if is_grail else FLIP_MIN_PROFIT
+        # Fix #8 — BLOCK items without brand and without grail signal
+        if not brand and not is_grail:
+            send_alert = False
+            if DEBUG_ALERTS:
+                print(f"  ⛔ no-brand skip: {title[:40]}")
+        else:
+            min_profit = 10 if is_grail else FLIP_MIN_PROFIT
 
-        # Part 9 — smart alert: score >= 2 AND effective_price < median * 0.85
-        effective_price  = scoring.get("effective_price", price)
-        market_price_db  = scoring.get("market_price_db")
-        price_undervalue = (
-            market_price_db is not None and
-            effective_price < market_price_db * 0.85
-        )
+            effective_price  = scoring.get("effective_price", price)
+            market_price_db  = scoring.get("market_price_db")
+            price_undervalue = (
+                market_price_db is not None and
+                effective_price < market_price_db * 0.85
+            )
 
-        send_alert = (
-            (confidence >= 5.5 and flip_profit >= min_profit)
-            or (price_undervalue and confidence >= 5.0)   # Part 9
-            or force_alert
-            or is_grail
-        )
+            # Fix #6+7 — FINAL ALERT RULE: profit >= 30 AND confidence >= 6
+            send_alert = (
+                (flip_profit >= 30 and confidence >= 6.0)
+                or (is_grail and flip_profit >= 10)
+                or (price_undervalue and confidence >= 6.0)
+                or (force_alert and confidence >= 5.5)
+            )
 
-        # Part 1 — debug — tylko krótki log bez SEND/SKIP (bot decyduje o wysyłce)
         if DEBUG_ALERTS:
             tag = "💎 GRAIL" if is_grail else tier or "—"
             print(f"  🔎 conf={confidence:.1f} profit={flip_profit:.0f} "
-                  f"deal={deal_tag} grail={g_score} | {title[:40]}")
+                  f"deal={deal_tag} grail={g_score} brand={brand} | {title[:35]}")
 
         # Deduplicacja sesyjna
         item_id = str(item.get("id", ""))
