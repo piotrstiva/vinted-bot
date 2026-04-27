@@ -189,13 +189,9 @@ def detect_category(title: str) -> str:
 
 def detect_brand(title: str) -> str | None:
     t = title.lower()
-    # Posortowane od najdłuższych — żeby "new balance" przed "balance"
     ALL_KNOWN_BRANDS = sorted([
-        # Luxury
         *list(LUXURY_BRANDS),
-        # Hype
         *list(HYPE_BRANDS),
-        # Mainstream — Fix 2: rozszerzone
         "nike", "adidas", "puma", "reebok", "lego", "funko",
         "new balance", "vans", "converse", "asics", "fila",
         "champion", "levi", "levis", "levi's", "wrangler",
@@ -212,7 +208,31 @@ def detect_brand(title: str) -> str | None:
         "hanes", "gildan", "screen stars", "delta",
     ], key=len, reverse=True)
 
+    # FIX #5 — word boundary check: "palace" nie matchuje "monkey palace"
+    # Marki które wymagają sprawdzenia jako osobne słowo (krótkie / mylące)
+    WORD_BOUNDARY_BRANDS = {
+        "palace", "polo", "delta", "guess", "lee ",
+        "only ", "boss ", "george ", "rainbow ",
+    }
+
     for brand in ALL_KNOWN_BRANDS:
+        if brand not in t:
+            continue
+        if brand in WORD_BOUNDARY_BRANDS:
+            # Sprawdź czy brand jest osobnym słowem (nie częścią innego)
+            pattern = r'(?<![a-z])' + re.escape(brand.strip()) + r'(?![a-z])'
+            if not re.search(pattern, t):
+                continue
+            # Dodatkowy kontekst: "monkey palace" → odrzuć
+            # Szukaj czy brand jest modyfikowany przez rzeczownik przed nim
+            idx = t.find(brand.strip())
+            if idx > 0:
+                before = t[max(0, idx-8):idx].strip()
+                # Jeśli przed "palace" jest słowo które nie jest brand-related → skip
+                non_brand_prefixes = ["monkey", "crystal", "ice", "winter", "summer",
+                                      "beauty", "royal", "grand", "gra ", "planszow"]
+                if any(p in before for p in non_brand_prefixes):
+                    continue
         if brand in t:
             return brand.strip()
     return None
