@@ -112,6 +112,25 @@ MAINSTREAM_BRANDS = {
 }
 
 # ─────────────────────────────────────────────────────
+#  🏷️ BRAND TIERS — Part 2
+# ─────────────────────────────────────────────────────
+PREMIUM_BRANDS = {
+    "stone island", "cp company", "arc'teryx", "arcteryx",
+    "patagonia", "salomon", "oakley", "nike acg", "helly hansen",
+    "bape", "undercover", "number nine", "comme des garcons",
+    "issey miyake", "yohji yamamoto", "raf simons",
+}
+
+VINTAGE_BRANDS = {
+    "levis", "levi's", "levi strauss", "wrangler", "lee",
+    "carhartt", "ll bean", "l.l. bean", "eddie bauer",
+    "dickies", "ben davis", "key imperial", "pointer brand",
+}
+
+# Rozszerz HYPE_BRANDS o premium
+HYPE_BRANDS.update(PREMIUM_BRANDS)
+
+# ─────────────────────────────────────────────────────
 #  🔤 NORMALIZACJA TYTUŁU
 # ─────────────────────────────────────────────────────
 _STOP_WORDS = {
@@ -934,20 +953,27 @@ def calculate_confidence(
 
     if db_data:
         avg   = db_data["avg"]
-        # Part 2.9 — użyj market_price z DB (już zawiera vintage premium)
         db_mkt = db_data.get("market_price", avg)
+        p25   = db_data.get("p25", db_mkt * 0.75)
         ratio = price / db_mkt if db_mkt > 0 else 1.0
         trend = db_data.get("trend", "stable")
 
-        if ratio < 0.50:
+        # Part 5 — negotiation factor: cena po negocjacji -15%
+        effective_price = price * 0.85
+        effective_ratio = effective_price / db_mkt if db_mkt > 0 else 1.0
+
+        # Użyj effective_ratio do oceny (uwzględnia potencjalne negocjacje)
+        scoring_ratio = min(ratio, effective_ratio + 0.05)  # blend raw i effective
+
+        if scoring_ratio < 0.50:
             db_score = 10.0
-        elif ratio < 0.60:
+        elif scoring_ratio < 0.60:
             db_score = 9.0
-        elif ratio < 0.70:
+        elif scoring_ratio < 0.70:
             db_score = 8.0
-        elif ratio < 0.80:
+        elif scoring_ratio < 0.80:
             db_score = 6.5
-        elif ratio < 0.90:
+        elif scoring_ratio < 0.90:
             db_score = 5.0
         else:
             db_score = 3.0
@@ -982,11 +1008,13 @@ def calculate_confidence(
         elif trend == "falling":
             db_score = max(db_score - 0.5, 0.0)
     else:
-        db_mkt      = None
-        estimated   = ai_data.get("estimated_value", price * 1.5)
-        flip_profit = max(estimated - price, 0.0)
-        deal_score  = 0.0
-        deal_tag    = "WEAK"
+        db_mkt        = None
+        p25           = None
+        effective_price = price * 0.85
+        estimated     = ai_data.get("estimated_value", price * 1.5)
+        flip_profit   = max(estimated - price, 0.0)
+        deal_score    = 0.0
+        deal_tag      = "WEAK"
         anomaly_score = 0
 
     # ── MARKET SCORE (0–10) ──────────────────
@@ -1107,18 +1135,21 @@ def calculate_confidence(
     confidence = max(0.0, min(confidence, 10.0))
 
     return {
-        "confidence":     round(confidence, 2),
-        "db_score":       round(db_score, 2),
-        "market_score":   round(market_score, 2),
-        "ai_score":       round(ai_score, 2),
-        "fake_risk":      fake_risk,
-        "flip_profit":    round(flip_profit, 2),
-        "trend":          trend,
-        "vintage_score":  round(v_score, 2),
-        "football_score": round(f_score, 2),
-        "deal_score":     round(deal_score, 4),
-        "deal_tag":       deal_tag,
-        "anomaly_score":  anomaly_score,
+        "confidence":      round(confidence, 2),
+        "db_score":        round(db_score, 2),
+        "market_score":    round(market_score, 2),
+        "ai_score":        round(ai_score, 2),
+        "fake_risk":       fake_risk,
+        "flip_profit":     round(flip_profit, 2),
+        "trend":           trend,
+        "vintage_score":   round(v_score, 2),
+        "football_score":  round(f_score, 2),
+        "deal_score":      round(deal_score, 4),
+        "deal_tag":        deal_tag,
+        "anomaly_score":   anomaly_score,
+        "effective_price": round(effective_price, 2),           # Part 5
+        "p25":             round(p25, 2) if p25 else None,      # Part 5
+        "market_price_db": round(db_mkt, 2) if db_mkt else None,
     }
 
 
@@ -1336,8 +1367,17 @@ class Engine:
         # LUB force_alert (dużo poniżej avg)
         min_profit = 10 if is_grail else FLIP_MIN_PROFIT
 
+        # Part 9 — smart alert: score >= 2 AND effective_price < median * 0.85
+        effective_price  = scoring.get("effective_price", price)
+        market_price_db  = scoring.get("market_price_db")
+        price_undervalue = (
+            market_price_db is not None and
+            effective_price < market_price_db * 0.85
+        )
+
         send_alert = (
             (confidence >= 5.5 and flip_profit >= min_profit)
+            or (price_undervalue and confidence >= 5.0)   # Part 9
             or force_alert
             or is_grail
         )
@@ -1400,6 +1440,48 @@ class Engine:
         # - Luxury → 6.0 (wymaga sygnału fake-risk)
         # - Mainstream (Nike/Adidas ogólnie) → 5.8
         # - Znana kategoria bez marki → 5.5
+        # ── PART 3: CONTEXTUAL BRAND LOGIC ────────────────
+        # Nie wystarczy wykryć brand — liczy się KONTEKST
+        contextual_bonus = 0.0
+
+        # Jeff Hamilton — zawsze grail, rynek wtórny 200–2000 USD
+        if "jeff hamilton" in t:
+            contextual_bonus += 5.0
+            base = max(base, 8.0)
+
+        # Levi's — nie każde Levi's jest warte flip
+        if "levi" in t or "levis" in t:
+            if any(k in t for k in ["501", "505", "made in usa", "orange tab",
+                                     "vintage", "deadstock", "big e", "red tab"]):
+                contextual_bonus += 3.0
+            else:
+                contextual_bonus -= 1.0  # generic Levi's → mniej warte
+
+        # Wrangler vintage — kurtki i spodnie vintage mają rynek
+        if "wrangler" in t:
+            if any(k in t for k in ["vintage", "jacket", "kurtka", "denim", "western"]):
+                contextual_bonus += 2.0
+
+        # Nike ACG — premium subbrand
+        if "nike acg" in t or ("nike" in t and "acg" in t):
+            contextual_bonus += 3.0
+            base = max(base, 7.0)
+
+        # Stone Island / CP Company
+        if "stone island" in t or "cp company" in t:
+            contextual_bonus += 2.0
+            base = max(base, 7.5)
+
+        # Varsity / College jacket — niszowy rynek premium
+        if any(k in t for k in ["varsity", "letterman", "college jacket"]):
+            contextual_bonus += 2.0
+
+        # Workwear vintage — Carhartt Detroit/Santa Fe/chore coat
+        if "carhartt" in t:
+            if any(k in t for k in ["detroit", "santa fe", "chore", "active",
+                                     "michigan", "ranger", "vintage", "wip"]):
+                contextual_bonus += 2.0
+
         STREETWEAR_HYPE = {"supreme", "palace", "stussy", "bape", "a bathing ape",
                            "kaws", "travis scott", "yeezy", "jordan", "nike sb",
                            "sacai", "fragment", "fear of god", "wtaps"}
@@ -1422,7 +1504,7 @@ class Engine:
         underpriced = price < avg * 0.70
         estimated = avg * 1.1 if db_data else price * 1.5
 
-        score = base
+        score = base + contextual_bonus
         if underpriced:
             score += 2.0
         if hype >= 8:
