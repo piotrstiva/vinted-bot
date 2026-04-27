@@ -2179,14 +2179,15 @@ def check_search(search, seen, market_price):
         items = sorted(items, key=lambda x: parse_item_age_minutes(x))
 
         # Part 2 — hard time filter: odrzuć stare itemy
+        # PART 1 FIX: items without ts (age=None/9999) → engine will skip them via no_age_data
         fresh_items = []
         for it in items:
             age = parse_item_age_minutes(it)
             if age <= MAX_ITEM_AGE_MINUTES:
                 fresh_items.append(it)
-            # Gdy brak ts (age=9999) przepuść — nie mamy danych
+            # Items with no ts: pass to engine — it will skip with _skip_reason=no_age_data
             elif age == 9999:
-                fresh_items.append(it)
+                pass   # PART 1 FIX: drop unknown-age items — engine requires valid ts
         items = fresh_items
 
         if not items:
@@ -2718,9 +2719,17 @@ while True:
                 # ── Engine evaluation ─────────────────
                 if engine:
                     eval_result    = engine.evaluate(item, search, market_price)
+
+                    # PART 1 — skip items with no age data (engine already returned send_alert=False)
+                    if eval_result.get("_skip_reason") == "no_age_data":
+                        if DEBUG_ALERTS:
+                            print(f"  ⏭  SKIP no_age_data | {item['title'][:40]}")
+                        seen[item["id"]] = now
+                        continue
+
                     # Part 6 — SNIPER BOOST: bardzo świeże itemy (≤ 3 min) → boost
-                    age_min = item.get("age_min", 9999)
-                    if age_min <= 3:
+                    age_min = eval_result.get("item_age_min")
+                    if age_min is not None and age_min <= 3:
                         eval_result = dict(eval_result)
                         eval_result["confidence"]  = min(eval_result["confidence"] + 1.0, 10.0)
                         eval_result["flip_profit"] = eval_result.get("flip_profit", 0) + 5
