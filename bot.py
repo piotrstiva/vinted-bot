@@ -1136,7 +1136,10 @@ SEARCHES = [
 #  💾 PAMIĘĆ  (z automatycznym czyszczeniem)
 # ─────────────────────────────────────────
 SEEN_FILE      = "seen_items.json"
-SEEN_MAX_DAYS  = 30   # pamiętamy ID przez 30 dni — blokuje stare oferty
+# FIX: 30 dni → 6h — oferty na Vinted są aktywne przez tygodnie,
+# seen musi wygasać żeby bot procesował je ponownie gdy cena spadnie
+SEEN_MAX_HOURS = 6
+SEEN_MAX_DAYS  = SEEN_MAX_HOURS / 24
 
 def load_seen():
     """
@@ -2067,7 +2070,7 @@ def parse_item_age_minutes_from_text(created_at_text: str) -> int:
 
 
 # Part 4 — in-memory seen set (szybszy niż disk dla sniping)
-_SNIPER_SEEN: set[str] = set()
+_SNIPER_SEEN: dict[str, float] = {}   # FIX: dict z TTL zamiast set (wygasa po 6h)
 
 
 # ─────────────────────────────────────────
@@ -2131,20 +2134,31 @@ def check_search(search, seen, market_price):
                 price   = item.get("price")
 
                 # Part 4 — in-memory sniper seen (szybszy niż disk seen)
-                if item_id in _SNIPER_SEEN:
+                # Part 4 — in-memory sniper seen z TTL 6h
+                _now_sn = time.time()
+                _sniper_ts = _SNIPER_SEEN.get(item_id)
+                if _sniper_ts and (_now_sn - _sniper_ts) < 6 * 3600:
                     cnt_seen += 1
                     continue
-                _SNIPER_SEEN.add(item_id)
-                # Trzymaj małą pamięć
+                _SNIPER_SEEN[item_id] = _now_sn
+                # Wyczyść stare wpisy gdy za duże
                 if len(_SNIPER_SEEN) > 5000:
+                    _cutoff = _now_sn - 6 * 3600
+                    _SNIPER_SEEN_new = {k: v for k, v in _SNIPER_SEEN.items() if v > _cutoff}
                     _SNIPER_SEEN.clear()
+                    _SNIPER_SEEN.update(_SNIPER_SEEN_new)
 
                 # Part 7 — debug age
                 age_min = parse_item_age_minutes(item)
                 if age_min < 9999 and DEBUG_ALERTS:
                     print(f"  📤 NEW ITEM: {title[:60]} | age={age_min}min | {price} zł")
 
-                if not item_id or item_id in seen:
+                if not item_id or not href:
+                    continue
+
+                # FIX: seen sprawdza TTL — item wraca po 6h
+                _seen_ts = seen.get(item_id)
+                if _seen_ts and (time.time() - _seen_ts) < 6 * 3600:
                     cnt_seen += 1
                     continue
 
@@ -2542,6 +2556,18 @@ send_message(
 )
 
 seen          = load_seen()
+# FIX: usuń stale seen jeśli mają stary format (30-dniowy) — jednorazowe czyszczenie
+_now = time.time()
+_cutoff_6h = _now - 6 * 3600
+_before = len(seen)
+seen = {k: v for k, v in seen.items() if v > _cutoff_6h}
+_after = len(seen)
+if _before != _after:
+    print(f"🧹 Wyczyszczono seen: {_before} → {_after} wpisów (usunięto stare >6h)")
+    save_seen(seen)
+else:
+    print(f"💾 Seen załadowany: {_after} wpisów (TTL=6h)")
+
 market_prices = {}
 cycle         = 0
 
