@@ -2297,15 +2297,31 @@ def check_search(search, seen, market_price):
 
                 t_lo = title_lower
 
+                # Fix #1 — zdefiniuj _has_brand i _has_vintage PRZED użyciem
+                _has_brand   = any(b in t_lo for b in BRAND_KW)
+                _has_vintage = any(v in t_lo for v in VINTAGE_KW)
+
+                # Fix #5 — TRASH_KEYWORDS: odrzuć sukienki, tospy, bluzki
+                TRASH_KEYWORDS_ITEM = [
+                    "blouse", "bluzka", "sukienka", "dress", "cute",
+                    "coquette", " top,", "top z ", "crop top", "stanik",
+                    "bra ", "bikini", "swimsuit", "kąpiel",
+                    "kombinezon", "body ", "legginsy", "rajstopy",
+                ]
+                if not lego_sw_mode and not football_mode and not carhartt_mode:
+                    if any(x in t_lo for x in TRASH_KEYWORDS_ITEM):
+                        cnt_rejected += 1
+                        continue
+
                 item_score = 0
-                if any(b in t_lo for b in BRAND_KW):
-                    item_score += 1      # Part 7: brand = +1
+                if _has_brand:
+                    item_score += 1
                 if CATEGORY_KW and any(kw.lower() in t_lo for kw in CATEGORY_KW):
                     item_score += 2
-                if any(v in t_lo for v in VINTAGE_KW):
+                if _has_vintage:
                     item_score += 2
                 if price and price < 80:
-                    item_score += 1      # Part 7: tania cena = +1
+                    item_score += 1
                 if any(tr in t_lo for tr in TRASH_KW):
                     item_score -= 2
 
@@ -2313,7 +2329,6 @@ def check_search(search, seen, market_price):
 
                 if not lego_sw_mode and not carhartt_mode and not football_mode:
                     effective_hidden = hidden_gem_mode and bool(ANTHROPIC_KEY)
-                    # Part 5 — progi: grail=1, chaos=1, hidden=1, normal=2
                     if grail_mode or effective_hidden or search.get("layer") == "chaos":
                         min_score = 1
                     else:
@@ -2324,8 +2339,7 @@ def check_search(search, seen, market_price):
 
                 _item_score_val = item_score
 
-                # ── PART 8: HARD FILTER — anti-spam ────────────
-                # Spec: if not brand AND not vintage_keyword AND price < 40 → reject
+                # Fix #8 — block items without brand AND without grail signal
                 if (
                     not lego_sw_mode and not carhartt_mode
                     and not football_mode and not grail_mode
@@ -2782,10 +2796,11 @@ while True:
             flip_profit = eval_result.get("flip_profit", 0)
             confidence  = eval_result.get("confidence", 0)
 
-            # Part 7 — DEBUG_ALERTS: wysyłaj wszystko powyżej minimalnych progów
-            if DEBUG_ALERTS and flip_profit >= 25 and confidence >= 5.5:
+            # Fix #6+7 — DEBUG send respektuje nowe progi: profit>=30, conf>=6
+            if DEBUG_ALERTS and flip_profit >= 30 and confidence >= 6.0:
                 engine_msg = engine.format_alert(eval_result)
-                print(f"  📤 TG SEND [DEBUG]: conf={confidence:.1f} profit={flip_profit:.0f} | {item['title'][:50]}")
+                b_tag = detected_brand or "⛔NO-BRAND"
+                print(f"  📤 TG SEND: conf={confidence:.1f} profit={flip_profit:.0f} brand={b_tag} | {item['title'][:40]}")
                 send_message(engine_msg, photo_url=photo, item_link=item.get("link"))
                 seen[item["id"]] = now
                 sent_this_cycle += 1
