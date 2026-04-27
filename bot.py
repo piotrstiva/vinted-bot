@@ -44,7 +44,7 @@ DEBUG_ALERTS          = True  # FIX: loguj decyzje engine (conf, profit, grail)
 # ─────────────────────────────────────────
 #  ⚡ SNIPER MODE
 # ─────────────────────────────────────────
-MAX_ITEM_AGE_MINUTES  = 30   # Part 2 — odrzuć itemy starsze niż X min (zmień na 10–15 gdy OK)
+MAX_ITEM_AGE_MINUTES  = 15   # Part 1 — tylko świeże oferty 0–15 min
 SLEEP_BETWEEN_CYCLES  = 15   # Part 5 — szybszy loop (było 60s)
 
 STEAL_PRICES = {
@@ -942,6 +942,86 @@ SEARCHES = [
         "category": "clothing",
         "keywords": ["shearling", "kożuch", "sheepskin"],
         "min_price": 80,
+        "layer": "chaos",
+        "vintage_mode": True,
+    },
+
+    # ── Part 2: CHAOS_QUERIES — varsity, college, bomber, old jeans ─────
+    {
+        "name":     "Varsity Jacket",
+        "url":      "https://www.vinted.pl/catalog?search_text=varsity+jacket&catalog[]=4&order=newest_first&currency=PLN&price_to=600",
+        "category": "clothing",
+        "keywords": ["varsity", "jacket", "college", "letterman"],
+        "exclude_keywords": ["sukienka", "dress", "spodnie", "bluzka"],
+        "min_price": 30,
+        "layer": "chaos",
+        "vintage_mode": True,
+    },
+    {
+        "name":     "College Jacket",
+        "url":      "https://www.vinted.pl/catalog?search_text=college+jacket&catalog[]=4&order=newest_first&currency=PLN&price_to=500",
+        "category": "clothing",
+        "keywords": ["college", "jacket", "varsity", "letterman"],
+        "exclude_keywords": ["sukienka", "dress", "spodnie"],
+        "min_price": 30,
+        "layer": "chaos",
+        "vintage_mode": True,
+    },
+    {
+        "name":     "Bomber Jacket Vintage",
+        "url":      "https://www.vinted.pl/catalog?search_text=bomber+jacket+vintage&catalog[]=4&order=newest_first&currency=PLN&price_to=500",
+        "category": "clothing",
+        "keywords": ["bomber", "jacket", "vintage", "bomberka"],
+        "exclude_keywords": ["sukienka", "dress", "spodnie", "bluzka"],
+        "min_price": 30,
+        "layer": "chaos",
+        "vintage_mode": True,
+    },
+    {
+        "name":     "Denim Jacket Vintage",
+        "url":      "https://www.vinted.pl/catalog?search_text=denim+jacket+vintage&catalog[]=4&order=newest_first&currency=PLN&price_to=400",
+        "category": "clothing",
+        "keywords": ["denim", "jacket", "vintage", "katana"],
+        "exclude_keywords": ["sukienka", "dress", "spodnie"],
+        "min_price": 20,
+        "layer": "chaos",
+        "vintage_mode": True,
+    },
+    {
+        "name":     "Old Jeans Vintage",
+        "url":      "https://www.vinted.pl/catalog?search_text=vintage+jeans&catalog[]=4&order=newest_first&currency=PLN&price_to=300",
+        "category": "clothing",
+        "keywords": ["vintage", "jeans", "denim", "501", "505"],
+        "exclude_keywords": ["sukienka", "dress", "kurtka", "jacket", "bluzka"],
+        "min_price": 20,
+        "layer": "chaos",
+        "vintage_mode": True,
+    },
+    {
+        "name":     "Jeff Hamilton Jacket",
+        "url":      "https://www.vinted.pl/catalog?search_text=jeff+hamilton&order=newest_first&currency=PLN",
+        "category": "clothing",
+        "keywords": ["jeff hamilton", "hamilton"],
+        "min_price": 30,
+        "layer": "grail",
+        "grail_mode": True,
+        "vintage_mode": True,
+    },
+    {
+        "name":     "LL Bean Vintage",
+        "url":      "https://www.vinted.pl/catalog?search_text=ll+bean+jacket&order=newest_first&currency=PLN&price_to=600",
+        "category": "clothing",
+        "keywords": ["ll bean", "l.l. bean", "bean"],
+        "min_price": 30,
+        "layer": "chaos",
+        "vintage_mode": True,
+    },
+    {
+        "name":     "Eddie Bauer Vintage",
+        "url":      "https://www.vinted.pl/catalog?search_text=eddie+bauer+vintage&order=newest_first&currency=PLN&price_to=600",
+        "category": "clothing",
+        "keywords": ["eddie bauer", "bauer"],
+        "min_price": 30,
         "layer": "chaos",
         "vintage_mode": True,
     },
@@ -2219,13 +2299,13 @@ def check_search(search, seen, market_price):
 
                 item_score = 0
                 if any(b in t_lo for b in BRAND_KW):
-                    item_score += 2
+                    item_score += 1      # Part 7: brand = +1
                 if CATEGORY_KW and any(kw.lower() in t_lo for kw in CATEGORY_KW):
                     item_score += 2
                 if any(v in t_lo for v in VINTAGE_KW):
-                    item_score += 2   # Part 5: vintage = +2 (było +1)
-                if price < 50:
-                    item_score += 1   # Part 5: tania cena = bonus
+                    item_score += 2
+                if price and price < 80:
+                    item_score += 1      # Part 7: tania cena = +1
                 if any(tr in t_lo for tr in TRASH_KW):
                     item_score -= 2
 
@@ -2244,17 +2324,13 @@ def check_search(search, seen, market_price):
 
                 _item_score_val = item_score
 
-                # ── PART 6: ANTI-SPAM ─────────────────────
-                # Spec: if profit < 15 and not brand and not vintage → reject
-                _has_brand   = any(b in t_lo for b in BRAND_KW)
-                _has_vintage = any(v in t_lo for v in VINTAGE_KW)
-                _est_profit  = max((market_price or 0) * 1.5 - price, 0) if market_price else 0
-
+                # ── PART 8: HARD FILTER — anti-spam ────────────
+                # Spec: if not brand AND not vintage_keyword AND price < 40 → reject
                 if (
                     not lego_sw_mode and not carhartt_mode
                     and not football_mode and not grail_mode
                     and not _has_brand and not _has_vintage
-                    and (price < 30 or _est_profit < 15)
+                    and price < 40
                 ):
                     cnt_rejected += 1
                     continue
