@@ -2115,20 +2115,19 @@ def validate_carhartt(title, description, search):
 # ─────────────────────────────────────────
 #  ⚡ SNIPER — pomocnicze funkcje czasu
 # ─────────────────────────────────────────
-def parse_item_age_minutes(item: dict) -> int:
+def parse_item_age_minutes(item: dict) -> int | None:
     """
-    Part 1 — oblicza wiek oferty w minutach.
-    Używa created_at_ts (Unix timestamp) z item dict.
-    Zwraca 9999 gdy brak danych (= stary item, zostanie odrzucony).
+    Returns item age in minutes, or None when timestamp is unavailable.
+    None-safe: callers must guard with `if age is not None`.
     """
     ts = item.get("created_at_ts")
     if not ts:
-        return 9999
+        return None
     try:
         age_sec = time.time() - float(ts)
         return max(0, int(age_sec / 60))
     except:
-        return 9999
+        return None
 
 
 def parse_item_age_minutes_from_text(created_at_text: str) -> int:
@@ -2175,29 +2174,33 @@ def check_search(search, seen, market_price):
         items = parse_items_from_html(r.text)
         print(f"[{search['name']}] Ofert na stronie: {len(items)}")
 
-        # Part 3 — sortuj od najnowszych (najniższy wiek = najświeższy)
-        items = sorted(items, key=lambda x: parse_item_age_minutes(x))
+        # ── MULTI-LAYER FRESHNESS PRE-FILTER ────────────────────
+        # Engine owns the tier logic; bot just pre-sorts and drops truly stale items.
+        # Hard cutoff: >360 min (6 h) — engine rejects these anyway.
+        # PART 3: fallback_mode=True relaxes to 120 min for all items (used when 0 sent).
+        fallback_mode   = search.get("_fallback_mode", False)
+        hard_cutoff_min = 120 if fallback_mode else 360
 
-        # Part 2 — hard time filter: odrzuć stare itemy
-        # PART 1 FIX: items without ts (age=None/9999) → engine will skip them via no_age_data
-        fresh_items = []
+        tiered_items = []
         for it in items:
             age = parse_item_age_minutes(it)
-            if age <= MAX_ITEM_AGE_MINUTES:
-                fresh_items.append(it)
-            # Items with no ts: pass to engine — it will skip with _skip_reason=no_age_data
-            elif age == 9999:
-                pass   # PART 1 FIX: drop unknown-age items — engine requires valid ts
-        items = fresh_items
+            if age is None or age > hard_cutoff_min:
+                continue
+            tiered_items.append(it)
 
-        if not items:
-            print(f"  ⏰ Brak świeżych ofert (< {MAX_ITEM_AGE_MINUTES} min)")
+        if not tiered_items:
+            # Nothing at all — still return empty so main loop can trigger fallback
+            print(f"  ⏰ Brak ofert w oknie {hard_cutoff_min} min [{search['name']}]")
             return [], []
 
-        # Debug — pokaż pierwsze 2 tytuły żeby sprawdzić czy dane są poprawne
+        # Sort freshest first so engine sees best candidates early
+        tiered_items.sort(key=lambda x: parse_item_age_minutes(x) or 9999)
+        items = tiered_items
+
+        # Debug — show first 2 items with age
         for dbg in items[:2]:
             age_dbg = parse_item_age_minutes(dbg)
-            age_str = f"{age_dbg}min" if age_dbg < 9999 else "?"
+            age_str = f"{age_dbg}min" if age_dbg is not None else "?"
             print(f"  🔍 '{dbg['title'][:60]}' | {dbg['price']} zł | ⏱ {age_str}")
 
         hidden_gem_mode = search.get("hidden_gem_mode", False)
@@ -2231,7 +2234,7 @@ def check_search(search, seen, market_price):
 
                 # Part 7 — debug age
                 age_min = parse_item_age_minutes(item)
-                if age_min < 9999 and DEBUG_ALERTS:
+                if age_min is not None and DEBUG_ALERTS:
                     print(f"  📤 NEW ITEM: {title[:60]} | age={age_min}min | {price} zł")
 
                 if not item_id or not href:
@@ -2845,6 +2848,47 @@ while True:
             else:
                 # WATCH / brak tier → pomijamy (zbyt słabe)
                 seen[item["id"]] = now
+
+        # ── PART 3 — FALLBACK: if 0 sent, re-scan with 120-min window ────────
+        if sent_this_cycle == 0:
+            print(f"  ⚠️ FALLBACK MODE — brak wyników, rozszerzam okno do 120 min")
+            for search in SEARCHES:
+                if search.get("football_mode") or search.get("lego_sw_mode") or search.get("carhartt_mode"):
+                    continue  # special modes have their own validators, skip fallback
+                fallback_search = dict(search, _fallback_mode=True)
+                market_price    = market_prices.get(search["name"])
+                fb_items, fb_ids = check_search(fallback_search, seen, market_price)
+                if not fb_items:
+                    continue
+                now = time.time()
+                for _id in fb_ids:
+                    if _id not in seen:
+                        seen[_id] = now
+                for item in fb_items[:2]:  # max 2 per search in fallback
+                    if not engine:
+                        break
+                    eval_result = engine.evaluate(item, search, market_price)
+                    if not eval_result.get("send_alert"):
+                        seen[item["id"]] = now
+                        continue
+                    tier        = eval_result.get("tier")
+                    flip_profit = eval_result.get("flip_profit", 0)
+                    is_grail    = eval_result.get("is_grail", False)
+                    if tier not in ("INSANE", "GOOD", "💎 GRAIL") and not is_grail:
+                        seen[item["id"]] = now
+                        continue
+                    photo      = item.get("photo") or get_item_photo(item["id"], item["link"])
+                    engine_msg = engine.format_alert(eval_result)
+                    send_message(engine_msg, photo_url=photo, item_link=item.get("link"))
+                    seen[item["id"]] = now
+                    sent_this_cycle += 1
+                    print(f"  🔁 FALLBACK SEND | {item['title'][:55]} | {item['price']:.0f} zł")
+                    if sent_this_cycle >= MAX_PER_CYCLE:
+                        break
+                if sent_this_cycle >= MAX_PER_CYCLE:
+                    break
+
+        print(f"  📊 Cykl #{cycle} zakończony — wysłano: {sent_this_cycle} alertów")
 
         save_seen(seen)
         time.sleep(SLEEP_BETWEEN_CYCLES)
