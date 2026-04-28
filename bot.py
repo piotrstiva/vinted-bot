@@ -45,7 +45,7 @@ DEBUG_ALERTS          = True  # FIX: loguj decyzje engine (conf, profit, grail)
 #  ⚡ SNIPER MODE
 # ─────────────────────────────────────────
 MAX_ITEM_AGE_MINUTES  = 15   # Part 1 — tylko świeże oferty 0–15 min
-SLEEP_BETWEEN_CYCLES  = 15   # Part 5 — szybszy loop (było 60s)
+SLEEP_BETWEEN_CYCLES  = 45   # zwiększone z 15s — daj IP czas na reset rate-limitu
 
 STEAL_PRICES = {
     "sneakers": 120,
@@ -1500,8 +1500,9 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
 ]
 
-VINTED_MIN_DELAY = 3.5   # zwiększone z 2.0 — mniej 403
-VINTED_MAX_DELAY = 6.5   # zwiększone z 4.0
+VINTED_MIN_DELAY  = 6.0    # zwiększone z 3.5 — Vinted blokuje przy <5s
+VINTED_MAX_DELAY  = 11.0   # zwiększone z 6.5
+VINTED_POST_BAN_COOLDOWN = 180  # po serii 3x 403: dodatkowy cooldown 3 min
 VINTED_429_WAIT  = 180
 
 # BOT #5 — globalny licznik 403 — gdy Vinted blokuje, zwiększamy pauzę
@@ -1557,6 +1558,9 @@ def vinted_fetch(url, label=""):
                     time.sleep(backoff)
                     refresh_session()
                     _consecutive_403 = 0
+                    # Dodatkowy cooldown — Vinted banuje IP, sama sesja nie wystarczy
+                    print(f"  😴 Post-ban cooldown {VINTED_POST_BAN_COOLDOWN}s (IP cooling)...")
+                    time.sleep(VINTED_POST_BAN_COOLDOWN)
                 else:
                     time.sleep(backoff)
                 continue
@@ -2315,17 +2319,33 @@ def check_search(search, seen, market_price):
                     cnt_price += 1
                     continue
 
-                # Globalny próg cenowy — odrzuć śmieci poniżej 15 zł
-                if price < 15:
+                # Globalny próg cenowy — odrzuć śmieci poniżej 18 zł (było 15)
+                if price < 18:
                     cnt_price += 1
                     continue
 
-                # Odfiltruj tytuły w cyrylicy / alfabetach spoza łacińskiego
-                # (litewski, fiński OK — ale np. rosyjski/ukraiński to przypadkowe trafienia)
+                # Odfiltruj tytuły w cyrylicy / niełacińskich alfabetach
                 _non_latin = sum(1 for c in title if ord(c) > 591)
-                if _non_latin > len(title) * 0.3:   # >30% znaków spoza ASCII extended Latin
+                if _non_latin > len(title) * 0.3:
                     cnt_rejected += 1
                     continue
+
+                # Odrzuć fałszywe brand-matche (np. "Kapp Ahl" to nie Kappa)
+                # Sprawdź czy szukany brand faktycznie jest w tytule lub marce
+                search_text = search.get("url", "")
+                _brand_from_url = ""
+                if "search_text=" in search_text:
+                    import urllib.parse
+                    _brand_from_url = urllib.parse.unquote(
+                        search_text.split("search_text=")[1].split("&")[0]
+                    ).lower().split("+")[0]   # pierwszy wyraz query = brand
+                if _brand_from_url and len(_brand_from_url) >= 4:
+                    _title_lower = title.lower()
+                    _brand_in_title = _brand_from_url in _title_lower
+                    _brand_in_meta  = _brand_from_url in title.lower()  # marka z opisu
+                    if not _brand_in_title and not _brand_in_meta:
+                        cnt_rejected += 1
+                        continue
 
                 # ── PART 5: SMART ITEM SCORING ──────────────
                 VINTAGE_KW  = ["vintage", "retro", "90s", "80s", "70s", "y2k",
@@ -2740,6 +2760,7 @@ while True:
             print(f"📊 Mediany gotowe ({sum(1 for s in SEARCHES if not s.get('hidden_gem_mode') and not s.get('no_median'))} searchów) — startuje cykl")
 
         cycle += 1
+        _consecutive_403 = 0   # reset na starcie cyklu — nie przenoś banów między cyklami
         print(f"\n🔄 Cykl #{cycle}")
 
         # Propaguj mediany do searchów no_median w tej samej kategorii
@@ -2755,10 +2776,18 @@ while True:
                 if cat and cat in _cat_to_median:
                     market_prices[s["name"]] = _cat_to_median[cat]
 
-        # Step 6 — zbieramy wyniki wszystkich wyszukiwań, sortujemy i wysyłamy top
+        # Step 6 — zbieramy wyniki; rotujemy kolejność searchów żeby ban nie zawsze
+        # trafiał w te same (Lotto/Diadora/LEGO zawsze na końcu = zawsze banowane)
         cycle_candidates = []   # (confidence, search, item, eval_result)
 
-        for search in SEARCHES:
+        # Rotacja: priority (premium brands, fresh vintage) zawsze pierwsze,
+        # reszta shufflowana żeby rozkładać obciążenie IP równomiernie
+        _priority_searches = [s for s in SEARCHES if s.get("layer") in ("premium", "lego")]
+        _other_searches    = [s for s in SEARCHES if s not in _priority_searches]
+        random.shuffle(_other_searches)
+        _this_cycle_searches = _priority_searches + _other_searches
+
+        for search in _this_cycle_searches:
             print(f"  ⏳ Sprawdzam: {search['name']}")
             market_price = market_prices.get(search["name"])
             new_items, all_ids = check_search(search, seen, market_price)
@@ -2916,7 +2945,9 @@ while True:
         # ── PART 3 — FALLBACK: if 0 sent, re-scan with 120-min window ────────
         if sent_this_cycle == 0:
             print(f"  ⚠️ FALLBACK MODE — brak wyników, rozszerzam okno do 120 min")
-            for search in SEARCHES:
+            _fallback_searches = list(SEARCHES)
+            random.shuffle(_fallback_searches)
+            for search in _fallback_searches:
                 if search.get("football_mode") or search.get("lego_sw_mode") or search.get("carhartt_mode"):
                     continue  # special modes have their own validators, skip fallback
                 fallback_search = dict(search, _fallback_mode=True)
