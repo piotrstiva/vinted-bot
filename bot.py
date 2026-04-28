@@ -2747,22 +2747,22 @@ while True:
                     detected_brand = eval_result.get("brand", "?")
                     detected_cat   = eval_result.get("category", "?")
                     deal_tag       = eval_result.get("deal_tag", "WEAK")
+                    low_data_mode  = not has_db   # PART 3: no DB → don't penalise further
 
-                    # Fix #2 — nie skipuj znanych brandów vintage tylko z powodu niskiego conf
-                    # DB może zaniżać wartość rzadkich modeli (ranger jacket, trucker itp.)
+                    # PART 1 — soft confidence check (was hard conf<5.5 block)
+                    # Only skip if engine itself said don't send AND not low-data mode
+                    if not eval_result.get("send_alert") and not is_grail:
+                        seen[item["id"]] = now
+                        continue
+
                     is_known_brand = detected_brand in {
                         "carhartt", "arcteryx", "arc'teryx", "salomon",
                         "supreme", "palace", "stussy", "stone island",
                         "cp company", "corteiz", "represent",
                     }
-                    if has_db and conf < 5.5 and not is_grail and not is_known_brand:
-                        if DEBUG_ALERTS:
-                            print(f"  ⏭  skip conf={conf:.1f} brand={detected_brand} | {item['title'][:35]}")
-                        seen[item["id"]] = now
-                        continue
 
-                    # Part 1 — SLOW flip: obniżony próg z 80 → 30 zł
-                    if flip_speed == "SLOW" and flip_profit < 30 and not is_grail:
+                    # PART 2 — SLOW flip: obniżony próg 20 zł
+                    if flip_speed == "SLOW" and flip_profit < 20 and not is_grail:
                         if DEBUG_ALERTS:
                             print(f"  ⏭  SLOW skip profit={flip_profit:.0f}zł | {item['title'][:35]}")
                         seen[item["id"]] = now
@@ -2818,12 +2818,12 @@ while True:
                 sent_this_cycle += 1
                 continue
 
-            # Fix 1 — minimalne progi profitu per tier (zapobiega spam 10 zł)
+            # minimalne progi profitu per tier
             MIN_PROFIT_TIER = {
                 "INSANE":    10,
                 "💎 GRAIL":  10,
-                "GOOD":      25,
-                "WATCH":     40,
+                "GOOD":      20,   # PART 2: was 25
+                "WATCH":     30,   # PART 2: was 40
             }
             min_p = MIN_PROFIT_TIER.get(tier, 40)
             if is_grail:
@@ -2834,9 +2834,8 @@ while True:
                 seen[item["id"]] = now
                 continue
 
-            # Fix 1 — tylko INSANE/GOOD/GRAIL wysyłamy przez engine format
-            # WATCH i poniżej → tylko jeśli grail
-            if tier in ("INSANE", "GOOD", "💎 GRAIL") or is_grail:
+            # INSANE/GOOD/WATCH/GRAIL all get sent — engine already gated quality
+            if tier in ("INSANE", "GOOD", "WATCH", "💎 GRAIL") or is_grail:
                 engine_msg = engine.format_alert(eval_result)
                 if DEBUG_ALERTS:
                     print(f"  📤 TG SEND: {engine_msg[:80]}")
