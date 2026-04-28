@@ -1488,8 +1488,8 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
 ]
 
-VINTED_MIN_DELAY = 2.0
-VINTED_MAX_DELAY = 4.0
+VINTED_MIN_DELAY = 3.5   # zwiększone z 2.0 — mniej 403
+VINTED_MAX_DELAY = 6.5   # zwiększone z 4.0
 VINTED_429_WAIT  = 180
 
 # BOT #5 — globalny licznik 403 — gdy Vinted blokuje, zwiększamy pauzę
@@ -2303,6 +2303,18 @@ def check_search(search, seen, market_price):
                     cnt_price += 1
                     continue
 
+                # Globalny próg cenowy — odrzuć śmieci poniżej 15 zł
+                if price < 15:
+                    cnt_price += 1
+                    continue
+
+                # Odfiltruj tytuły w cyrylicy / alfabetach spoza łacińskiego
+                # (litewski, fiński OK — ale np. rosyjski/ukraiński to przypadkowe trafienia)
+                _non_latin = sum(1 for c in title if ord(c) > 591)
+                if _non_latin > len(title) * 0.3:   # >30% znaków spoza ASCII extended Latin
+                    cnt_rejected += 1
+                    continue
+
                 # ── PART 5: SMART ITEM SCORING ──────────────
                 VINTAGE_KW  = ["vintage", "retro", "90s", "80s", "70s", "y2k",
                                 "single stitch", "archive", "deadstock", "band tee",
@@ -2703,14 +2715,15 @@ while True:
         if cycle % 50 == 0:
             refresh_session()
 
-        if cycle % 10 == 0:
+        # Mediany co 30 cykli (~7-8 min) zamiast co 10 — mniej 403
+        if cycle % 30 == 0:
             print("\n📊 Aktualizuję mediany rynkowe...")
             for i, search in enumerate(SEARCHES):
-                # Pomijamy hidden_gem_mode — nie mają sensu mediany
                 if search.get("hidden_gem_mode"):
                     continue
                 print(f"  [{i+1}/{len(SEARCHES)}] {search['name']}...")
                 market_prices[search["name"]] = get_market_median(search)
+                time.sleep(random.uniform(4.0, 7.0))   # dodatkowy sleep między medianami
             print("📊 Mediany gotowe — startuje cykl")
 
         cycle += 1
