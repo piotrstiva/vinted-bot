@@ -1494,7 +1494,7 @@ VINTED_429_WAIT  = 180
 
 # BOT #5 — globalny licznik 403 — gdy Vinted blokuje, zwiększamy pauzę
 _consecutive_403   = 0
-_403_BACKOFF_STEPS = [60, 120, 300]   # FIX #7 — exponential: 60s → 120s → 300s
+_403_BACKOFF_STEPS = [30, 60, 120]   # skrócony backoff: 30s → 60s → 120s
 _403_BACKOFF_THRESHOLD = 3
 
 def get_headers():
@@ -1612,7 +1612,9 @@ def parse_items_from_html(html):
                                               ["time", "date", "at", "ts", "push", "create", "update", "active"])]
                             if ts_keys:
                                 print(f"  🕐 Vinted TS fields: {ts_keys} | vals: {[entry.get(k) for k in ts_keys[:4]]}")
+                                print(f"  🕐 ts_final będzie: {ts_final} (prawdziwy timestamp)")
                             else:
+                                print(f"  ⚠️  Vinted NIE zwraca pola z czasem — używam syntetycznego wieku (rank-based)")
                                 print(f"  🕐 Vinted keys (first 10): {list(entry.keys())[:10]}")
 
                         title = entry.get("title", "") or entry.get("name", "") or ""
@@ -1679,12 +1681,13 @@ def parse_items_from_html(html):
 
                         if title:
                             items.append({
-                                "id":         item_id,
-                                "title":      title,
-                                "price":      price,
-                                "url":        url,
-                                "photo":      photo_url,
-                                "created_at_ts": ts_final,  # Fix #6 — już przeliczony
+                                "id":            item_id,
+                                "title":         title,
+                                "price":         price,
+                                "url":           url,
+                                "photo":         photo_url,
+                                "created_at_ts": ts_final,   # None gdy Vinted nie zwraca ts
+                                "_rank":         len(items),  # pozycja na liście (do synth-age)
                             })
                     except:
                         continue
@@ -1722,6 +1725,8 @@ def parse_items_from_html(html):
                     "price": price,
                     "url":   href,
                     "photo": None,
+                    "created_at_ts": None,
+                    "_rank": len(items),
                 })
             except:
                 continue
@@ -2117,17 +2122,38 @@ def validate_carhartt(title, description, search):
 # ─────────────────────────────────────────
 def parse_item_age_minutes(item: dict) -> int | None:
     """
-    Returns item age in minutes, or None when timestamp is unavailable.
-    None-safe: callers must guard with `if age is not None`.
+    Zwraca wiek oferty w minutach.
+
+    Priorytet:
+    1. created_at_ts — Unix timestamp z JSON Vinted (dokładny)
+    2. _rank         — pozycja na liście newest_first → syntetyczny wiek
+                       Vinted sortuje od najnowszego, więc pozycja 0 ≈ przed chwilą,
+                       pozycja 95 ≈ kilka godzin temu.
+                       Mapujemy: rank 0–5 → ~5 min, 6–20 → ~30 min, 21–50 → ~90 min,
+                       51+ → ~180 min  (zawsze < 360 min, więc przechodzą filtr AGED)
+    3. None          — tylko gdy brak obu (fallback HTML, brak rank)
     """
     ts = item.get("created_at_ts")
-    if not ts:
-        return None
-    try:
-        age_sec = time.time() - float(ts)
-        return max(0, int(age_sec / 60))
-    except:
-        return None
+    if ts:
+        try:
+            age_sec = time.time() - float(ts)
+            return max(0, int(age_sec / 60))
+        except:
+            pass
+
+    # Syntetyczny wiek z pozycji na liście
+    rank = item.get("_rank")
+    if rank is not None:
+        if rank <= 5:
+            return 5          # ULTRA FRESH tier
+        elif rank <= 20:
+            return 30         # FRESH tier
+        elif rank <= 50:
+            return 90         # AGED tier — przejdzie jeśli grail/undervalue
+        else:
+            return 180        # AGED tier (6 godzin to 360, więc OK)
+
+    return None
 
 
 def parse_item_age_minutes_from_text(created_at_text: str) -> int:
