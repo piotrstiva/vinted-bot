@@ -862,6 +862,7 @@ SEARCHES = [
         "min_price": 15,
         "layer": "chaos",
         "vintage_mode": True,
+        "no_median": True,   # mediana pokryta przez Single Stitch Vintage
     },
     {
         "name":     "Vintage Hoodie",
@@ -907,7 +908,6 @@ SEARCHES = [
         "url":      "https://www.vinted.pl/catalog?search_text=90s+jacket&catalog[]=4&order=newest_first&currency=PLN&price_to=500",
         "category": "clothing",
         "keywords": ["90s", "jacket", "kurtka"],
-        # Fix 3 — beżowy kardigan / bezrękawnik futerko to nie jacket
         "exclude_keywords": [
             "sukienka", "dress", "spodnie", "jeans", "kamizelka",
             "sweter", "sweterek", "kardigan", "bluzka", "top ",
@@ -915,6 +915,7 @@ SEARCHES = [
         "min_price": 25,
         "layer": "chaos",
         "vintage_mode": True,
+        "no_median": True,   # mediana pokryta przez Retro Jacket
     },
     {
         "name":     "Baggy Jeans Vintage",
@@ -925,6 +926,7 @@ SEARCHES = [
         "min_price": 20,
         "layer": "chaos",
         "vintage_mode": True,
+        "no_median": True,   # mediana pokryta przez Baggy Jeans
     },
     {
         "name":     "Leather Jacket Vintage",
@@ -1081,6 +1083,7 @@ SEARCHES = [
         "min_price": 15,
         "layer": "football",
         "football_mode": True,
+        "no_median": True,   # mediana pokryta przez Football Shirt
     },
     {
         "name":     "Koszulka Piłkarska",
@@ -1090,6 +1093,7 @@ SEARCHES = [
         "min_price": 15,
         "layer": "football",
         "football_mode": True,
+        "no_median": True,
     },
     {
         "name":     "Vintage Football Shirt",
@@ -1110,6 +1114,7 @@ SEARCHES = [
         "layer": "football",
         "football_mode": True,
         "vintage_mode": True,
+        "no_median": True,   # mediana pokryta przez Vintage Football Shirt
     },
     {
         "name":     "90s Football Shirt",
@@ -1120,6 +1125,7 @@ SEARCHES = [
         "layer": "football",
         "football_mode": True,
         "vintage_mode": True,
+        "no_median": True,
     },
     {
         "name":     "Umbro Shirt",
@@ -1129,6 +1135,7 @@ SEARCHES = [
         "min_price": 15,
         "layer": "football",
         "football_mode": True,
+        "no_median": True,
     },
     {
         "name":     "Kappa Shirt",
@@ -1138,6 +1145,7 @@ SEARCHES = [
         "min_price": 15,
         "layer": "football",
         "football_mode": True,
+        "no_median": True,
     },
     {
         "name":     "Lotto Football Shirt",
@@ -1147,6 +1155,7 @@ SEARCHES = [
         "min_price": 15,
         "layer": "football",
         "football_mode": True,
+        "no_median": True,
     },
     {
         "name":     "Diadora Football Shirt",
@@ -1156,6 +1165,7 @@ SEARCHES = [
         "min_price": 15,
         "layer": "football",
         "football_mode": True,
+        "no_median": True,
     },
     {
         "name":     "Old Football Shirt",
@@ -1165,6 +1175,7 @@ SEARCHES = [
         "min_price": 10,
         "layer": "football",
         "football_mode": True,
+        "no_median": True,
     },
 
     # ══════════════════════════════════════
@@ -1189,6 +1200,7 @@ SEARCHES = [
         "min_price": 15,
         "lego_sw_mode": True,
         "layer": "lego",
+        "no_median": True,   # mediana pokryta przez LEGO Star Wars — wszystkie zestawy
     },
     {
         "name":     "LEGO zestawy (ogólne)",
@@ -2719,15 +2731,29 @@ while True:
         if cycle % 30 == 0:
             print("\n📊 Aktualizuję mediany rynkowe...")
             for i, search in enumerate(SEARCHES):
-                if search.get("hidden_gem_mode"):
+                # Pomijamy hidden_gem_mode i no_median — nie potrzebują własnej mediany
+                if search.get("hidden_gem_mode") or search.get("no_median"):
                     continue
                 print(f"  [{i+1}/{len(SEARCHES)}] {search['name']}...")
                 market_prices[search["name"]] = get_market_median(search)
                 time.sleep(random.uniform(4.0, 7.0))   # dodatkowy sleep między medianami
-            print("📊 Mediany gotowe — startuje cykl")
+            print(f"📊 Mediany gotowe ({sum(1 for s in SEARCHES if not s.get('hidden_gem_mode') and not s.get('no_median'))} searchów) — startuje cykl")
 
         cycle += 1
         print(f"\n🔄 Cykl #{cycle}")
+
+        # Propaguj mediany do searchów no_median w tej samej kategorii
+        _cat_to_median: dict[str, float] = {}
+        for s in SEARCHES:
+            if not s.get("no_median") and s["name"] in market_prices:
+                cat = s.get("category", "")
+                if cat and cat not in _cat_to_median:
+                    _cat_to_median[cat] = market_prices[s["name"]]
+        for s in SEARCHES:
+            if s.get("no_median") and s["name"] not in market_prices:
+                cat = s.get("category", "")
+                if cat and cat in _cat_to_median:
+                    market_prices[s["name"]] = _cat_to_median[cat]
 
         # Step 6 — zbieramy wyniki wszystkich wyszukiwań, sortujemy i wysyłamy top
         cycle_candidates = []   # (confidence, search, item, eval_result)
