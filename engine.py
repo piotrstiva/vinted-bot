@@ -659,7 +659,7 @@ class MarketDB:
         entry["_samples"] = samples
         self.db[key] = entry
 
-
+    def _clean_prices(self, prices: list[float]) -> list[float]:
         """Part 2.6 — usuwa outlier'y względem mediany (±50%)."""
         if len(prices) < 3:
             return prices
