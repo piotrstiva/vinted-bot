@@ -1500,15 +1500,16 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
 ]
 
-VINTED_MIN_DELAY  = 6.0    # zwiększone z 3.5 — Vinted blokuje przy <5s
-VINTED_MAX_DELAY  = 11.0   # zwiększone z 6.5
-VINTED_POST_BAN_COOLDOWN = 180  # po serii 3x 403: dodatkowy cooldown 3 min
+VINTED_MIN_DELAY  = 4.0    # zmniejszone z 6.0 — mamy ~18 searchów/cykl zamiast 61
+VINTED_MAX_DELAY  = 8.0    # zmniejszone z 11.0
+VINTED_POST_BAN_COOLDOWN = 90  # 90s IP cooling
 VINTED_429_WAIT  = 180
 
 # BOT #5 — globalny licznik 403 — gdy Vinted blokuje, zwiększamy pauzę
 _consecutive_403   = 0
-_403_BACKOFF_STEPS = [30, 60, 120]   # skrócony backoff: 30s → 60s → 120s
-_403_BACKOFF_THRESHOLD = 3
+_403_BACKOFF_STEPS    = [20, 45]    # skrócone: tylko 2 próby z krótszym backoffem
+_403_BACKOFF_THRESHOLD = 2          # po 2 kolejnych 403 → reset sesji (było 3)
+VINTED_POST_BAN_COOLDOWN = 90       # skrócone z 180s → 90s; bardziej agresywny cooldown nie pomaga
 
 def get_headers():
     """Zwraca losowy zestaw nagłówków naśladujący przeglądarkę."""
@@ -1528,11 +1529,11 @@ def get_headers():
 
 def vinted_fetch(url, label=""):
     """
-    Pobiera stronę Vinted (HTML).
-    FIX #7: exponential backoff 60s → 120s → 300s po serii 403.
+    Pobiera stronę Vinted. Max 2 próby — szybka rezygnacja przy banie zamiast
+    tracenia 210s na 3 próby + pełny backoff.
     """
     global _consecutive_403
-    for attempt in range(1, 4):
+    for attempt in range(1, 3):   # max 2 próby
         try:
             time.sleep(random.uniform(VINTED_MIN_DELAY, VINTED_MAX_DELAY))
             r = requests.get(url, headers=get_headers(), timeout=10)
@@ -1551,14 +1552,13 @@ def vinted_fetch(url, label=""):
                 _consecutive_403 += 1
                 step_idx = min(_consecutive_403 - 1, len(_403_BACKOFF_STEPS) - 1)
                 backoff  = _403_BACKOFF_STEPS[step_idx]
-                print(f"  ⚠️ HTTP {r.status_code} [{label}] — próba {attempt}/3 "
+                print(f"  ⚠️ HTTP {r.status_code} [{label}] — próba {attempt}/2 "
                       f"(seria {_consecutive_403}x → backoff {backoff}s)")
                 if _consecutive_403 >= _403_BACKOFF_THRESHOLD:
                     print(f"  🛑 Seria {_consecutive_403}x 403 — backoff {backoff}s + odświeżam sesję")
                     time.sleep(backoff)
                     refresh_session()
                     _consecutive_403 = 0
-                    # Dodatkowy cooldown — Vinted banuje IP, sama sesja nie wystarczy
                     print(f"  😴 Post-ban cooldown {VINTED_POST_BAN_COOLDOWN}s (IP cooling)...")
                     time.sleep(VINTED_POST_BAN_COOLDOWN)
                 else:
@@ -2776,18 +2776,49 @@ while True:
                 if cat and cat in _cat_to_median:
                     market_prices[s["name"]] = _cat_to_median[cat]
 
-        # Step 6 — zbieramy wyniki; rotujemy kolejność searchów żeby ban nie zawsze
-        # trafiał w te same (Lotto/Diadora/LEGO zawsze na końcu = zawsze banowane)
+        # Step 6 — TIERED ROTATION: nie sprawdzamy 61 searchów na raz
+        # Tier A (każdy cykl):    premium brands + grail vintage         ~15 searchów
+        # Tier B (co 2 cykle):    chaos + category + targeted            ~25 searchów
+        # Tier C (co 4 cykle):    football nisze + lego + duplikaty      ~21 searchów
+        # Łącznie per cykl: max ~18-20 requestów → brak masowego bana
+
+        TIER_A_LAYERS = {"wide_brand", "premium"}
+        TIER_B_LAYERS = {"chaos", "category", "targeted"}
+        TIER_C_LAYERS = {"football", "lego"}
+        GRAIL_LAYERS  = {"grail"}
+
+        tier_a = [s for s in SEARCHES if s.get("layer") in TIER_A_LAYERS and not s.get("no_median")]
+        tier_b = [s for s in SEARCHES if s.get("layer") in TIER_B_LAYERS]
+        tier_c = [s for s in SEARCHES if s.get("layer") in TIER_C_LAYERS]
+        # Grail zawsze — to najważniejsze
+        tier_grail = [s for s in SEARCHES if s.get("layer") in GRAIL_LAYERS]
+
+        # Buduj listę searchów do tego cyklu
+        this_cycle_searches = list(tier_grail) + list(tier_a)   # zawsze
+
+        if cycle % 2 == 0:
+            random.shuffle(tier_b)
+            this_cycle_searches += tier_b[:12]   # max 12 z tier_b co 2 cykle
+
+        if cycle % 4 == 0:
+            random.shuffle(tier_c)
+            this_cycle_searches += tier_c[:8]    # max 8 z tier_c co 4 cykle
+
+        # Dodaj no_median searches (duplikaty) tylko co 6 cykli
+        if cycle % 6 == 0:
+            no_median_searches = [s for s in SEARCHES if s.get("no_median")]
+            random.shuffle(no_median_searches)
+            this_cycle_searches += no_median_searches[:6]
+
+        print(f"  🔍 Ten cykl: {len(this_cycle_searches)} searchów "
+              f"(grail={len(tier_grail)}, A={len(tier_a)}, "
+              f"B={'tak' if cycle % 2 == 0 else 'nie'}, "
+              f"C={'tak' if cycle % 4 == 0 else 'nie'})")
+
+        # Zbieramy wyniki
         cycle_candidates = []   # (confidence, search, item, eval_result)
 
-        # Rotacja: priority (premium brands, fresh vintage) zawsze pierwsze,
-        # reszta shufflowana żeby rozkładać obciążenie IP równomiernie
-        _priority_searches = [s for s in SEARCHES if s.get("layer") in ("premium", "lego")]
-        _other_searches    = [s for s in SEARCHES if s not in _priority_searches]
-        random.shuffle(_other_searches)
-        _this_cycle_searches = _priority_searches + _other_searches
-
-        for search in _this_cycle_searches:
+        for search in this_cycle_searches:
             print(f"  ⏳ Sprawdzam: {search['name']}")
             market_price = market_prices.get(search["name"])
             new_items, all_ids = check_search(search, seen, market_price)
