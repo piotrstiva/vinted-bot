@@ -54,7 +54,7 @@ CONFIDENCE_WATCH   = 5.5   # ⚪ WATCH — obniżone z 6.0 (więcej alertów)
 
 DB_MIN_SAMPLES     = 5     # Part 2.7 — minimum próbek (podwyższone dla jakości)
 DB_BUILD_EVERY     = 100   # buduj DB co N nowych itemów (częściej)
-FLIP_MIN_PROFIT    = 25    # Part 5 — obniżone z 30 → 25 zł
+FLIP_MIN_PROFIT    = 20    # Part 2 — obniżone z 25 → 20 zł
 FAKE_LUXURY_RATIO  = 0.35
 
 # Part 2 — rolling window
@@ -1634,6 +1634,29 @@ class Engine:
             if is_sw_lego:
                 confidence = min(confidence + 2.0, 10.0)
 
+        # ── PART 7 — TRASH FILTER (hard reject low-value women's items) ─
+        TRASH_KEYWORDS = [
+            "dress", "sukienka", "blouse", "bluzka", "bikini",
+            "crop top", "leggings", "legginsy", "kombinezon bodysuit",
+        ]
+        if contains_keywords(title, TRASH_KEYWORDS):
+            if not is_grail and price < 80:
+                if DEBUG_ALERTS:
+                    print(f"  🗑️ TRASH skip | {title[:40]}")
+                return {
+                    "send_alert": False, "tier": None,
+                    "confidence": confidence, "scoring": scoring,
+                    "ai_data": ai_data, "db_data": db_data,
+                    "brand": brand, "category": category,
+                    "flip_profit": scoring.get("flip_profit", 0), "item": item,
+                    "market_price": market_price, "is_grail": is_grail,
+                    "grail_score": g_score, "deal_tag": deal_tag,
+                    "flip_speed": flip_speed, "item_age_min": item_age_minutes,
+                    "undervalue_ratio": round(undervalue_ratio, 3),
+                    "freshness_tier": freshness_tier,
+                    "_skip_reason": "trash_item",
+                }
+
         # PART 7 — CONTEXTUAL SCORING (additive on top of confidence)
         ctx_score = 0
         if brand:
@@ -1688,14 +1711,54 @@ class Engine:
             if fallback_key not in self.db.db:
                 self.db.add_sample(fallback_key, price)
 
-        # PART 8 — FINAL ALERT LOGIC
+        # ── PART 3+4 — LOW-DATA FALLBACK (no MarketDB) ───────────
+        low_confidence_mode = False
+        has_db_data         = db_data is not None and estimated_market_price is not None
+        if not has_db_data:
+            # Heuristic market estimate
+            if not estimated_market_price:
+                estimated_market_price = price * 1.6
+                undervalue_ratio       = price / estimated_market_price   # always 0.625
+                strong_undervalue      = undervalue_ratio < 0.6
+            flip_profit         = max(flip_profit, estimated_market_price - price)
+            low_confidence_mode = True
+
+            # PART 4 — baseline confidence when no DB
+            confidence = max(confidence, 5.5)
+            if brand:
+                confidence = min(confidence + 1.0, 10.0)
+            if _has_vintage or contains_keywords(title, REAL_VINTAGE_KEYWORDS):
+                confidence = min(confidence + 1.0, 10.0)
+            if price < 50:
+                confidence = min(confidence + 0.5, 10.0)
+
+        # PART 1 — no-brand PENALTY (not a block)
         if not _has_brand:
-            if not is_grail and confidence < 7.0:
-                send_alert = False
-                if DEBUG_ALERTS:
-                    print(f"  ⛔ no-brand (conf={confidence:.1f}<7): {title[:35]}")
-            else:
-                send_alert = True
+            confidence = max(confidence - 2.0, 0.0)
+
+        # Confidence floor for ai_decision
+        if confidence < 5.0:
+            ai_decision = "SKIP"
+
+        flip_min    = 10 if is_grail else FLIP_MIN_PROFIT
+        force_alert = (
+            db_data is not None and
+            price < db_data["avg"] * 0.50
+        )
+        tier        = get_alert_tier(confidence, ai_decision)
+
+        # High-value mode (items 150+ zł)
+        high_value = price >= 150
+        if high_value and estimated_market_price:
+            if price < estimated_market_price * 0.75:
+                confidence  = min(confidence + 2.0, 10.0)
+                flip_profit = max(flip_profit, estimated_market_price * 0.25)
+
+        # ── PART 5 — GRAIL OVERRIDE ───────────────────────────────
+        if is_grail:
+            send_alert = flip_profit >= 10
+
+        # ── PART 8 — FINAL ALERT LOGIC (unified, no hard brand/DB blocks) ──
         else:
             effective_price  = scoring.get("effective_price", price)
             market_price_db  = scoring.get("market_price_db")
@@ -1703,24 +1766,29 @@ class Engine:
                 market_price_db is not None and
                 effective_price < market_price_db * 0.85
             )
-            if is_grail:
-                send_alert = flip_profit >= 10
-            else:
-                # PART 8 — upgraded final alert rule
-                send_alert = (
-                    (flip_profit >= 25 and confidence >= 6.0)
-                    or (is_grail and flip_profit >= 10)
-                    or (strong_undervalue and confidence >= 6.0)
-                    or (price_undervalue and confidence >= 5.5)
-                    or (high_value and undervalue_ratio < 0.75 and confidence >= 5.0)
-                    or (force_alert and confidence >= 5.5)
-                )
+            normal_send = (
+                (flip_profit >= flip_min and confidence >= 6.0)
+                or (strong_undervalue and confidence >= 5.5)
+                or (price_undervalue and confidence >= 5.5)
+                or (high_value and undervalue_ratio < 0.75 and confidence >= 5.0)
+                or (force_alert and confidence >= 5.5)
+            )
+            # PART 3 — low-data path: lower bar when no DB
+            lowdata_send = (
+                low_confidence_mode
+                and flip_profit >= 15
+                and confidence >= 5.0
+            )
+            send_alert = normal_send or lowdata_send
 
-        # PART 9 — DEBUG LOGGING
+        # ── PART 8 — DEBUG OUTPUT ─────────────────────────────────
         if DEBUG_ALERTS:
-            age_str = f"{item_age_minutes}m"
+            lc_tag  = " [LOW-DATA]" if low_confidence_mode else ""
+            gr_tag  = " 💎GRAIL"   if is_grail else ""
             action  = "📤 SEND" if send_alert else "⏭  SKIP"
-            print(f"  {action} | {title[:50]} | price={price} | profit={flip_profit:.0f} | conf={confidence:.1f} | age={age_str}m")
+            age_str = f"{item_age_minutes}m"
+            print(f"  {action}{lc_tag}{gr_tag} | {title[:50]} | price={price} | profit={flip_profit:.0f} | conf={confidence:.1f} | age={age_str}m")
+            print(f"  DEBUG: brand={brand} profit={flip_profit:.0f} conf={confidence:.1f} db={estimated_market_price}")
 
         # Deduplicacja sesyjna
         item_id = str(item.get("id", ""))
