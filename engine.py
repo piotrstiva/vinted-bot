@@ -36,7 +36,7 @@ from collections import defaultdict
 # ─────────────────────────────────────────────────────
 #  📁 PLIKI
 # ─────────────────────────────────────────────────────
-_DATA_DIR     = os.getenv("DATA_DIR", "/tmp/vinted_bot")
+_DATA_DIR     = os.getenv("DATA_DIR", "/data/vinted_bot")
 os.makedirs(_DATA_DIR, exist_ok=True)
 
 DB_FILE       = os.path.join(_DATA_DIR, "market_db.json")
@@ -45,6 +45,45 @@ DEBUG_ALERTS  = True
 
 # Part 6 — zmienione z 15 → 60 min
 MAX_ITEM_AGE_MINUTES = 60
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  🌍 LANGUAGE FILTER
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Słowa typowe dla innych języków niż PL/EN — filtrujemy tytuły
+# gdzie >40% tokenów to nie-PL/EN
+_FOREIGN_TOKENS = {
+    # Rumuński
+    "tricou", "damă", "bumbac", "pantaloni", "geacă", "haina", "bluza",
+    "fusta", "rochie", "sacou", "palton", "cizme", "ghete", "pantofi",
+    "marime", "culoare", "stare", "nou", "purtata", "foarte", "buna",
+    # Fiński
+    "paita", "takki", "housut", "kengät", "uusi", "hyvä", "kunto",
+    "hinta", "myyn", "koko", "väri", "urheil",
+    # Węgierski
+    "dzseki", "nadrág", "cipő", "póló", "méret", "állapot", "szép",
+    "eladó", "újszerű", "használt", "kabát", "felső",
+    # Czeski/Słowacki
+    "bunda", "mikina", "tričko", "kalhoty", "boty", "nový", "dobrý",
+    "stav", "pánský", "dámský", "veľkosť",
+    # Litewski/Łotewski/Estoński
+    "striukė", "marškinėliai", "batai", "džinsai", "nauji",
+    # Duński/Norweski/Szwedzki
+    "trøje", "jakke", "bukser", "sko", "sælger", "brugt", "stand",
+    "størrelse", "farve", "dragt", "vindjacka", "byxor",
+}
+
+def is_foreign_title(title: str, threshold: float = 0.40) -> bool:
+    """
+    Zwraca True jeśli tytuł jest podejrzanie obcojęzyczny.
+    threshold = odsetek tokenów które są w liście obcych słów.
+    """
+    tokens = re.findall(r'[a-zA-ZąćęłńóśźżĄĆĘŁŃÓŚŹŻ]+', title.lower())
+    if len(tokens) < 3:
+        return False   # Za krótki tytuł — nie odrzucaj
+    foreign = sum(1 for t in tokens if t in _FOREIGN_TOKENS)
+    return (foreign / len(tokens)) >= threshold
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -297,6 +336,10 @@ class ChaosEngine:
         base = {"engine": "CHAOS", "item": item, "send_alert": False,
                 "tier": "CHAOS", "profit": 0, "confidence": 0}
 
+        # Fix: filtr języka — odrzuć rumuńskie, fińskie, węgierskie tytuły
+        if is_foreign_title(title):
+            return {**base, "_skip_reason": "foreign_language"}
+
         if kw(title, _CHAOS_TRASH):
             return {**base, "_skip_reason": "trash"}
         if price > 120 or price < 18:
@@ -323,13 +366,36 @@ class ChaosEngine:
 
         # Scoring
         score = 0.0
-        if _is_vintage(title):          score += 1.0
-        if kw(title, _CHAOS_STYLE_KW):  score += 1.0
+        if _is_vintage(title):           score += 1.0
+        if kw(title, _CHAOS_STYLE_KW):   score += 1.0
         if kw(title, _CHAOS_VINTAGE_KW): score += 2.0
         if detect_brand(title):          score += 1.0
         if 20 <= price <= 50:            score += 1.0
         elif 50 < price <= 80:           score += 0.5
         score += freshness_boost(age) * 0.3
+
+        # Fix 3: Category quality bonus/penalty
+        if cat == "jacket":             score += 1.0   # kurtki — najlepszy flip
+        elif cat == "hoodie":           score += 0.5   # bluzy — OK
+        elif cat == "sneakers":         score -= 1.5   # buty — trudne bez weryfikacji
+        elif cat == "tshirt" and not _is_vintage(title): score -= 0.5  # zwykłe t-shirty
+
+        # Fix 6: Odrzuć damskie koszulki sportowych marek (Lotto/Kappa/Diadora)
+        # To główna przyczyna spamu "Tricou Lotto", "Koszulka damska Lotto" itp.
+        _WOMENS_KW    = ["damska", "damski", "women", "woman", "damen",
+                         "femme", "donna", "feminino", "dámský", "dámská"]
+        _SPORT_ONLY   = {"lotto", "kappa", "diadora", "hummel", "admiral",
+                         "le coq sportif", "erima", "joma"}
+        _is_womens    = kw(title, _WOMENS_KW)
+        _sport_brand  = any(b in title.lower() for b in _SPORT_ONLY)
+        if _is_womens and _sport_brand:
+            return {**base, "_skip_reason": "womens_sport_brand"}
+
+        # Fix 6: Koszulki sportowe (cycling, rowerowe, fitness) → nie są jersey piłkarski
+        _SPORT_ONLY_KW = ["rowerow", "kolarski", "cycling", "fitness",
+                          "siłowni", "silowni", "running", "treningow"]
+        if kw(title, _SPORT_ONLY_KW) and cat == "tshirt":
+            return {**base, "_skip_reason": "sport_activity_tshirt"}
 
         # Send rule
         send = (price <= 80 and profit >= 15 and score >= 1.0)
@@ -427,6 +493,10 @@ class BrandEngine:
         base = {"engine": "BRAND", "item": item, "send_alert": False,
                 "tier": "BRAND", "profit": 0, "confidence": 0,
                 "brand": brand, "category": category}
+
+        # Fix: filtr języka
+        if is_foreign_title(title):
+            return {**base, "_skip_reason": "foreign_language"}
 
         if not brand:
             return {**base, "_skip_reason": "no_brand"}
@@ -534,7 +604,7 @@ class BrandEngine:
 _GRAIL_KEYWORDS = [
     "single stitch", "made in usa", "90s", "80s", "70s",
     "tour", "promo", "band", "band tee", "movie", "film",
-    "rap tee", "harley davidson", "bootleg", "concert tee",
+    "rap tee", "harley davidson", "harley", "bootleg", "concert tee",
     "deadstock", "grateful dead", "nirvana", "metallica",
     "ac/dc", "acdc", "wu-tang", "wu tang",
 ]
@@ -584,6 +654,10 @@ class GrailEngine:
         base = {"engine": "GRAIL", "item": item, "send_alert": False,
                 "tier": "GRAIL", "profit": 0, "confidence": 0,
                 "is_grail": False, "grail_score": 0}
+
+        # Fix: filtr języka — grail musi mieć tytuł w PL/EN
+        if is_foreign_title(title):
+            return {**base, "_skip_reason": "foreign_language"}
 
         age = item_age_minutes(item)
         if age > MAX_ITEM_AGE_MINUTES * 6:
@@ -767,12 +841,23 @@ class Engine:
         )
 
         # Sesyjna deduplikacja — GRAIL zawsze przebija (nie blokuj przez stary CHAOS send)
+        # Fix 5: max 2 alerty per brand per cykl
+        brand_counts: dict[str, int] = {}
         final = []
         for r in deduped:
             item_id  = str(r["item"].get("id", ""))
             is_grail = r.get("is_grail", False)
             if item_id and item_id in self._alerted_ids and not is_grail:
                 continue
+
+            # Fix 5 — brand cap (grail omija limit)
+            brand = r.get("brand") or ""
+            if brand and not is_grail:
+                count = brand_counts.get(brand, 0)
+                if count >= 2:
+                    continue
+                brand_counts[brand] = count + 1
+
             if item_id:
                 self._alerted_ids.add(item_id)
             final.append(r)
