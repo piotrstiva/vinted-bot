@@ -2776,57 +2776,49 @@ while True:
                 if cat and cat in _cat_to_median:
                     market_prices[s["name"]] = _cat_to_median[cat]
 
-        # Step 6 — TIERED ROTATION: nie sprawdzamy 61 searchów na raz
-        # Tier A (każdy cykl):    premium brands + grail vintage         ~15 searchów
-        # Tier B (co 2 cykle):    chaos + category + targeted            ~25 searchów
-        # Tier C (co 4 cykle):    football nisze + lego + duplikaty      ~21 searchów
-        # Łącznie per cykl: max ~18-20 requestów → brak masowego bana
-
+        # ── STEP 6 — Zbierz nowe itemy ze wszystkich searchów ──────────
+        # Tiered rotation: nie scrapujemy 61 searchów na raz (ban IP)
         TIER_A_LAYERS = {"wide_brand", "premium"}
         TIER_B_LAYERS = {"chaos", "category", "targeted"}
         TIER_C_LAYERS = {"football", "lego"}
         GRAIL_LAYERS  = {"grail"}
 
-        tier_a = [s for s in SEARCHES if s.get("layer") in TIER_A_LAYERS and not s.get("no_median")]
-        tier_b = [s for s in SEARCHES if s.get("layer") in TIER_B_LAYERS]
-        tier_c = [s for s in SEARCHES if s.get("layer") in TIER_C_LAYERS]
-        # Grail zawsze — to najważniejsze
+        tier_a     = [s for s in SEARCHES if s.get("layer") in TIER_A_LAYERS and not s.get("no_median")]
+        tier_b     = [s for s in SEARCHES if s.get("layer") in TIER_B_LAYERS]
+        tier_c     = [s for s in SEARCHES if s.get("layer") in TIER_C_LAYERS]
         tier_grail = [s for s in SEARCHES if s.get("layer") in GRAIL_LAYERS]
 
-        # Buduj listę searchów do tego cyklu
         this_cycle_searches = list(tier_grail) + list(tier_a)   # zawsze
 
         if cycle % 2 == 0:
             random.shuffle(tier_b)
-            this_cycle_searches += tier_b[:12]   # max 12 z tier_b co 2 cykle
+            this_cycle_searches += tier_b[:12]
 
         if cycle % 4 == 0:
             random.shuffle(tier_c)
-            this_cycle_searches += tier_c[:8]    # max 8 z tier_c co 4 cykle
+            this_cycle_searches += tier_c[:8]
 
-        # Dodaj no_median searches (duplikaty) tylko co 6 cykli
         if cycle % 6 == 0:
-            no_median_searches = [s for s in SEARCHES if s.get("no_median")]
-            random.shuffle(no_median_searches)
-            this_cycle_searches += no_median_searches[:6]
+            no_median_s = [s for s in SEARCHES if s.get("no_median")]
+            random.shuffle(no_median_s)
+            this_cycle_searches += no_median_s[:6]
 
-        print(f"  🔍 Ten cykl: {len(this_cycle_searches)} searchów "
+        print(f"  \U0001f50d Ten cykl: {len(this_cycle_searches)} searchów "
               f"(grail={len(tier_grail)}, A={len(tier_a)}, "
-              f"B={'tak' if cycle % 2 == 0 else 'nie'}, "
-              f"C={'tak' if cycle % 4 == 0 else 'nie'})")
+              f"B={'tak' if cycle%2==0 else 'nie'}, "
+              f"C={'tak' if cycle%4==0 else 'nie'})")
 
-        # Zbieramy wyniki
-        cycle_candidates = []   # (confidence, search, item, eval_result)
+        # Zbierz wszystkie nowe itemy z tego cyklu
+        all_new_items:    list = []   # itemy do engine
+        special_items:    list = []   # (search, item) dla trybów specjalnych
+        now = time.time()
 
         for search in this_cycle_searches:
-            print(f"  ⏳ Sprawdzam: {search['name']}")
+            print(f"  \u23f3 Sprawdzam: {search['name']}")
             market_price = market_prices.get(search["name"])
             new_items, all_ids = check_search(search, seen, market_price)
-            print(f"  ✔ Gotowe: {search['name']} — nowych: {len(new_items)}")
+            print(f"  \u2714 Gotowe: {search['name']} \u2014 nowych: {len(new_items)}")
 
-            # FIX 2 — oznacz WSZYSTKIE widziane ID jako seen
-            # (nie tylko wysłane) żeby nie wracały co cykl
-            now = time.time()
             for _id in all_ids:
                 if _id not in seen:
                     seen[_id] = now
@@ -2838,183 +2830,105 @@ while True:
             )
 
             for item in new_items[:MAX_ALERTS_PER_SEARCH]:
-
-                # Tryby specjalne — bypass engine, od razu do wysyłki
                 if is_special:
-                    cycle_candidates.append((10.0, search, item, None, now))
-                    continue
-
-                # ── Engine evaluation ─────────────────
-                if engine:
-                    eval_result    = engine.evaluate(item, search, market_price)
-
-                    # PART 1 — skip items with no age data (engine already returned send_alert=False)
-                    if eval_result.get("_skip_reason") == "no_age_data":
-                        if DEBUG_ALERTS:
-                            print(f"  ⏭  SKIP no_age_data | {item['title'][:40]}")
-                        seen[item["id"]] = now
-                        continue
-
-                    # Part 6 — SNIPER BOOST: bardzo świeże itemy (≤ 3 min) → boost
-                    age_min = eval_result.get("item_age_min")
-                    if age_min is not None and age_min <= 3:
-                        eval_result = dict(eval_result)
-                        eval_result["confidence"]  = min(eval_result["confidence"] + 1.0, 10.0)
-                        eval_result["flip_profit"] = eval_result.get("flip_profit", 0) + 5
-                        if DEBUG_ALERTS:
-                            print(f"  ⚡ SNIPER BOOST (age={age_min}min) | {item['title'][:40]}")
-
-                    conf           = eval_result["confidence"]
-                    has_db         = eval_result.get("db_data") is not None
-                    flip_speed     = eval_result.get("scoring", {}).get("flip_speed", "MEDIUM")
-                    flip_profit    = eval_result.get("flip_profit", 0)
-                    is_grail       = eval_result.get("is_grail", False)
-                    detected_brand = eval_result.get("brand", "?")
-                    detected_cat   = eval_result.get("category", "?")
-                    deal_tag       = eval_result.get("deal_tag", "WEAK")
-                    low_data_mode  = not has_db   # PART 3: no DB → don't penalise further
-
-                    # PART 1 — soft confidence check (was hard conf<5.5 block)
-                    # Only skip if engine itself said don't send AND not low-data mode
-                    if not eval_result.get("send_alert") and not is_grail:
-                        seen[item["id"]] = now
-                        continue
-
-                    is_known_brand = detected_brand in {
-                        "carhartt", "arcteryx", "arc'teryx", "salomon",
-                        "supreme", "palace", "stussy", "stone island",
-                        "cp company", "corteiz", "represent",
-                    }
-
-                    # PART 2 — SLOW flip: obniżony próg 20 zł
-                    if flip_speed == "SLOW" and flip_profit < 20 and not is_grail:
-                        if DEBUG_ALERTS:
-                            print(f"  ⏭  SLOW skip profit={flip_profit:.0f}zł | {item['title'][:35]}")
-                        seen[item["id"]] = now
-                        continue
-
-                    if DEBUG_ALERTS:
-                        grail_tag = " 💎GRAIL" if is_grail else ""
-                        print(f"  ✅ conf={conf:.1f} {flip_speed} profit={flip_profit:.0f} {deal_tag}{grail_tag} brand={detected_brand} | {item['title'][:28]}")
-
-                    cycle_candidates.append((conf, search, item, eval_result, now))
+                    special_items.append((search, item))
                 else:
-                    # Bez engine — stary fallback
-                    msg = format_message(search, item)
-                    photo = item.get("photo") or get_item_photo(item["id"], item["link"])
-                    send_message(msg, photo_url=photo, item_link=item.get("link"))
-                    seen[item["id"]] = now
-                    print(f"  ✉️ {item['title'][:55]} | {item['price']:.0f} zł")
+                    all_new_items.append(item)
 
-        # Step 6 — sortuj DESC po confidence, wyślij max 10 per cykl
-        cycle_candidates.sort(key=lambda x: x[0], reverse=True)
+        # ── STEP 7 — MULTI-ENGINE EVALUATION ────────────────────────
+        # Part 1: chaos_items + brand_items + grail_items → all_items
         sent_this_cycle = 0
-        MAX_PER_CYCLE   = 5
+        MAX_PER_CYCLE   = 10
 
-        for conf, search, item, eval_result, now in cycle_candidates:
+        # 7a — Tryby specjalne (football / lego / carhartt) — bypass engine
+        for search, item in special_items:
             if sent_this_cycle >= MAX_PER_CYCLE:
                 seen[item["id"]] = now
                 continue
+            photo = item.get("photo") or get_item_photo(item["id"], item.get("link", ""))
+            msg   = format_message(search, item)
+            send_message(msg, photo_url=photo, item_link=item.get("link"))
+            seen[item["id"]] = now
+            sent_this_cycle += 1
+            tag = "\u26bd" if search.get("football_mode") else "\U0001f9f1"
+            print(f"  {tag} {item['title'][:55]} | {item['price']:.0f} z\u0142")
 
-            photo = item.get("photo") or get_item_photo(item["id"], item["link"])
+        # 7b — run_cycle przez 3 silniki (CHAOS + BRAND + GRAIL)
+        if engine and all_new_items:
+            engine_results = engine.run_cycle(all_new_items, market_prices)
+            engine_results.sort(key=lambda r: -r.get("profit", 0))
 
-            # Tryby specjalne (football/lego_sw/carhartt)
-            if eval_result is None:
-                msg = format_message(search, item)
-                send_message(msg, photo_url=photo, item_link=item.get("link"))
-                seen[item["id"]] = now
-                sent_this_cycle += 1
-                tag = "⚽" if search.get("football_mode") else "🧱"
-                print(f"  {tag} {item['title'][:55]} | {item['price']:.0f} zł")
-                continue
-
-            tier        = eval_result.get("tier")
-            is_grail    = eval_result.get("is_grail", False)
-            flip_profit = eval_result.get("flip_profit", 0)
-            confidence  = eval_result.get("confidence", 0)
-
-            # Fix #6+7 — DEBUG send respektuje nowe progi: profit>=30, conf>=6
-            if DEBUG_ALERTS and flip_profit >= 30 and confidence >= 6.0:
-                engine_msg = engine.format_alert(eval_result)
-                b_tag = detected_brand or "⛔NO-BRAND"
-                print(f"  📤 TG SEND: conf={confidence:.1f} profit={flip_profit:.0f} brand={b_tag} | {item['title'][:40]}")
-                send_message(engine_msg, photo_url=photo, item_link=item.get("link"))
-                seen[item["id"]] = now
-                sent_this_cycle += 1
-                continue
-
-            # minimalne progi profitu per tier
-            MIN_PROFIT_TIER = {
-                "INSANE":    10,
-                "💎 GRAIL":  10,
-                "GOOD":      20,   # PART 2: was 25
-                "WATCH":     30,   # PART 2: was 40
-            }
-            min_p = MIN_PROFIT_TIER.get(tier, 40)
-            if is_grail:
-                min_p = 10   # grail override
-
-            if flip_profit < min_p and not is_grail:
-                print(f"  ⏭  profit skip ({flip_profit:.0f}<{min_p}zł) | {item['title'][:40]}")
-                seen[item["id"]] = now
-                continue
-
-            # INSANE/GOOD/WATCH/GRAIL all get sent — engine already gated quality
-            if tier in ("INSANE", "GOOD", "WATCH", "💎 GRAIL") or is_grail:
-                engine_msg = engine.format_alert(eval_result)
-                if DEBUG_ALERTS:
-                    print(f"  📤 TG SEND: {engine_msg[:80]}")
-                send_message(engine_msg, photo_url=photo, item_link=item.get("link"))
-                seen[item["id"]] = now
-                sent_this_cycle += 1
-                tier_tag = "💎" if is_grail else ("🔴" if tier == "INSANE" else "🟡")
-                print(f"  {tier_tag} [{tier}] conf={conf:.1f} profit={flip_profit:.0f} | {item['title'][:40]}")
-            else:
-                # WATCH / brak tier → pomijamy (zbyt słabe)
-                seen[item["id"]] = now
-
-        # ── PART 3 — FALLBACK: if 0 sent, re-scan with 120-min window ────────
-        if sent_this_cycle == 0:
-            print(f"  ⚠️ FALLBACK MODE — brak wyników, rozszerzam okno do 120 min")
-            _fallback_searches = list(SEARCHES)
-            random.shuffle(_fallback_searches)
-            for search in _fallback_searches:
-                if search.get("football_mode") or search.get("lego_sw_mode") or search.get("carhartt_mode"):
-                    continue  # special modes have their own validators, skip fallback
-                fallback_search = dict(search, _fallback_mode=True)
-                market_price    = market_prices.get(search["name"])
-                fb_items, fb_ids = check_search(fallback_search, seen, market_price)
-                if not fb_items:
-                    continue
-                now = time.time()
-                for _id in fb_ids:
-                    if _id not in seen:
-                        seen[_id] = now
-                for item in fb_items[:2]:  # max 2 per search in fallback
-                    if not engine:
-                        break
-                    eval_result = engine.evaluate(item, search, market_price)
-                    if not eval_result.get("send_alert"):
-                        seen[item["id"]] = now
-                        continue
-                    tier        = eval_result.get("tier")
-                    flip_profit = eval_result.get("flip_profit", 0)
-                    is_grail    = eval_result.get("is_grail", False)
-                    if tier not in ("INSANE", "GOOD", "💎 GRAIL") and not is_grail:
-                        seen[item["id"]] = now
-                        continue
-                    photo      = item.get("photo") or get_item_photo(item["id"], item["link"])
-                    engine_msg = engine.format_alert(eval_result)
-                    send_message(engine_msg, photo_url=photo, item_link=item.get("link"))
-                    seen[item["id"]] = now
-                    sent_this_cycle += 1
-                    print(f"  🔁 FALLBACK SEND | {item['title'][:55]} | {item['price']:.0f} zł")
-                    if sent_this_cycle >= MAX_PER_CYCLE:
-                        break
+            for result in engine_results:
                 if sent_this_cycle >= MAX_PER_CYCLE:
                     break
 
-        print(f"  📊 Cykl #{cycle} zakończony — wysłano: {sent_this_cycle} alertów")
+                item   = result["item"]
+                eng    = result.get("engine", "?")
+                profit = result.get("profit", 0)
+                conf   = result.get("confidence", 0)
+                is_gr  = result.get("is_grail", False)
+
+                min_profit = {"GRAIL": 10, "BRAND": 25, "CHAOS": 15}.get(eng, 15)
+                if is_gr:
+                    min_profit = 10
+
+                if profit < min_profit:
+                    seen[item["id"]] = now
+                    continue
+
+                photo     = item.get("photo") or get_item_photo(item["id"], item.get("link", ""))
+                alert_msg = engine.format_alert(result)
+                send_message(alert_msg, photo_url=photo, item_link=item.get("link"))
+                seen[item["id"]] = now
+                sent_this_cycle += 1
+
+                emoji = {"GRAIL": "\U0001f48e", "BRAND": "\U0001f7e3", "CHAOS": "\U0001f535"}.get(eng, "\u26aa")
+                print(f"  {emoji} [{eng}] conf={conf:.1f} profit={profit:.0f}z\u0142 | {item['title'][:40]}")
+
+        elif not engine:
+            for item in all_new_items[:5]:
+                msg   = format_message({}, item)
+                photo = item.get("photo") or get_item_photo(item["id"], item.get("link", ""))
+                send_message(msg, photo_url=photo, item_link=item.get("link"))
+                seen[item["id"]] = now
+                sent_this_cycle += 1
+
+        # ── STEP 8 — FALLBACK: jeśli 0 wysłanych, rozszerz okno do 120 min ─
+        if sent_this_cycle == 0:
+            print(f"  \u26a0\ufe0f FALLBACK MODE \u2014 brak wyników, rozszerzam okno do 120 min")
+            fallback_items: list = []
+            _fallback_searches = list(SEARCHES)
+            random.shuffle(_fallback_searches)
+
+            for search in _fallback_searches[:10]:
+                if search.get("football_mode") or search.get("lego_sw_mode"):
+                    continue
+                fb_search = dict(search, _fallback_mode=True)
+                fb_items, fb_ids = check_search(fb_search, seen, market_prices.get(search["name"]))
+                for _id in fb_ids:
+                    if _id not in seen:
+                        seen[_id] = now
+                fallback_items.extend(fb_items[:2])
+                if len(fallback_items) >= 20:
+                    break
+
+            if engine and fallback_items:
+                fb_results = engine.run_cycle(fallback_items, market_prices)
+                fb_results.sort(key=lambda r: -r.get("profit", 0))
+                for result in fb_results[:MAX_PER_CYCLE]:
+                    item   = result["item"]
+                    profit = result.get("profit", 0)
+                    if profit < 10:
+                        seen[item["id"]] = now
+                        continue
+                    photo     = item.get("photo") or get_item_photo(item["id"], item.get("link", ""))
+                    alert_msg = engine.format_alert(result)
+                    send_message(alert_msg, photo_url=photo, item_link=item.get("link"))
+                    seen[item["id"]] = now
+                    sent_this_cycle += 1
+                    print(f"  \U0001f501 FALLBACK [{result.get('engine','?')}] | {item['title'][:55]} | {item['price']:.0f} z\u0142")
+
+        print(f"  \U0001f4ca Cykl #{cycle} zakończony \u2014 wysłano: {sent_this_cycle} alertów [CHAOS+BRAND+GRAIL]")
 
         save_seen(seen)
         time.sleep(SLEEP_BETWEEN_CYCLES)
