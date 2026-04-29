@@ -38,7 +38,7 @@ HEADERS = {
 MIN_DISCOUNT_PCT = 40      # % poniżej mediany → okazja
 MIN_AI_CONFIDENCE = 60     # % pewności AI że to ukryta okazja
 MIN_SAVING_PLN   = 6       # minimalna oszczędność w zł (odrzuć 1-5 zł różnicę)
-MAX_ALERTS_PER_SEARCH = 5  # max powiadomień per wyszukiwanie per cykl
+MAX_ALERTS_PER_SEARCH = 20  # więcej itemów do engine — silniki same filtrują jakość
 DEBUG_ALERTS          = True  # FIX: loguj decyzje engine (conf, profit, grail)
 
 # ─────────────────────────────────────────
@@ -2747,17 +2747,26 @@ while True:
         if cycle % 50 == 0:
             refresh_session()
 
-        # Mediany co 30 cykli (~7-8 min) zamiast co 10 — mniej 403
-        if cycle % 30 == 0:
-            print("\n📊 Aktualizuję mediany rynkowe...")
-            for i, search in enumerate(SEARCHES):
-                # Pomijamy hidden_gem_mode i no_median — nie potrzebują własnej mediany
-                if search.get("hidden_gem_mode") or search.get("no_median"):
-                    continue
-                print(f"  [{i+1}/{len(SEARCHES)}] {search['name']}...")
-                market_prices[search["name"]] = get_market_median(search)
-                time.sleep(random.uniform(4.0, 7.0))   # dodatkowy sleep między medianami
-            print(f"📊 Mediany gotowe ({sum(1 for s in SEARCHES if not s.get('hidden_gem_mode') and not s.get('no_median'))} searchów) — startuje cykl")
+        # Mediany w tle — co 60 cykli (~90 min), uruchamiamy osobny wątek
+        # żeby nie blokować głównej pętli przez 12 minut
+        if cycle % 60 == 0 and cycle > 0:
+            import threading
+            def _update_medians_bg():
+                cnt = 0
+                median_searches = [s for s in SEARCHES
+                                   if not s.get("hidden_gem_mode") and not s.get("no_median")]
+                print(f"\n📊 [BG] Start aktualizacji median ({len(median_searches)} searchów)...")
+                for s in median_searches:
+                    try:
+                        val = get_market_median(s)
+                        if val:
+                            market_prices[s["name"]] = val
+                            cnt += 1
+                        time.sleep(random.uniform(5.0, 9.0))
+                    except:
+                        pass
+                print(f"📊 [BG] Mediany zaktualizowane: {cnt}/{len(median_searches)}")
+            threading.Thread(target=_update_medians_bg, daemon=True).start()
 
         cycle += 1
         _consecutive_403 = 0   # reset na starcie cyklu — nie przenoś banów między cyklami
@@ -2819,8 +2828,11 @@ while True:
             new_items, all_ids = check_search(search, seen, market_price)
             print(f"  \u2714 Gotowe: {search['name']} \u2014 nowych: {len(new_items)}")
 
+            # Oznacz jako seen tylko stare itemy (nie w new_items).
+            # Nowe itemy są oznaczane dopiero po engine evaluation.
+            new_ids = {str(it.get("id", "")) for it in new_items}
             for _id in all_ids:
-                if _id not in seen:
+                if _id not in seen and str(_id) not in new_ids:
                     seen[_id] = now
 
             is_special = (
