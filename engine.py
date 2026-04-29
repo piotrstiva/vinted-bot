@@ -306,9 +306,20 @@ class ChaosEngine:
         if age > MAX_ITEM_AGE_MINUTES * 6:
             return {**base, "_skip_reason": "stale"}
 
-        # Profit logic (Part 2)
-        estimated_value = price * 1.6
-        profit          = estimated_value - price   # = price * 0.6
+        # Profit logic — użyj ceny rynkowej brandu jeśli dostępna
+        brand = detect_brand(title)
+        cat   = detect_category(title)
+        brand_heuristic = None
+        if brand and cat:
+            bp = _HEURISTIC_PRICES.get(brand)
+            if bp:
+                brand_heuristic = bp.get(cat, bp["default"])
+
+        if brand_heuristic and brand_heuristic > price * 1.4:
+            estimated_value = brand_heuristic
+        else:
+            estimated_value = price * 1.6
+        profit = estimated_value - price
 
         # Scoring
         score = 0.0
@@ -449,13 +460,14 @@ class BrandEngine:
         if brand in LUXURY_BRANDS and price < 100:
             conf -= 3.0
 
-        # Send rule: price < median * 0.7 AND profit >= 25
+        # SEND RULE: price < median * 0.7 AND profit >= 25
+        # conf >= 4.5 (obniżone z 5.0 — baseline brand+category = 5.0, nie blokuj)
         send = bool(
             median_price and
             median_price > 0 and
             price < median_price * 0.7 and
             profit >= 25 and
-            conf >= 5.0
+            conf >= 4.5
         )
 
         # DB learning
@@ -478,20 +490,40 @@ class BrandEngine:
         }
 
     def _find_median(self, brand: str, category: str, market_prices: dict) -> float | None:
-        # 1. bot.py market_prices (Vinted endpoint)
+        brand_l = brand.lower()
+
+        # 1. bot.py market_prices — szukaj najlepszego dopasowania
+        # Priorytet: exact brand match > partial match
+        best_mp = None
+        best_score = 0
         for mp_key, mp_val in market_prices.items():
-            if brand.lower() in mp_key.lower() and mp_val:
-                return float(mp_val)
+            if not mp_val:
+                continue
+            key_l = mp_key.lower()
+            # Exact brand in key (np. "new balance" in "New Balance 1906R")
+            if brand_l in key_l:
+                # Preferuj klucz bez extra słów (np. "New Balance" > "New Balance 1906R")
+                score = 10 - key_l.replace(brand_l, "").count(" ")
+                if score > best_score:
+                    best_score = score
+                    best_mp = float(mp_val)
+        if best_mp:
+            return best_mp
+
         # 2. MarketDB
         db_data = self.db.lookup_brand_category(brand, category)
         if db_data:
             v = db_data.get("median") or db_data.get("avg")
             if v:
                 return float(v)
-        # 3. Heurystyczna cena
-        brand_prices = _HEURISTIC_PRICES.get(brand)
-        if brand_prices:
+
+        # 3. Heurystyczna cena (zawsze dostępna dla znanych brandów)
+        brand_prices = _HEURISTIC_PRICES.get(brand_l) or _HEURISTIC_PRICES.get(brand)
+        if brand_prices and category:
             return float(brand_prices.get(category, brand_prices["default"]))
+        if brand_prices:
+            return float(brand_prices["default"])
+
         return None
 
 
@@ -711,29 +743,35 @@ class Engine:
     def run_cycle(self, items: list[dict], market_prices: dict | None = None) -> list[dict]:
         """
         Uruchamia wszystkie 3 silniki i zwraca deduplikowane wyniki.
-        Part 1: chaos_items + brand_items + grail_items → all_items.
+        Priorytet: GRAIL > BRAND > CHAOS (gdy ten sam item pasuje do wielu silników).
         """
         chaos_r = self.chaos.run(items)
         brand_r = self.brand.run(items, market_prices)
         grail_r = self.grail.run(items)
         all_r   = chaos_r + brand_r + grail_r
 
-        # Deduplikacja po item_id (jeden item → max jeden silnik)
-        seen_ids: set[str] = set()
-        deduped = []
-        for r in sorted(all_r, key=lambda x: -x.get("profit", 0)):
+        # Deduplikacja po item_id — zachowaj wersję z najwyższym profit
+        # GRAIL ma zwykle najwyższy profit więc naturalnie "wygrywa"
+        best: dict[str, dict] = {}
+        for r in all_r:
             item_id = str(r["item"].get("id", ""))
-            if item_id and item_id in seen_ids:
+            if not item_id:
                 continue
-            if item_id:
-                seen_ids.add(item_id)
-            deduped.append(r)
+            if item_id not in best or r.get("profit", 0) > best[item_id].get("profit", 0):
+                best[item_id] = r
 
-        # Sesyjna deduplikacja
+        # Zwróć tylko te które mają send_alert=True, sortuj po profit DESC
+        deduped = sorted(
+            [r for r in best.values() if r.get("send_alert")],
+            key=lambda x: -x.get("profit", 0)
+        )
+
+        # Sesyjna deduplikacja — GRAIL zawsze przebija (nie blokuj przez stary CHAOS send)
         final = []
         for r in deduped:
-            item_id = str(r["item"].get("id", ""))
-            if item_id and item_id in self._alerted_ids:
+            item_id  = str(r["item"].get("id", ""))
+            is_grail = r.get("is_grail", False)
+            if item_id and item_id in self._alerted_ids and not is_grail:
                 continue
             if item_id:
                 self._alerted_ids.add(item_id)
