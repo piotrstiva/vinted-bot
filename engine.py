@@ -41,7 +41,70 @@ os.makedirs(_DATA_DIR, exist_ok=True)
 
 DB_FILE       = os.path.join(_DATA_DIR, "market_db.json")
 
-DEBUG_ALERTS  = True
+DEBUG_ALERTS    = True
+DEBUG_PIPELINE  = os.getenv("DEBUG_PIPELINE", "0") == "1"   # Part 7 — verbose pipeline log
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  🧠 PART 1 — CENTRAL FEATURE EXTRACTION
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def extract_item_features(item: dict) -> dict:
+    """
+    Single source of truth dla cech itemu.
+    ZAWSZE zwraca pełny dict — nigdy nie crashuje.
+    Używane przez wszystkie 3 silniki i check_search w bot.py.
+
+    Returns:
+        brand       : str | None  — wykryty brand
+        has_brand   : bool        — czy brand wykryty
+        is_vintage  : bool        — czy sygnały vintage
+        category    : str | None  — hoodie/tshirt/jacket/jeans/...
+        keywords    : list[str]   — znalezione tagi vintage/style
+    """
+    try:
+        if not item or not isinstance(item, dict):
+            return {"brand": None, "has_brand": False,
+                    "is_vintage": False, "category": None, "keywords": []}
+        title  = str(item.get("title") or "")
+        t      = title.lower()
+
+        brand    = detect_brand(title)
+        category = detect_category(title)
+
+        # Zbierz pasujące tagi
+        _TAGS = [
+            "vintage", "90s", "80s", "70s", "y2k", "single stitch",
+            "made in usa", "retro", "archive", "deadstock",
+            "band tee", "tour shirt", "rap tee", "tour", "bootleg",
+            "grunge", "streetwear", "workwear", "gorpcore", "skater",
+            "baggy", "oversized", "distressed",
+        ]
+        tags = [tag for tag in _TAGS if tag in t]
+
+        is_vintage = _is_vintage(title)
+
+        feat = {
+            "brand":      brand,
+            "has_brand":  brand is not None,
+            "is_vintage": is_vintage,
+            "category":   category,
+            "keywords":   tags,
+        }
+
+        if DEBUG_PIPELINE:
+            print(f"  [FEAT] brand={brand} vintage={is_vintage} "
+                  f"cat={category} tags={tags} | {title[:50]}")
+
+        return feat
+
+    except Exception as e:
+        # Part 6 — NIGDY nie crashuj cichutko; zawsze loguj
+        print(f"  ❌ extract_item_features ERROR: {e} | item={item.get('title','?')[:60]}")
+        return {
+            "brand": None, "has_brand": False,
+            "is_vintage": False, "category": None, "keywords": [],
+        }
 
 # Part 6 — zmienione z 15 → 60 min
 MAX_ITEM_AGE_MINUTES = 60
@@ -72,18 +135,28 @@ _FOREIGN_TOKENS = {
     # Duński/Norweski/Szwedzki
     "trøje", "jakke", "bukser", "sko", "sælger", "brugt", "stand",
     "størrelse", "farve", "dragt", "vindjacka", "byxor",
+    "til", "str", "brugt", "mærke", "pris", "køber",
 }
 
 def is_foreign_title(title: str, threshold: float = 0.40) -> bool:
     """
     Zwraca True jeśli tytuł jest podejrzanie obcojęzyczny.
     threshold = odsetek tokenów które są w liście obcych słów.
+    Bezpiecznie obsługuje None i nie-stringi.
     """
-    tokens = re.findall(r'[a-zA-ZąćęłńóśźżĄĆĘŁŃÓŚŹŻ]+', title.lower())
+    if not title or not isinstance(title, str):
+        return False
+    tokens = re.findall(r'\b[^\W\d_]+\b', title.lower(), re.UNICODE)
     if len(tokens) < 3:
         return False   # Za krótki tytuł — nie odrzucaj
-    foreign = sum(1 for t in tokens if t in _FOREIGN_TOKENS)
-    return (foreign / len(tokens)) >= threshold
+    foreign_hits = sum(1 for t in tokens if t in _FOREIGN_TOKENS)
+    if foreign_hits == 0:
+        return False
+    ratio = foreign_hits / len(tokens)
+    # Dla krótkich tytułów (3-5 tokenów) jeden hit wystarczy
+    if len(tokens) <= 5:
+        return ratio >= 0.20
+    return ratio >= threshold
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -206,77 +279,186 @@ def _is_vintage(title: str) -> bool:
 
 class MarketDB:
     """
-    Uproszczona baza cen rynkowych.
-    Part 5: NIE blokuje chaos data (brand NOT required).
+    Baza cen rynkowych z pełną persistencją.
+
+    Part 3: automatyczny zapis co 5 min + przy shutdown (atexit).
+    Part 4: rolling window 48h, median/p25/p75, deal classification, anomaly score.
+    Part 6: brak cichych błędów — każdy wyjątek jest logowany.
     """
     MAX_SAMPLES   = 50
     MAX_AGE_HOURS = 48
+    SAVE_INTERVAL = 300   # 5 minut
 
     def __init__(self):
         self.db: dict[str, dict] = {}
+        self._last_save: float   = time.time()
+        self._dirty: bool        = False
         self._load()
+        self._register_atexit()
+
+    # ── LOAD / SAVE ──────────────────────────────────
 
     def _load(self):
+        """Part 3 — wczytaj DB z pliku przy starcie."""
         try:
             if os.path.exists(DB_FILE):
                 with open(DB_FILE) as f:
-                    self.db = json.load(f)
-            print(f"  📦 MarketDB: {len(self.db)} grup")
-        except:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    self.db = loaded
+                    print(f"  📦 MarketDB loaded: {len(self.db)} grup")
+                else:
+                    print(f"  ⚠️ MarketDB: nieprawidłowy format — reset")
+                    self.db = {}
+            else:
+                print(f"  📦 MarketDB: brak pliku — start od zera")
+                self.db = {}
+        except Exception as e:
+            print(f"  ❌ MarketDB load ERROR: {e} — start od zera")
             self.db = {}
 
-    def save(self):
+    def save(self, force: bool = False):
+        """
+        Part 3 — zapisz DB do pliku.
+        Automatycznie co SAVE_INTERVAL lub gdy force=True.
+        """
+        now = time.time()
+        if not force and not self._dirty:
+            return
+        if not force and (now - self._last_save) < self.SAVE_INTERVAL:
+            return
         try:
-            with open(DB_FILE, "w") as f:
+            tmp = DB_FILE + ".tmp"
+            with open(tmp, "w") as f:
                 json.dump(self.db, f, indent=2)
-        except:
-            pass
+            os.replace(tmp, DB_FILE)   # atomic replace
+            self._last_save = now
+            self._dirty     = False
+            if DEBUG_PIPELINE:
+                print(f"  💾 MarketDB saved: {len(self.db)} grup → {DB_FILE}")
+        except Exception as e:
+            print(f"  ❌ MarketDB save ERROR: {e}")
+
+    def _register_atexit(self):
+        """Part 3 — zapisz przy shutdown."""
+        import atexit
+        atexit.register(self.save, force=True)
+
+    # ── ADD SAMPLE ────────────────────────────────────
 
     def add_sample(self, key: str, price: float):
-        """Part 5 — przechowuje próbkę. Klucz może być kategorią lub tytułem."""
-        if not key or price < 10:
+        """
+        Part 4 — przechowuje próbkę ceny.
+        Klucz może być brand_category, chaos_category, grail_category, lub custom.
+        Part 4 (relax): dodaje jeśli brand LUB strong keywords (nie wymaga obu).
+        """
+        if not key or not isinstance(price, (int, float)) or price < 10:
             return
-        now = time.time()
-        if key not in self.db:
-            self.db[key] = {
-                "median": price, "avg": price, "p25": price,
-                "count": 0, "updated": now, "_samples": [],
-            }
-        entry   = self.db[key]
-        samples = entry.get("_samples", [])
-        samples.append({"price": price, "ts": now})
-        samples = [s for s in samples if now - s["ts"] < self.MAX_AGE_HOURS * 3600]
-        samples = samples[-self.MAX_SAMPLES:]
-        prices  = sorted(s["price"] for s in samples)
-        n       = len(prices)
-        if n >= 2:
-            med = statistics.median(prices)
-            entry.update({
-                "median":  round(med, 2),
-                "avg":     round(sum(prices) / n, 2),
-                "p25":     round(prices[max(0, n // 4 - 1)], 2),
-                "p75":     round(prices[min(n - 1, (n * 3) // 4)], 2),
-                "min":     round(prices[0], 2),
-                "max":     round(prices[-1], 2),
-                "count":   n,
-                "updated": now,
-            })
-        entry["_samples"] = samples
-        self.db[key] = entry
+        try:
+            now = time.time()
+            if key not in self.db:
+                self.db[key] = {
+                    "median": price, "avg": price, "p25": price, "p75": price,
+                    "count": 0, "updated": now, "_samples": [],
+                }
+            entry   = self.db[key]
+            samples = entry.get("_samples", [])
+
+            # Rolling window: usuń stare próbki
+            samples.append({"price": float(price), "ts": now})
+            samples = [s for s in samples
+                       if now - s.get("ts", 0) < self.MAX_AGE_HOURS * 3600]
+            samples = samples[-self.MAX_SAMPLES:]
+
+            prices = sorted(s["price"] for s in samples)
+            n      = len(prices)
+
+            entry["count"] = n
+            if n >= 2:
+                med = statistics.median(prices)
+                p25 = prices[max(0, n // 4 - 1)]
+                p75 = prices[min(n - 1, (n * 3) // 4)]
+
+                # Part 4 — deal classification
+                p_cur = float(price)
+                if p_cur < p25:
+                    deal = "STRONG"
+                elif p_cur < med:
+                    deal = "GOOD"
+                else:
+                    deal = "WEAK"
+
+                # Part 4 — anomaly score
+                anomaly = 0
+                if p_cur < med * 0.6:
+                    anomaly = 2
+                elif p_cur < med * 0.75:
+                    anomaly = 1
+
+                entry.update({
+                    "median":        round(med, 2),
+                    "avg":           round(sum(prices) / n, 2),
+                    "p25":           round(p25, 2),
+                    "p75":           round(p75, 2),
+                    "min":           round(prices[0], 2),
+                    "max":           round(prices[-1], 2),
+                    "count":         n,
+                    "updated":       now,
+                    "last_deal":     deal,
+                    "last_anomaly":  anomaly,
+                })
+
+            entry["count"]    = n
+            entry["_samples"] = samples
+            self.db[key]      = entry
+            self._dirty       = True
+
+            # Periodic auto-save (Part 3)
+            self.save()
+
+        except Exception as e:
+            print(f"  ❌ MarketDB.add_sample ERROR: key={key} price={price} | {e}")
+
+    # ── LOOKUP ────────────────────────────────────────
 
     def lookup(self, key: str) -> dict | None:
+        """Zwraca dane dla klucza lub None."""
         return self.db.get(key)
 
     def lookup_brand_category(self, brand: str, category: str | None) -> dict | None:
         """Szuka po brand+category lub samym brand."""
-        if category:
-            key = f"{brand}_{category}"
-            if key in self.db:
-                return self.db[key]
-        for k, v in self.db.items():
-            if brand in k and v.get("count", 0) >= 3:
-                return v
-        return None
+        try:
+            if category:
+                key = f"{brand}_{category}"
+                if key in self.db:
+                    return self.db[key]
+            brand_l = brand.lower()
+            for k, v in self.db.items():
+                if brand_l in k.lower() and v.get("count", 0) >= 3:
+                    return v
+            return None
+        except Exception as e:
+            print(f"  ❌ MarketDB.lookup ERROR: {e}")
+            return None
+
+    def get_deal_tag(self, key: str, price: float) -> str:
+        """
+        Part 4 — zwraca deal tag dla ceny względem DB.
+        Zwraca: 'STRONG' | 'GOOD' | 'WEAK' | 'NO_DATA'
+        """
+        try:
+            entry = self.db.get(key)
+            if not entry or entry.get("count", 0) < 3:
+                return "NO_DATA"
+            p25 = entry.get("p25", 0)
+            med = entry.get("median", 0)
+            if price < p25:
+                return "STRONG"
+            if price < med:
+                return "GOOD"
+            return "WEAK"
+        except:
+            return "NO_DATA"
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -314,29 +496,40 @@ class ChaosEngine:
         self.db       = market_db
         self._sent    = 0
         self._skipped = 0
+        self._errors  = 0
 
     def run(self, items: list[dict]) -> list[dict]:
-        self._sent = self._skipped = 0
+        self._sent = self._skipped = self._errors = 0
+        total   = len(items)
         results = []
         for item in items:
-            r = self._evaluate(item)
-            if r["send_alert"]:
-                results.append(r)
-                self._sent += 1
-            else:
-                self._skipped += 1
+            # Part 2 — pipeline safety: każdy item MUSI być przetworzony
+            try:
+                r = self._evaluate(item)
+                if r["send_alert"]:
+                    results.append(r)
+                    self._sent += 1
+                else:
+                    self._skipped += 1
+            except Exception as e:
+                self._errors += 1
+                title = (item.get("title") or "?")[:80] if isinstance(item, dict) else "?"
+                print(f"  ❌ [CHAOS] ITEM ERROR: {e} | {title}")
         if DEBUG_ALERTS:
-            print(f"  [CHAOS] sent={self._sent} skipped={self._skipped}")
+            print(f"  [CHAOS] processed={total} sent={self._sent} "
+                  f"skipped={self._skipped} errors={self._errors}")
         return results
 
     def _evaluate(self, item: dict) -> dict:
-        title = item.get("title", "")
-        price = item.get("price", 0) or 0
+        # Part 1 — używaj extract_item_features jako single source of truth
+        features = extract_item_features(item)
+        title    = item.get("title", "")
+        price    = float(item.get("price") or 0)
 
         base = {"engine": "CHAOS", "item": item, "send_alert": False,
                 "tier": "CHAOS", "profit": 0, "confidence": 0}
 
-        # Fix: filtr języka — odrzuć rumuńskie, fińskie, węgierskie tytuły
+        # Filtr języka
         if is_foreign_title(title):
             return {**base, "_skip_reason": "foreign_language"}
 
@@ -349,9 +542,11 @@ class ChaosEngine:
         if age > MAX_ITEM_AGE_MINUTES * 6:
             return {**base, "_skip_reason": "stale"}
 
+        # Part 1 — używaj features zamiast lokalnego detect_brand/category
+        brand = features["brand"]
+        cat   = features["category"]
+
         # Profit logic — użyj ceny rynkowej brandu jeśli dostępna
-        brand = detect_brand(title)
-        cat   = detect_category(title)
         brand_heuristic = None
         if brand and cat:
             bp = _HEURISTIC_PRICES.get(brand)
@@ -364,52 +559,59 @@ class ChaosEngine:
             estimated_value = price * 1.6
         profit = estimated_value - price
 
-        # Scoring
+        # Part 5 — scoring przez features (nigdy undefined variable)
         score = 0.0
-        if _is_vintage(title):           score += 1.0
-        if kw(title, _CHAOS_STYLE_KW):   score += 1.0
-        if kw(title, _CHAOS_VINTAGE_KW): score += 2.0
-        if detect_brand(title):          score += 1.0
-        if 20 <= price <= 50:            score += 1.0
-        elif 50 < price <= 80:           score += 0.5
+        if features["is_vintage"]:                score += 1.0
+        if kw(title, _CHAOS_STYLE_KW):            score += 1.0
+        if kw(title, _CHAOS_VINTAGE_KW):          score += 2.0
+        if features["has_brand"]:                 score += 1.0
+        if 20 <= price <= 50:                     score += 1.0
+        elif 50 < price <= 80:                    score += 0.5
         score += freshness_boost(age) * 0.3
 
-        # Fix 3: Category quality bonus/penalty
-        if cat == "jacket":             score += 1.0   # kurtki — najlepszy flip
-        elif cat == "hoodie":           score += 0.5   # bluzy — OK
-        elif cat == "sneakers":         score -= 1.5   # buty — trudne bez weryfikacji
-        elif cat == "tshirt" and not _is_vintage(title): score -= 0.5  # zwykłe t-shirty
+        # Category quality bonus/penalty
+        if cat == "jacket":                                          score += 1.0
+        elif cat == "hoodie":                                        score += 0.5
+        elif cat == "sneakers":                                      score -= 1.5
+        elif cat == "tshirt" and not features["is_vintage"]:         score -= 0.5
 
-        # Fix 6: Odrzuć damskie koszulki sportowych marek (Lotto/Kappa/Diadora)
-        # To główna przyczyna spamu "Tricou Lotto", "Koszulka damska Lotto" itp.
-        _WOMENS_KW    = ["damska", "damski", "women", "woman", "damen",
-                         "femme", "donna", "feminino", "dámský", "dámská"]
-        _SPORT_ONLY   = {"lotto", "kappa", "diadora", "hummel", "admiral",
-                         "le coq sportif", "erima", "joma"}
-        _is_womens    = kw(title, _WOMENS_KW)
-        _sport_brand  = any(b in title.lower() for b in _SPORT_ONLY)
-        if _is_womens and _sport_brand:
+        # Odrzuć damskie koszulki sportowych marek
+        _WOMENS_KW  = ["damska", "damski", "women", "woman", "damen",
+                       "femme", "donna", "feminino", "dámský", "dámská"]
+        _SPORT_ONLY = {"lotto", "kappa", "diadora", "hummel", "admiral",
+                       "le coq sportif", "erima", "joma"}
+        if kw(title, _WOMENS_KW) and brand in _SPORT_ONLY:
             return {**base, "_skip_reason": "womens_sport_brand"}
 
-        # Fix 6: Koszulki sportowe (cycling, rowerowe, fitness) → nie są jersey piłkarski
-        _SPORT_ONLY_KW = ["rowerow", "kolarski", "cycling", "fitness",
-                          "siłowni", "silowni", "running", "treningow"]
-        if kw(title, _SPORT_ONLY_KW) and cat == "tshirt":
+        # Koszulki sportowe (cycling, rowerowe) → nie są jersey piłkarski
+        _SPORT_ACT = ["rowerow", "kolarski", "cycling", "fitness",
+                      "siłowni", "silowni", "running", "treningow"]
+        if kw(title, _SPORT_ACT) and cat == "tshirt":
             return {**base, "_skip_reason": "sport_activity_tshirt"}
 
         # Send rule
         send = (price <= 80 and profit >= 15 and score >= 1.0)
 
-        # DB learning (Part 5 — chaos też uczy DB)
-        cat = detect_category(title)
-        brand = detect_brand(title)
+        # Part 4 — DB learning (brand OR keywords — relaxed rule)
         if cat:
             self.db.add_sample(f"chaos_{cat}", price)
         if brand and cat:
             self.db.add_sample(f"{brand}_{cat}", price)
+        elif features["is_vintage"] and cat:
+            self.db.add_sample(f"vintage_{cat}", price)
+
+        # Part 4 — deal tag z DB
+        deal_tag = "NO_DATA"
+        if cat:
+            db_key   = f"{brand}_{cat}" if brand else f"chaos_{cat}"
+            deal_tag = self.db.get_deal_tag(db_key, price)
 
         if DEBUG_ALERTS and send:
-            print(f"  ⚡ [CHAOS] {title[:55]} | {price}zł | profit≈{profit:.0f}zł | score={score:.1f}")
+            print(f"  ⚡ [CHAOS] {title[:55]} | {price}zł | "
+                  f"profit≈{profit:.0f}zł | score={score:.1f} | deal={deal_tag}")
+        if DEBUG_PIPELINE:
+            print(f"  [CHAOS-DBG] brand={brand} cat={cat} vintage={features['is_vintage']} "
+                  f"score={score:.1f} send={send} skip={'—' if send else 'score_too_low'}")
 
         return {
             **base,
@@ -421,6 +623,7 @@ class ChaosEngine:
             "category":        cat,
             "age_min":         age,
             "score":           round(score, 2),
+            "deal_tag":        deal_tag,
             "_skip_reason":    None if send else "score_too_low",
         }
 
@@ -468,37 +671,47 @@ class BrandEngine:
         self.db       = market_db
         self._sent    = 0
         self._skipped = 0
+        self._errors  = 0
 
     def run(self, items: list[dict], market_prices: dict | None = None) -> list[dict]:
-        self._sent = self._skipped = 0
+        self._sent = self._skipped = self._errors = 0
+        total = len(items)
         results = []
         market_prices = market_prices or {}
         for item in items:
-            r = self._evaluate(item, market_prices)
-            if r["send_alert"]:
-                results.append(r)
-                self._sent += 1
-            else:
-                self._skipped += 1
+            try:
+                r = self._evaluate(item, market_prices)
+                if r["send_alert"]:
+                    results.append(r)
+                    self._sent += 1
+                else:
+                    self._skipped += 1
+            except Exception as e:
+                self._errors += 1
+                title = (item.get("title") or "?")[:80] if isinstance(item, dict) else "?"
+                print(f"  ❌ [BRAND] ITEM ERROR: {e} | {title}")
         if DEBUG_ALERTS:
-            print(f"  [BRAND] sent={self._sent} skipped={self._skipped}")
+            print(f"  [BRAND] processed={total} sent={self._sent} "
+                  f"skipped={self._skipped} errors={self._errors}")
         return results
 
     def _evaluate(self, item: dict, market_prices: dict) -> dict:
+        # Part 1 — single source of truth
+        features = extract_item_features(item)
         title    = item.get("title", "")
-        price    = item.get("price", 0) or 0
-        brand    = detect_brand(title)
-        category = detect_category(title)
+        price    = float(item.get("price") or 0)
+        brand    = features["brand"]
+        category = features["category"]
 
         base = {"engine": "BRAND", "item": item, "send_alert": False,
                 "tier": "BRAND", "profit": 0, "confidence": 0,
                 "brand": brand, "category": category}
 
-        # Fix: filtr języka
         if is_foreign_title(title):
             return {**base, "_skip_reason": "foreign_language"}
 
-        if not brand:
+        # Part 5 — używaj features["has_brand"] zamiast if brand
+        if not features["has_brand"]:
             return {**base, "_skip_reason": "no_brand"}
         if not category:
             return {**base, "_skip_reason": "no_category"}
@@ -507,12 +720,11 @@ class BrandEngine:
         if age > MAX_ITEM_AGE_MINUTES * 4:
             return {**base, "_skip_reason": "stale"}
 
-        # Znajdź medianę (kolejność priorytetów)
         median_price = self._find_median(brand, category, market_prices)
         profit       = (median_price - price) if median_price else 0.0
 
-        # Confidence scoring
-        conf = 3.0   # brand +3
+        # Part 5 — scoring przez features
+        conf = 3.0   # has_brand +3
         if category:
             conf += 2.0   # category +2
 
@@ -520,43 +732,46 @@ class BrandEngine:
             ratio = price / median_price
             if ratio < 0.50:   conf += 4.0
             elif ratio < 0.60: conf += 3.0
-            elif ratio < 0.70: conf += 2.0   # good price +2
+            elif ratio < 0.70: conf += 2.0
             elif ratio < 0.80: conf += 1.0
             else:              conf -= 1.0
 
         conf += freshness_boost(age) * 0.4
 
-        # Luxury fake guard
         if brand in LUXURY_BRANDS and price < 100:
             conf -= 3.0
 
-        # SEND RULE: price < median * 0.7 AND profit >= 25
-        # conf >= 4.5 (obniżone z 5.0 — baseline brand+category = 5.0, nie blokuj)
         send = bool(
-            median_price and
-            median_price > 0 and
+            median_price and median_price > 0 and
             price < median_price * 0.7 and
-            profit >= 25 and
-            conf >= 4.5
+            profit >= 25 and conf >= 4.5
         )
 
-        # DB learning
+        # Part 4 — DB learning (zawsze, nie tylko gdy send)
         if category:
             self.db.add_sample(f"{brand}_{category}", price)
+
+        # Part 4 — deal tag z DB
+        db_key   = f"{brand}_{category}" if category else brand
+        deal_tag = self.db.get_deal_tag(db_key, price)
 
         if DEBUG_ALERTS and send:
             print(f"  🟣 [BRAND] {title[:55]} | brand={brand} | "
                   f"{price}zł (med={median_price:.0f}zł) | profit≈{profit:.0f}zł | conf={conf:.1f}")
+        if DEBUG_PIPELINE:
+            print(f"  [BRAND-DBG] brand={brand} cat={category} "
+                  f"med={median_price} conf={conf:.1f} send={send}")
 
         return {
             **base,
-            "send_alert":    send,
-            "profit":        round(profit, 2),
-            "median_price":  round(median_price, 2) if median_price else None,
+            "send_alert":      send,
+            "profit":          round(profit, 2),
+            "median_price":    round(median_price, 2) if median_price else None,
             "estimated_value": round(median_price, 2) if median_price else 0,
-            "confidence":    round(min(conf, 10.0), 2),
-            "age_min":       age,
-            "_skip_reason":  None if send else "below_threshold",
+            "confidence":      round(min(conf, 10.0), 2),
+            "age_min":         age,
+            "deal_tag":        deal_tag,
+            "_skip_reason":    None if send else "below_threshold",
         }
 
     def _find_median(self, brand: str, category: str, market_prices: dict) -> float | None:
@@ -631,31 +846,40 @@ class GrailEngine:
         self.db       = market_db
         self._sent    = 0
         self._skipped = 0
+        self._errors  = 0
 
     def run(self, items: list[dict]) -> list[dict]:
-        self._sent = self._skipped = 0
+        self._sent = self._skipped = self._errors = 0
+        total   = len(items)
         results = []
         for item in items:
-            r = self._evaluate(item)
-            if r["send_alert"]:
-                results.append(r)
-                self._sent += 1
-            else:
-                self._skipped += 1
+            try:
+                r = self._evaluate(item)
+                if r["send_alert"]:
+                    results.append(r)
+                    self._sent += 1
+                else:
+                    self._skipped += 1
+            except Exception as e:
+                self._errors += 1
+                title = (item.get("title") or "?")[:80] if isinstance(item, dict) else "?"
+                print(f"  ❌ [GRAIL] ITEM ERROR: {e} | {title}")
         if DEBUG_ALERTS:
-            print(f"  [GRAIL] sent={self._sent} skipped={self._skipped}")
+            print(f"  [GRAIL] processed={total} sent={self._sent} "
+                  f"skipped={self._skipped} errors={self._errors}")
         return results
 
     def _evaluate(self, item: dict) -> dict:
-        title = item.get("title", "")
-        price = item.get("price", 0) or 0
-        t     = title.lower()
+        # Part 1 — single source of truth
+        features = extract_item_features(item)
+        title    = item.get("title", "")
+        price    = float(item.get("price") or 0)
+        t        = title.lower()
 
         base = {"engine": "GRAIL", "item": item, "send_alert": False,
                 "tier": "GRAIL", "profit": 0, "confidence": 0,
                 "is_grail": False, "grail_score": 0}
 
-        # Fix: filtr języka — grail musi mieć tytuł w PL/EN
         if is_foreign_title(title):
             return {**base, "_skip_reason": "foreign_language"}
 
@@ -663,42 +887,46 @@ class GrailEngine:
         if age > MAX_ITEM_AGE_MINUTES * 6:
             return {**base, "_skip_reason": "stale"}
 
-        # Grail scoring (Part 4)
-        score = 0
-
-        kw_hits = sum(1 for k in _GRAIL_KEYWORDS if k in t)
+        # Grail scoring
+        score    = 0
+        kw_hits  = sum(1 for k in _GRAIL_KEYWORDS if k in t)
         if kw_hits >= 1:   score += 2
-        if kw_hits >= 2:   score += 1   # bonus za kombinację
+        if kw_hits >= 2:   score += 1
 
         if kw(title, _GRAIL_BRANDS):   score += 2
 
         # Extra signals
-        if "tour"           in t: score += 1
-        if "single stitch"  in t: score += 1
-        if "band" in t or "movie" in t: score += 1
-        if "bootleg"        in t: score += 1
+        if "tour"                       in t: score += 1
+        if "single stitch"              in t: score += 1
+        if "band" in t or "movie" in t      : score += 1
+        if "bootleg"                    in t: score += 1
 
-        # Heurystyczna wycena grail (Part 4)
+        # Part 1 — używaj features["is_vintage"]
+        if features["is_vintage"]:   score += 1
+
         estimated = self._estimate_value(title, price, score)
         profit    = estimated - price
 
-        # Underpriced → +2
         if estimated > 0 and price < estimated * 0.7:
             score += 2
 
         is_grail = score >= 3
-
-        # Send rule: is_grail AND profit >= 10
         send     = is_grail and profit >= 10
         conf     = float(score) * 1.2 + freshness_boost(age) * 0.4
 
-        # DB learning
-        cat = detect_category(title)
+        # Part 4 — DB learning (brand OR keywords — relaxed)
+        cat = features["category"]
         if cat:
             self.db.add_sample(f"grail_{cat}", price)
+        if features["has_brand"] and cat:
+            self.db.add_sample(f"{features['brand']}_{cat}", price)
 
         if DEBUG_ALERTS and send:
-            print(f"  💎 [GRAIL] {title[:55]} | {price}zł | score={score} | profit≈{profit:.0f}zł")
+            print(f"  💎 [GRAIL] {title[:55]} | {price}zł | "
+                  f"score={score} | profit≈{profit:.0f}zł")
+        if DEBUG_PIPELINE:
+            print(f"  [GRAIL-DBG] score={score} is_grail={is_grail} "
+                  f"vintage={features['is_vintage']} kw_hits={kw_hits} send={send}")
 
         return {
             **base,
@@ -708,7 +936,7 @@ class GrailEngine:
             "profit":          round(profit, 2),
             "estimated_value": round(estimated, 2),
             "confidence":      round(min(conf, 10.0), 2),
-            "brand":           detect_brand(title),
+            "brand":           features["brand"],
             "category":        cat,
             "age_min":         age,
             "_skip_reason":    None if send else ("not_grail" if not is_grail else "low_profit"),
@@ -813,19 +1041,20 @@ class Engine:
         print(f"🧠 Engine v2.0 zainicjowany | DB: {len(self.db.db)} grup | "
               f"Silniki: CHAOS + BRAND + GRAIL | AI: {'✅' if anthropic_key else '❌'}")
 
-    # ── NOWY INTERFEJS (Part 1) ──────────────────────
     def run_cycle(self, items: list[dict], market_prices: dict | None = None) -> list[dict]:
         """
         Uruchamia wszystkie 3 silniki i zwraca deduplikowane wyniki.
-        Priorytet: GRAIL > BRAND > CHAOS (gdy ten sam item pasuje do wielu silników).
+        Part 3: auto-save DB po każdym cyklu.
         """
         chaos_r = self.chaos.run(items)
         brand_r = self.brand.run(items, market_prices)
         grail_r = self.grail.run(items)
         all_r   = chaos_r + brand_r + grail_r
 
+        # Part 3 — zapisz DB po cyklu (throttled — max co 5 min)
+        self.db.save()
+
         # Deduplikacja po item_id — zachowaj wersję z najwyższym profit
-        # GRAIL ma zwykle najwyższy profit więc naturalnie "wygrywa"
         best: dict[str, dict] = {}
         for r in all_r:
             item_id = str(r["item"].get("id", ""))
@@ -834,14 +1063,11 @@ class Engine:
             if item_id not in best or r.get("profit", 0) > best[item_id].get("profit", 0):
                 best[item_id] = r
 
-        # Zwróć tylko te które mają send_alert=True, sortuj po profit DESC
         deduped = sorted(
             [r for r in best.values() if r.get("send_alert")],
             key=lambda x: -x.get("profit", 0)
         )
 
-        # Sesyjna deduplikacja — GRAIL zawsze przebija (nie blokuj przez stary CHAOS send)
-        # Fix 5: max 2 alerty per brand per cykl
         brand_counts: dict[str, int] = {}
         final = []
         for r in deduped:
@@ -850,7 +1076,6 @@ class Engine:
             if item_id and item_id in self._alerted_ids and not is_grail:
                 continue
 
-            # Fix 5 — brand cap (grail omija limit)
             brand = r.get("brand") or ""
             if brand and not is_grail:
                 count = brand_counts.get(brand, 0)
@@ -962,9 +1187,12 @@ class Engine:
         })
 
     def stats(self) -> str:
+        db_count = len(self.db.db)
+        db_dirty = "dirty" if self.db._dirty else "clean"
         return (
             f"🧠 Engine v2.0 stats:\n"
-            f"  DB groups:   {len(self.db.db)}\n"
+            f"  DB groups:   {db_count} ({db_dirty})\n"
+            f"  DB file:     {DB_FILE}\n"
             f"  Raw items:   0 (chaos data in DB)\n"
             f"  AI cache:    0\n"
             f"  Clicked:     0\n"
@@ -973,3 +1201,11 @@ class Engine:
 
     def record_click(self, *args): pass
     def record_buy(self, *args):   pass
+
+
+# Re-export extract_item_features so bot.py can import it directly
+__all__ = [
+    "Engine", "MarketDB", "ChaosEngine", "BrandEngine", "GrailEngine",
+    "format_alert", "extract_item_features",
+    "detect_brand", "detect_category", "is_foreign_title",
+]
