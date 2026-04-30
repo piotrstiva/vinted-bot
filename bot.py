@@ -8,11 +8,16 @@ from statistics import median
 
 # ── Intelligence Engine ──────────────────
 try:
-    from engine import Engine
+    from engine import Engine, extract_item_features, detect_brand, detect_category
     _ENGINE_AVAILABLE = True
 except ImportError:
     _ENGINE_AVAILABLE = False
     print("⚠️  engine.py nie znaleziony — tryb podstawowy")
+    def extract_item_features(item):
+        return {"brand": None, "has_brand": False,
+                "is_vintage": False, "category": None, "keywords": []}
+    def detect_brand(title): return None
+    def detect_category(title): return None
 
 # ─────────────────────────────────────────
 #  🔑 USTAWIENIA — Railway Variables
@@ -40,6 +45,7 @@ MIN_AI_CONFIDENCE = 60     # % pewności AI że to ukryta okazja
 MIN_SAVING_PLN   = 6       # minimalna oszczędność w zł (odrzuć 1-5 zł różnicę)
 MAX_ALERTS_PER_SEARCH = 20  # więcej itemów do engine — silniki same filtrują jakość
 DEBUG_ALERTS          = True  # FIX: loguj decyzje engine (conf, profit, grail)
+DEBUG_PIPELINE        = os.getenv("DEBUG_PIPELINE", "0") == "1"  # verbose pipeline log
 
 # ─────────────────────────────────────────
 #  ⚡ SNIPER MODE
@@ -2199,13 +2205,12 @@ _SNIPER_SEEN: dict[str, float] = {}   # FIX: dict z TTL zamiast set (wygasa po 6
 # ─────────────────────────────────────────
 def check_search(search, seen, market_price):
     found    = []
-    all_ids  = []   # wszystkie ID widziane w tym cyklu
+    all_ids  = []
     cnt_seen = cnt_price = cnt_kw = cnt_rejected = 0
-    # BOT #1 — limit znalezionych wewnątrz check_search (nie tylko w głównej pętli)
-    # MAX_ALERTS_PER_SEARCH w głównej pętli przycina DO wysyłki, ale found=20
-    # powoduje że engine ocenia 20 itemów niepotrzebnie
-    MAX_FOUND = MAX_ALERTS_PER_SEARCH * 2  # 10 — bufor na engine skip
-    # BOT #3 — dedup po title+price (Vinted zwraca ten sam item przez kilka wyszukiwań)
+    # Part 2 — pipeline metrics
+    total_items     = 0
+    processed_items = 0
+    MAX_FOUND = MAX_ALERTS_PER_SEARCH * 2
     _seen_title_price: set[str] = set()
 
     try:
@@ -2216,10 +2221,6 @@ def check_search(search, seen, market_price):
         items = parse_items_from_html(r.text)
         print(f"[{search['name']}] Ofert na stronie: {len(items)}")
 
-        # ── MULTI-LAYER FRESHNESS PRE-FILTER ────────────────────
-        # Engine owns the tier logic; bot just pre-sorts and drops truly stale items.
-        # Hard cutoff: >360 min (6 h) — engine rejects these anyway.
-        # PART 3: fallback_mode=True relaxes to 120 min for all items (used when 0 sent).
         fallback_mode   = search.get("_fallback_mode", False)
         hard_cutoff_min = 120 if fallback_mode else 360
 
@@ -2231,15 +2232,12 @@ def check_search(search, seen, market_price):
             tiered_items.append(it)
 
         if not tiered_items:
-            # Nothing at all — still return empty so main loop can trigger fallback
             print(f"  ⏰ Brak ofert w oknie {hard_cutoff_min} min [{search['name']}]")
             return [], []
 
-        # Sort freshest first so engine sees best candidates early
         tiered_items.sort(key=lambda x: parse_item_age_minutes(x) or 9999)
         items = tiered_items
 
-        # Debug — show first 2 items with age
         for dbg in items[:2]:
             age_dbg = parse_item_age_minutes(dbg)
             age_str = f"{age_dbg}min" if age_dbg is not None else "?"
@@ -2253,28 +2251,26 @@ def check_search(search, seen, market_price):
         for item in items:
             if not item:
                 continue
+            total_items += 1
+            # Part 2 — wrap każdy item w try/except z logowaniem
             try:
                 item_id = item.get("id", "")
                 title   = item.get("title", "")
                 href    = item.get("url", "")
                 price   = item.get("price")
 
-                # Part 4 — in-memory sniper seen (szybszy niż disk seen)
-                # Part 4 — in-memory sniper seen z TTL 6h
                 _now_sn = time.time()
                 _sniper_ts = _SNIPER_SEEN.get(item_id)
                 if _sniper_ts and (_now_sn - _sniper_ts) < 6 * 3600:
                     cnt_seen += 1
                     continue
                 _SNIPER_SEEN[item_id] = _now_sn
-                # Wyczyść stare wpisy gdy za duże
                 if len(_SNIPER_SEEN) > 5000:
                     _cutoff = _now_sn - 6 * 3600
                     _SNIPER_SEEN_new = {k: v for k, v in _SNIPER_SEEN.items() if v > _cutoff}
                     _SNIPER_SEEN.clear()
                     _SNIPER_SEEN.update(_SNIPER_SEEN_new)
 
-                # Part 7 — debug age
                 age_min = parse_item_age_minutes(item)
                 if age_min is not None and DEBUG_ALERTS:
                     print(f"  📤 NEW ITEM: {title[:60]} | age={age_min}min | {price} zł")
@@ -2282,35 +2278,29 @@ def check_search(search, seen, market_price):
                 if not item_id or not href:
                     continue
 
-                # FIX: seen sprawdza TTL — item wraca po 6h
                 _seen_ts = seen.get(item_id)
                 if _seen_ts and (time.time() - _seen_ts) < 6 * 3600:
                     cnt_seen += 1
                     continue
 
-                all_ids.append(item_id)  # zapamiętaj wszystkie widziane
+                all_ids.append(item_id)
 
                 if not title or not href:
                     continue
 
-                # BOT #3 — odrzuć duplikaty tego samego tytułu+ceny w tym cyklu
-                # (ten sam item może trafić przez 2 wyszukiwania)
                 _dedup_key = f"{title.lower().strip()}_{int(price or 0)}"
                 if _dedup_key in _seen_title_price:
                     cnt_seen += 1
                     continue
                 _seen_title_price.add(_dedup_key)
 
-                # Globalny filtr wykluczeń (dzieci, minecraft, karty, gry)
                 title_lower = title.lower()
                 if any(ex in title_lower for ex in GLOBAL_EXCLUDE):
                     continue
 
-                # Odrzuć zablokowane marki (H&M, Zara, Bershka itp.)
                 if any(b in title_lower for b in BLOCKED_BRANDS):
                     continue
 
-                # Odrzuć wykluczone słowa kluczowe z danego wyszukiwania
                 exclude_kw = search.get("exclude_keywords", [])
                 if exclude_kw and any(ek in title_lower for ek in exclude_kw):
                     continue
@@ -2319,49 +2309,38 @@ def check_search(search, seen, market_price):
                     cnt_price += 1
                     continue
 
-                # Globalny próg cenowy — odrzuć śmieci poniżej 18 zł (było 15)
                 if price < 18:
                     cnt_price += 1
                     continue
 
-                # Odfiltruj tytuły w cyrylicy / niełacińskich alfabetach
                 _non_latin = sum(1 for c in title if ord(c) > 591)
                 if _non_latin > len(title) * 0.3:
                     cnt_rejected += 1
                     continue
 
-                # Odrzuć fałszywe brand-matche (np. "Kapp Ahl" to nie Kappa)
-                # Sprawdź czy szukany brand faktycznie jest w tytule lub marce
                 search_text = search.get("url", "")
                 _brand_from_url = ""
                 if "search_text=" in search_text:
                     import urllib.parse
                     _brand_from_url = urllib.parse.unquote(
                         search_text.split("search_text=")[1].split("&")[0]
-                    ).lower().split("+")[0]   # pierwszy wyraz query = brand
+                    ).lower().split("+")[0]
                 if _brand_from_url and len(_brand_from_url) >= 4:
                     _title_lower = title.lower()
-                    _brand_in_title = _brand_from_url in _title_lower
-                    _brand_in_meta  = _brand_from_url in title.lower()  # marka z opisu
-                    if not _brand_in_title and not _brand_in_meta:
+                    if _brand_from_url not in _title_lower:
                         cnt_rejected += 1
                         continue
 
-                # ── PART 5: SMART ITEM SCORING ──────────────
-                VINTAGE_KW  = ["vintage", "retro", "90s", "80s", "70s", "y2k",
-                                "single stitch", "archive", "deadstock", "band tee",
-                                "tour", "old school", "heritage", "throwback",
-                                "made in usa", "made in italy", "rare", "promo",
-                                "concert", "bootleg", "rap tee"]
-                BRAND_KW    = [
-                    "nike", "adidas", "jordan", "supreme", "palace", "stussy",
-                    "bape", "carhartt", "arcteryx", "salomon", "corteiz",
-                    "represent", "broken planet", "denim tears", "essentials",
-                    "fear of god", "yeezy", "levi", "wrangler", "kappa",
-                    "umbro", "lotto", "diadora", "hummel", "fila", "funko", "lego",
-                    "puma", "reebok", "asics", "new balance", "vans",
-                    "harley davidson", "harley", "metallica", "nirvana", "grateful dead",
-                ]
+                # ── PART 1 — CENTRAL FEATURE EXTRACTION ──────────────
+                # Zastępuje lokalne _has_brand i _has_vintage
+                features     = extract_item_features(item)
+                _has_brand   = features["has_brand"]
+                _has_vintage = features["is_vintage"]
+
+                if DEBUG_PIPELINE:
+                    print(f"  [FEAT] {title[:50]} | brand={features['brand']} "
+                          f"vintage={_has_vintage} cat={features['category']}")
+
                 CATEGORY_KW = search.get("keywords", [])
                 TRASH_KW    = [
                     "zara", "bershka", "h&m", "hm", "shein", "primark",
@@ -2369,13 +2348,6 @@ def check_search(search, seen, market_price):
                     "mango", "mohito", "house brand", "terranova",
                 ]
 
-                t_lo = title_lower
-
-                # Fix #1 — zdefiniuj _has_brand i _has_vintage PRZED użyciem
-                _has_brand   = any(b in t_lo for b in BRAND_KW)
-                _has_vintage = any(v in t_lo for v in VINTAGE_KW)
-
-                # Fix #5 — TRASH_KEYWORDS: odrzuć sukienki, tospy, bluzki
                 TRASH_KEYWORDS_ITEM = [
                     "blouse", "bluzka", "sukienka", "dress", "cute",
                     "coquette", " top,", "top z ", "crop top", "stanik",
@@ -2383,20 +2355,21 @@ def check_search(search, seen, market_price):
                     "kombinezon", "body ", "legginsy", "rajstopy",
                 ]
                 if not lego_sw_mode and not football_mode and not carhartt_mode:
-                    if any(x in t_lo for x in TRASH_KEYWORDS_ITEM):
+                    if any(x in title_lower for x in TRASH_KEYWORDS_ITEM):
                         cnt_rejected += 1
                         continue
 
+                # Part 5 — scoring przez features (nigdy undefined variable)
                 item_score = 0
                 if _has_brand:
                     item_score += 1
-                if CATEGORY_KW and any(kw.lower() in t_lo for kw in CATEGORY_KW):
+                if CATEGORY_KW and any(kw_term.lower() in title_lower for kw_term in CATEGORY_KW):
                     item_score += 2
                 if _has_vintage:
                     item_score += 2
                 if price and price < 80:
                     item_score += 1
-                if any(tr in t_lo for tr in TRASH_KW):
+                if any(tr in title_lower for tr in TRASH_KW):
                     item_score -= 2
 
                 grail_mode = search.get("grail_mode", False)
@@ -2413,7 +2386,6 @@ def check_search(search, seen, market_price):
 
                 _item_score_val = item_score
 
-                # Fix #8 — block items without brand AND without grail signal
                 if (
                     not lego_sw_mode and not carhartt_mode
                     and not football_mode and not grail_mode
@@ -2423,7 +2395,6 @@ def check_search(search, seen, market_price):
                     cnt_rejected += 1
                     continue
 
-                # ocena cenowa
                 steal_threshold = STEAL_PRICES.get(search["category"], 9999)
                 is_steal_price  = price <= steal_threshold
                 is_below_market = False
@@ -2431,24 +2402,19 @@ def check_search(search, seen, market_price):
                 if market_price and market_price > 0:
                     discount_pct    = (1 - price / market_price) * 100
                     saving          = market_price - price
-                    # Odrzuć jeśli oszczędność mniejsza niż MIN_SAVING_PLN
                     is_below_market = (
                         discount_pct >= MIN_DISCOUNT_PCT
                         and saving >= MIN_SAVING_PLN
                     )
 
-                # typo
                 typo_brand, typo_found = detect_typo_brand(title)
                 has_typo = typo_brand is not None
 
-                # walidacje specjalne
                 lego_sw_valid, lego_sw_score, lego_sw_reasons, lego_set_info = False, 0, [], {}
                 if lego_sw_mode:
                     lego_sw_valid, lego_sw_score, lego_sw_reasons, lego_set_info = validate_lego_sw(title, None, None)
-                    # Podnosimy minimalny próg — żeby odrzucić śmieci
                     if lego_sw_score < 40:
                         lego_sw_valid = False
-                    # Max cena dla LEGO SW
                     if price > 100:
                         lego_sw_valid = False
 
@@ -2462,7 +2428,6 @@ def check_search(search, seen, market_price):
                     if cv and price <= cmax:
                         carhartt_valid, carhartt_model_name, carhartt_max, carhartt_reasons = True, cm, cmax, cr
 
-                # AI (tylko hidden gem)
                 is_hidden_gem, ai_brand, ai_reason, mismatch = False, None, "", False
                 if ANTHROPIC_KEY and hidden_gem_mode:
                     img_url, desc = get_item_details(href)
@@ -2475,20 +2440,15 @@ def check_search(search, seen, market_price):
                         ai_reason = ai_res.get("reason", "")
                         mismatch  = ai_res.get("mismatch", False)
 
-                # finalna decyzja
                 if lego_sw_mode:
-                    # LEGO SW — tylko przez walidator, cena nie wystarczy
                     qualifies = lego_sw_valid
                 elif football_mode:
-                    # Koszulki — tylko przez walidator
                     qualifies = football_valid
                 elif carhartt_mode:
                     qualifies = carhartt_valid
                 elif hidden_gem_mode and not ANTHROPIC_KEY:
-                    # Hidden gem bez AI — tylko steal price z keywords
                     qualifies = is_steal_price or is_below_market
                 else:
-                    # Tryb normalny — cena + typo + AI
                     qualifies = (
                         is_steal_price or is_below_market
                         or has_typo or is_hidden_gem
@@ -2522,23 +2482,37 @@ def check_search(search, seen, market_price):
                     "carhartt_model": carhartt_model_name,
                     "carhartt_max": carhartt_max,
                     "photo": item.get("photo"),
-                    "item_score": _item_score_val,   # Part 2.1 — dla should_add_to_db
-                    "ts": time.time(),                # Part 2.5 — dla rolling window
-                    "age_min": age_min,               # Part 6 — sniper age boost
+                    "item_score": _item_score_val,
+                    "ts": time.time(),
+                    "age_min": age_min,
+                    # Part 1 — przekaż features do engine
+                    "_features": features,
                 })
 
-                # BOT #1 — stop early gdy mamy wystarczająco dużo itemów
+                processed_items += 1
+
                 if len(found) >= MAX_FOUND:
                     break
 
             except Exception as e:
-                print(f"  ⚠️ item error: {e}")
+                # Part 6 — NIE ignoruj błędów cichutko
+                print(f"  ❌ ITEM PIPELINE ERROR: {e} | "
+                      f"item={item.get('title', '?')[:60] if item else '?'}")
+                if DEBUG_PIPELINE:
+                    import traceback
+                    traceback.print_exc()
                 continue
 
     except Exception as e:
-        print(f"Błąd check_search [{search['name']}]: {e}")
+        print(f"  ❌ check_search FATAL [{search['name']}]: {e}")
+        if DEBUG_PIPELINE:
+            import traceback
+            traceback.print_exc()
 
-    print(f"  📊 widziane={cnt_seen} brak_ceny={cnt_price} brak_słów={cnt_kw} odrzucone={cnt_rejected} wysłane={len(found)}")
+    # Part 2 — pipeline metrics
+    print(f"  📊 Processed: {processed_items}/{total_items} | "
+          f"widziane={cnt_seen} brak_ceny={cnt_price} "
+          f"brak_słów={cnt_kw} odrzucone={cnt_rejected} wysłane={len(found)}")
     return found, all_ids
 
 
@@ -2753,6 +2727,7 @@ while True:
             import threading
             def _update_medians_bg():
                 cnt = 0
+                err = 0
                 median_searches = [s for s in SEARCHES
                                    if not s.get("hidden_gem_mode") and not s.get("no_median")]
                 print(f"\n📊 [BG] Start aktualizacji median ({len(median_searches)} searchów)...")
@@ -2763,9 +2738,12 @@ while True:
                             market_prices[s["name"]] = val
                             cnt += 1
                         time.sleep(random.uniform(5.0, 9.0))
-                    except:
-                        pass
-                print(f"📊 [BG] Mediany zaktualizowane: {cnt}/{len(median_searches)}")
+                    except Exception as e:
+                        err += 1
+                        # Part 6 — nie ignoruj błędów cichutko
+                        print(f"  ❌ [BG] median error [{s['name']}]: {e}")
+                print(f"📊 [BG] Mediany zaktualizowane: {cnt}/{len(median_searches)} "
+                      f"(błędy: {err})")
             threading.Thread(target=_update_medians_bg, daemon=True).start()
 
         cycle += 1
@@ -2940,11 +2918,29 @@ while True:
                     sent_this_cycle += 1
                     print(f"  \U0001f501 FALLBACK [{result.get('engine','?')}] | {item['title'][:55]} | {item['price']:.0f} z\u0142")
 
-        print(f"  \U0001f4ca Cykl #{cycle} zakończony \u2014 wysłano: {sent_this_cycle} alertów [CHAOS+BRAND+GRAIL]")
+        print(f"  📊 Cykl #{cycle} zakończony — wysłano: {sent_this_cycle} alertów [CHAOS+BRAND+GRAIL]")
 
         save_seen(seen)
+
+        # Part 3 — zapisz MarketDB po każdym cyklu (throttled wewnętrznie)
+        if engine:
+            engine.db.save()
+            if DEBUG_PIPELINE:
+                print(f"  💾 MarketDB: {len(engine.db.db)} grup | "
+                      f"dirty={engine.db._dirty}")
+
         time.sleep(SLEEP_BETWEEN_CYCLES)
 
     except Exception as e:
-        print(f"Błąd głównej pętli: {e}")
+        # Part 6 — NIE ignoruj błędów głównej pętli cichutko
+        import traceback
+        print(f"❌ Błąd głównej pętli (cykl #{cycle}): {e}")
+        if DEBUG_PIPELINE:
+            traceback.print_exc()
+        # Zapisz DB nawet przy błędzie — nie trać danych
+        if engine:
+            try:
+                engine.db.save(force=True)
+            except Exception as save_err:
+                print(f"  ❌ DB save po błędzie nie powiódł się: {save_err}")
         time.sleep(15)
