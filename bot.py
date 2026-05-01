@@ -2476,21 +2476,7 @@ def check_search(search, seen, market_price):
                     cnt_rejected += 1
                     continue
 
-                search_text = search.get("url", "")
-                _brand_from_url = ""
-                if "search_text=" in search_text:
-                    import urllib.parse
-                    _brand_from_url = urllib.parse.unquote(
-                        search_text.split("search_text=")[1].split("&")[0]
-                    ).lower().split("+")[0]
-                if _brand_from_url and len(_brand_from_url) >= 4:
-                    _title_lower = title.lower()
-                    if _brand_from_url not in _title_lower:
-                        cnt_rejected += 1
-                        continue
-
                 # ── PART 1 — CENTRAL FEATURE EXTRACTION ──────────────
-                # Zastępuje lokalne _has_brand i _has_vintage
                 features     = extract_item_features(item)
                 _has_brand   = features["has_brand"]
                 _has_vintage = features["is_vintage"]
