@@ -349,8 +349,8 @@ class MarketDB:
     def add_sample(self, key: str, price: float):
         """
         Part 4 — przechowuje próbkę ceny.
-        Klucz może być brand_category, chaos_category, grail_category, lub custom.
-        Part 4 (relax): dodaje jeśli brand LUB strong keywords (nie wymaga obu).
+        Part 2 FIX: akceptuje każdy klucz — brand NIE jest wymagany.
+        Klucze: brand_category, chaos_category, category_unknown, vintage_category.
         """
         if not key or not isinstance(price, (int, float)) or price < 10:
             return
@@ -521,110 +521,149 @@ class ChaosEngine:
         return results
 
     def _evaluate(self, item: dict) -> dict:
-        # Part 1 — używaj extract_item_features jako single source of truth
+        # Part 1 — single source of truth
         features = extract_item_features(item)
-        title    = item.get("title", "")
+        title    = item.get("title", "") or ""
         price    = float(item.get("price") or 0)
 
         base = {"engine": "CHAOS", "item": item, "send_alert": False,
-                "tier": "CHAOS", "profit": 0, "confidence": 0}
+                "tier": "CHAOS", "profit": 0, "confidence": 0,
+                "anomaly_score": 0, "deal_tag": "NO_DATA"}
 
-        # Filtr języka
+        # Hard filters (tylko prawdziwe śmieci)
         if is_foreign_title(title):
             return {**base, "_skip_reason": "foreign_language"}
-
         if kw(title, _CHAOS_TRASH):
             return {**base, "_skip_reason": "trash"}
-        if price > 120 or price < 18:
+        if price < 15 or price > 200:
             return {**base, "_skip_reason": "price_out_of_range"}
 
         age = item_age_minutes(item)
         if age > MAX_ITEM_AGE_MINUTES * 6:
             return {**base, "_skip_reason": "stale"}
 
-        # Part 1 — używaj features zamiast lokalnego detect_brand/category
         brand = features["brand"]
         cat   = features["category"]
 
-        # Profit logic — użyj ceny rynkowej brandu jeśli dostępna
+        # ── Wycena rynkowa ──────────────────────────────
+        # Priorytet: heurystyczna cena brandu > DB > price * 1.6
+        market_price    = None
         brand_heuristic = None
         if brand and cat:
             bp = _HEURISTIC_PRICES.get(brand)
             if bp:
                 brand_heuristic = bp.get(cat, bp["default"])
+                market_price    = brand_heuristic
+        if not market_price and cat:
+            # Szukaj w DB (chaos_cat lub brand_cat)
+            db_key  = f"{brand}_{cat}" if brand else f"chaos_{cat}"
+            db_data = self.db.lookup(db_key)
+            if db_data and db_data.get("count", 0) >= 3:
+                market_price = db_data.get("median")
+        if not market_price:
+            # Fallback: 1.6x ceny (zawsze dostępne)
+            market_price = price * 1.6
 
-        if brand_heuristic and brand_heuristic > price * 1.4:
-            estimated_value = brand_heuristic
+        estimated_value = market_price
+        profit          = estimated_value - price
+
+        # ── Part 5 — Confidence scoring ─────────────────
+        # Part 1 FIX: brak brandu = soft penalty, NIE blok
+        confidence = 4.0  # baseline
+        if features["has_brand"]:
+            confidence += 1.5
         else:
-            estimated_value = price * 1.6
-        profit = estimated_value - price
+            confidence -= 1.5   # Part 1: soft penalty zamiast hard block
 
-        # Part 5 — scoring przez features (nigdy undefined variable)
-        score = 0.0
-        if features["is_vintage"]:                score += 1.0
-        if kw(title, _CHAOS_STYLE_KW):            score += 1.0
-        if kw(title, _CHAOS_VINTAGE_KW):          score += 2.0
-        if features["has_brand"]:                 score += 1.0
-        if 20 <= price <= 50:                     score += 1.0
-        elif 50 < price <= 80:                    score += 0.5
-        score += freshness_boost(age) * 0.3
+        if features["is_vintage"]:          confidence += 1.5
+        if kw(title, _CHAOS_STYLE_KW):      confidence += 1.0
+        if kw(title, _CHAOS_VINTAGE_KW):    confidence += 2.0
+        if cat == "jacket":                 confidence += 1.0
+        elif cat == "hoodie":               confidence += 0.5
+        elif cat == "sneakers":             confidence -= 1.5
+        elif cat == "tshirt" and not features["is_vintage"]:
+            confidence -= 0.5
+        if 20 <= price <= 50:               confidence += 0.5
+        confidence += freshness_boost(age) * 0.3
 
-        # Category quality bonus/penalty
-        if cat == "jacket":                                          score += 1.0
-        elif cat == "hoodie":                                        score += 0.5
-        elif cat == "sneakers":                                      score -= 1.5
-        elif cat == "tshirt" and not features["is_vintage"]:         score -= 0.5
+        # ── Part 3 — Undervaluation detection ───────────
+        anomaly_score = 0
+        if market_price and market_price > price:
+            ratio = price / market_price
+            if ratio < 0.70:
+                anomaly_score = 2
+                confidence   += 1.5
+            elif ratio < 0.85:
+                anomaly_score = 1
+                confidence   += 0.5
 
-        # Odrzuć damskie koszulki sportowych marek
+        confidence = round(min(max(confidence, 0.0), 10.0), 2)
+
+        # ── Filtr damskich koszulek sportowych ──────────
         _WOMENS_KW  = ["damska", "damski", "women", "woman", "damen",
-                       "femme", "donna", "feminino", "dámský", "dámská"]
+                       "femme", "donna", "feminino"]
         _SPORT_ONLY = {"lotto", "kappa", "diadora", "hummel", "admiral",
                        "le coq sportif", "erima", "joma"}
         if kw(title, _WOMENS_KW) and brand in _SPORT_ONLY:
             return {**base, "_skip_reason": "womens_sport_brand"}
 
-        # Koszulki sportowe (cycling, rowerowe) → nie są jersey piłkarski
         _SPORT_ACT = ["rowerow", "kolarski", "cycling", "fitness",
                       "siłowni", "silowni", "running", "treningow"]
         if kw(title, _SPORT_ACT) and cat == "tshirt":
             return {**base, "_skip_reason": "sport_activity_tshirt"}
 
-        # Send rule
-        send = (price <= 80 and profit >= 15 and score >= 1.0)
+        # ── Part 6 — Soft filter (tylko oczywiste śmieci) ──
+        if profit < 10 and anomaly_score == 0:
+            return {**base, "_skip_reason": "low_profit_no_anomaly",
+                    "confidence": confidence, "profit": round(profit, 2)}
 
-        # Part 4 — DB learning (brand OR keywords — relaxed rule)
+        # ── Part 4 — Relaxed send rule ───────────────────
+        if DEBUG_ALERTS:
+            # Part 5 — debug mode: obniż próg żeby zobaczyć co przechodzi
+            send = profit >= 15
+        else:
+            send = (
+                (profit >= 25 and confidence >= 5.5)
+                or (profit >= 15 and anomaly_score >= 2)
+            )
+
+        # ── Part 2 — DB learning: zawsze, brand NIE wymagany ──
         if cat:
-            self.db.add_sample(f"chaos_{cat}", price)
+            chaos_key = f"chaos_{cat}"
+            self.db.add_sample(chaos_key, price)
         if brand and cat:
             self.db.add_sample(f"{brand}_{cat}", price)
-        elif features["is_vintage"] and cat:
+        elif cat:
+            # Part 2 FIX: category_unknown dla itemów bez brandu
+            self.db.add_sample(f"{cat}_unknown", price)
+        if features["is_vintage"] and cat:
             self.db.add_sample(f"vintage_{cat}", price)
 
-        # Part 4 — deal tag z DB
+        # Deal tag z DB
         deal_tag = "NO_DATA"
         if cat:
             db_key   = f"{brand}_{cat}" if brand else f"chaos_{cat}"
             deal_tag = self.db.get_deal_tag(db_key, price)
 
-        if DEBUG_ALERTS and send:
-            print(f"  ⚡ [CHAOS] {title[:55]} | {price}zł | "
-                  f"profit≈{profit:.0f}zł | score={score:.1f} | deal={deal_tag}")
-        if DEBUG_PIPELINE:
-            print(f"  [CHAOS-DBG] brand={brand} cat={cat} vintage={features['is_vintage']} "
-                  f"score={score:.1f} send={send} skip={'—' if send else 'score_too_low'}")
+        # Part 5 — zawsze loguj przy DEBUG_ALERTS
+        if DEBUG_ALERTS:
+            action = "📤 ALERT" if send else "⏭  SKIP"
+            print(f"  {action}: conf={confidence:.1f} profit={profit:.0f} "
+                  f"anomaly={anomaly_score} brand={brand or '—'} | {title[:45]}")
 
         return {
             **base,
             "send_alert":      send,
             "profit":          round(profit, 2),
             "estimated_value": round(estimated_value, 2),
-            "confidence":      round(min(score * 1.5, 10.0), 2),
+            "market_price":    round(market_price, 2) if market_price else None,
+            "confidence":      confidence,
+            "anomaly_score":   anomaly_score,
             "brand":           brand,
             "category":        cat,
             "age_min":         age,
-            "score":           round(score, 2),
             "deal_tag":        deal_tag,
-            "_skip_reason":    None if send else "score_too_low",
+            "_skip_reason":    None if send else "below_threshold",
         }
 
 
@@ -741,26 +780,40 @@ class BrandEngine:
         if brand in LUXURY_BRANDS and price < 100:
             conf -= 3.0
 
-        send = bool(
-            median_price and median_price > 0 and
-            price < median_price * 0.7 and
-            profit >= 25 and conf >= 4.5
-        )
+        # Part 3 — Undervaluation detection
+        anomaly_score = 0
+        if median_price and median_price > 0:
+            if price < median_price * 0.70:
+                anomaly_score = 2
+                conf         += 1.5
+            elif price < median_price * 0.85:
+                anomaly_score = 1
+                conf         += 0.5
 
-        # Part 4 — DB learning (zawsze, nie tylko gdy send)
+        conf = round(min(max(conf, 0.0), 10.0), 2)
+
+        # Part 4 — Relaxed send rule
+        if DEBUG_ALERTS:
+            send = profit >= 15
+        else:
+            send = (
+                (profit >= 25 and conf >= 5.5)
+                or (profit >= 15 and anomaly_score >= 2)
+            )
+
+        # Part 2 — DB learning zawsze
         if category:
             self.db.add_sample(f"{brand}_{category}", price)
+            self.db.add_sample(f"chaos_{category}", price)   # cross-learn
 
-        # Part 4 — deal tag z DB
+        # Deal tag z DB
         db_key   = f"{brand}_{category}" if category else brand
         deal_tag = self.db.get_deal_tag(db_key, price)
 
-        if DEBUG_ALERTS and send:
-            print(f"  🟣 [BRAND] {title[:55]} | brand={brand} | "
-                  f"{price}zł (med={median_price:.0f}zł) | profit≈{profit:.0f}zł | conf={conf:.1f}")
-        if DEBUG_PIPELINE:
-            print(f"  [BRAND-DBG] brand={brand} cat={category} "
-                  f"med={median_price} conf={conf:.1f} send={send}")
+        if DEBUG_ALERTS:
+            action = "📤 ALERT" if send else "⏭  SKIP"
+            print(f"  {action}: conf={conf:.1f} profit={profit:.0f} "
+                  f"anomaly={anomaly_score} brand={brand} | {title[:45]}")
 
         return {
             **base,
@@ -768,7 +821,8 @@ class BrandEngine:
             "profit":          round(profit, 2),
             "median_price":    round(median_price, 2) if median_price else None,
             "estimated_value": round(median_price, 2) if median_price else 0,
-            "confidence":      round(min(conf, 10.0), 2),
+            "confidence":      conf,
+            "anomaly_score":   anomaly_score,
             "age_min":         age,
             "deal_tag":        deal_tag,
             "_skip_reason":    None if send else "below_threshold",
@@ -907,26 +961,42 @@ class GrailEngine:
         estimated = self._estimate_value(title, price, score)
         profit    = estimated - price
 
-        if estimated > 0 and price < estimated * 0.7:
-            score += 2
+        # Part 3 — Undervaluation detection
+        anomaly_score = 0
+        if estimated > 0 and price < estimated * 0.70:
+            anomaly_score = 2
+            score        += 2   # underpriced → extra grail points
+        elif estimated > 0 and price < estimated * 0.85:
+            anomaly_score = 1
+            score        += 1
 
         is_grail = score >= 3
-        send     = is_grail and profit >= 10
         conf     = float(score) * 1.2 + freshness_boost(age) * 0.4
+        conf     = round(min(max(conf, 0.0), 10.0), 2)
 
-        # Part 4 — DB learning (brand OR keywords — relaxed)
+        # Part 4 — Relaxed send rule: grail OR undervalued
+        if DEBUG_ALERTS:
+            send = profit >= 10 and is_grail and not is_foreign_title(title)
+        else:
+            send = (
+                (is_grail and profit >= 10)
+                or (profit >= 15 and anomaly_score >= 2)
+            )
+
+        # Part 2 — DB learning: zawsze, bez brandu też
         cat = features["category"]
         if cat:
             self.db.add_sample(f"grail_{cat}", price)
+            self.db.add_sample(f"chaos_{cat}", price)      # cross-learn
         if features["has_brand"] and cat:
             self.db.add_sample(f"{features['brand']}_{cat}", price)
+        elif cat:
+            self.db.add_sample(f"{cat}_unknown", price)   # Part 2 FIX
 
-        if DEBUG_ALERTS and send:
-            print(f"  💎 [GRAIL] {title[:55]} | {price}zł | "
-                  f"score={score} | profit≈{profit:.0f}zł")
-        if DEBUG_PIPELINE:
-            print(f"  [GRAIL-DBG] score={score} is_grail={is_grail} "
-                  f"vintage={features['is_vintage']} kw_hits={kw_hits} send={send}")
+        if DEBUG_ALERTS:
+            action = "📤 ALERT" if send else "⏭  SKIP"
+            print(f"  {action}: conf={conf:.1f} profit={profit:.0f} "
+                  f"anomaly={anomaly_score} grail={is_grail} | {title[:45]}")
 
         return {
             **base,
@@ -935,7 +1005,8 @@ class GrailEngine:
             "grail_score":     score,
             "profit":          round(profit, 2),
             "estimated_value": round(estimated, 2),
-            "confidence":      round(min(conf, 10.0), 2),
+            "confidence":      conf,
+            "anomaly_score":   anomaly_score,
             "brand":           features["brand"],
             "category":        cat,
             "age_min":         age,
