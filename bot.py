@@ -1494,55 +1494,200 @@ Kiedy is_hidden_gem = true:
 # ─────────────────────────────────────────
 #  🌐 POBIERANIE Z VINTED  (HTML scraping)
 # ─────────────────────────────────────────
-import random
-from bs4 import BeautifulSoup
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  🌐 REQUEST SCHEDULING LAYER — human-like behavior
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# Rotacja User-Agentów — zmniejsza ryzyko blokady
+# Req 9 — real browser User-Agent pool (desktop + mobile mix)
 USER_AGENTS = [
+    # Chrome Windows
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
+    "Mozilla/5.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    # Chrome Mac
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    # Firefox
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.4; rv:124.0) Gecko/20100101 Firefox/124.0",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    # Safari
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
+    # Edge
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
+    # Chrome Linux
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
 ]
 
-VINTED_MIN_DELAY  = 4.0    # zmniejszone z 6.0 — mamy ~18 searchów/cykl zamiast 61
-VINTED_MAX_DELAY  = 8.0    # zmniejszone z 11.0
-VINTED_POST_BAN_COOLDOWN = 90  # 90s IP cooling
-VINTED_429_WAIT  = 180
+# Req 9 — Accept-Language variants
+_ACCEPT_LANGS = [
+    "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7",
+    "pl-PL,pl;q=0.9,en;q=0.8",
+    "pl,en-US;q=0.9,en;q=0.8",
+    "pl-PL,pl;q=0.8,en-GB;q=0.7,en;q=0.6",
+    "en-US,en;q=0.9,pl;q=0.8",
+]
 
-# BOT #5 — globalny licznik 403 — gdy Vinted blokuje, zwiększamy pauzę
-_consecutive_403   = 0
-_403_BACKOFF_STEPS    = [20, 45]    # skrócone: tylko 2 próby z krótszym backoffem
-_403_BACKOFF_THRESHOLD = 2          # po 2 kolejnych 403 → reset sesji (było 3)
-VINTED_POST_BAN_COOLDOWN = 90       # skrócone z 180s → 90s; bardziej agresywny cooldown nie pomaga
+# Req 1 — Variable base delay: 8–20s base, 10% spike 25–40s
+VINTED_DELAY_BASE_MIN  = 8.0
+VINTED_DELAY_BASE_MAX  = 20.0
+VINTED_DELAY_SPIKE_MIN = 25.0
+VINTED_DELAY_SPIKE_MAX = 40.0
+VINTED_DELAY_SPIKE_PCT = 0.10    # 10% chance of spike
 
-def get_headers():
-    """Zwraca losowy zestaw nagłówków naśladujący przeglądarkę."""
-    return {
-        "User-Agent":      random.choice(USER_AGENTS),
+# Req 4 — Thinking pauses between searches
+THINKING_PAUSE_MIN     = 15.0
+THINKING_PAUSE_MAX     = 45.0
+THINKING_PAUSE_LONG_MIN= 60.0
+THINKING_PAUSE_LONG_MAX= 120.0
+THINKING_PAUSE_LONG_PCT= 0.15   # 15% chance of long pause
+
+# Req 5 — Cycle break
+CYCLE_BREAK_MIN        = 120.0  # 2 min
+CYCLE_BREAK_MAX        = 300.0  # 5 min
+CYCLE_BREAK_LONG_MIN   = 300.0  # 5 min
+CYCLE_BREAK_LONG_MAX   = 600.0  # 10 min
+CYCLE_BREAK_LONG_PCT   = 0.20   # 20% chance of extended break
+
+# Req 7 — 403 retry config
+_consecutive_403       = 0
+_cycle_403_stop        = False   # flag: stop cycle after 3rd failure
+_403_RETRY_WAITS       = [
+    (20.0, 40.0),    # 1st retry wait range
+    (60.0, 120.0),   # 2nd retry wait range
+]
+_403_HARD_STOP         = 3       # 3rd failure → stop cycle + long sleep
+_403_HARD_STOP_MIN     = 300.0   # 5 min
+_403_HARD_STOP_MAX     = 600.0   # 10 min
+
+# Req 8 — Session refresh config
+_last_session_refresh  = 0.0
+_SESSION_REFRESH_MIN_INTERVAL = 600.0   # 10 min
+_SESSION_REFRESH_MAX_INTERVAL = 900.0   # 15 min
+_next_session_refresh  = random.uniform(600.0, 900.0)
+
+# Req 12 — Rate limit safety
+_request_timestamps: list = []
+RATE_LIMIT_MAX_RPM     = 12     # max 12 requests/minute
+RATE_LIMIT_WINDOW      = 60.0
+RATE_LIMIT_COOLDOWN_MIN= 60.0
+RATE_LIMIT_COOLDOWN_MAX= 120.0
+
+# Req 10 — Micro delays after item processing
+ITEM_MICRO_DELAY_MIN   = 2.0
+ITEM_MICRO_DELAY_MAX   = 6.0
+ITEM_IDLE_PCT          = 0.15   # 15% chance of idle simulation
+ITEM_IDLE_MIN          = 5.0
+ITEM_IDLE_MAX          = 15.0
+
+VINTED_429_WAIT = 180
+
+
+def _human_delay(label: str = "") -> float:
+    """
+    Req 1+11 — Generuje human-like delay z jitterem.
+    Każdy request MUSI mieć delay. Nigdy request→request bez przerwy.
+    """
+    if random.random() < VINTED_DELAY_SPIKE_PCT:
+        delay = random.uniform(VINTED_DELAY_SPIKE_MIN, VINTED_DELAY_SPIKE_MAX)
+        print(f"  [REQUEST] delay={delay:.1f}s (spike) search={label}")
+    else:
+        delay = random.uniform(VINTED_DELAY_BASE_MIN, VINTED_DELAY_BASE_MAX)
+        print(f"  [REQUEST] delay={delay:.1f}s search={label}")
+    time.sleep(delay)
+    return delay
+
+
+def _thinking_pause(after: str = "") -> float:
+    """
+    Req 4 — Human-like pause between searches (15–45s, 15% chance 60–120s).
+    """
+    if random.random() < THINKING_PAUSE_LONG_PCT:
+        pause = random.uniform(THINKING_PAUSE_LONG_MIN, THINKING_PAUSE_LONG_MAX)
+        print(f"  [SEARCH] thinking_pause={pause:.0f}s (long) after={after}")
+    else:
+        pause = random.uniform(THINKING_PAUSE_MIN, THINKING_PAUSE_MAX)
+        print(f"  [SEARCH] thinking_pause={pause:.0f}s after={after}")
+    time.sleep(pause)
+    return pause
+
+
+def _check_rate_limit():
+    """Req 12 — Enforce max RPM. Force cooldown if exceeded."""
+    global _request_timestamps
+    now = time.time()
+    _request_timestamps = [t for t in _request_timestamps if now - t < RATE_LIMIT_WINDOW]
+    if len(_request_timestamps) >= RATE_LIMIT_MAX_RPM:
+        cooldown = random.uniform(RATE_LIMIT_COOLDOWN_MIN, RATE_LIMIT_COOLDOWN_MAX)
+        print(f"  ⚠️ [RATE_LIMIT] RPM={len(_request_timestamps)} ≥ {RATE_LIMIT_MAX_RPM} "
+              f"→ cooldown {cooldown:.0f}s")
+        time.sleep(cooldown)
+        _request_timestamps.clear()
+    _request_timestamps.append(now)
+
+
+def _maybe_refresh_session():
+    """Req 8 — Refresh session only when needed (not aggressively)."""
+    global _last_session_refresh, _next_session_refresh
+    elapsed = time.time() - _last_session_refresh
+    if elapsed >= _next_session_refresh:
+        refresh_session()
+        _last_session_refresh   = time.time()
+        _next_session_refresh   = random.uniform(
+            _SESSION_REFRESH_MIN_INTERVAL, _SESSION_REFRESH_MAX_INTERVAL
+        )
+        print(f"  [SESSION] next refresh in {_next_session_refresh:.0f}s")
+
+
+def get_headers() -> dict:
+    """Req 9 — Randomise User-Agent, Accept-Language and minor headers per request."""
+    ua   = random.choice(USER_AGENTS)
+    lang = random.choice(_ACCEPT_LANGS)
+    # Minor header variations
+    dnt  = random.choice(["1", "0", None])
+    headers = {
+        "User-Agent":      ua,
         "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Language": lang,
         "Accept-Encoding": "gzip, deflate, br",
-        "DNT":             "1",
         "Connection":      "keep-alive",
         "Upgrade-Insecure-Requests": "1",
         "Sec-Fetch-Dest":  "document",
         "Sec-Fetch-Mode":  "navigate",
-        "Sec-Fetch-Site":  "none",
-        "Cache-Control":   "max-age=0",
+        "Sec-Fetch-Site":  random.choice(["none", "same-origin"]),
+        "Cache-Control":   random.choice(["max-age=0", "no-cache"]),
     }
+    if dnt:
+        headers["DNT"] = dnt
+    # Random Sec-CH-UA hint (Chrome only)
+    if "Chrome" in ua:
+        ver = re.search(r'Chrome/(\d+)', ua)
+        if ver:
+            v = ver.group(1)
+            headers["Sec-CH-UA"] = f'"Chromium";v="{v}", "Google Chrome";v="{v}"'
+    return headers
 
-def vinted_fetch(url, label=""):
+
+def vinted_fetch(url: str, label: str = "") -> "requests.Response | None":
     """
-    Pobiera stronę Vinted. Max 2 próby — szybka rezygnacja przy banie zamiast
-    tracenia 210s na 3 próby + pełny backoff.
+    Req 1+7+11+12 — Human-like request with:
+    - mandatory pre-request delay (anti-burst)
+    - rate limit check
+    - 3-attempt 403 retry with escalating waits
+    - hard stop on 3rd failure → long sleep + session refresh
     """
-    global _consecutive_403
-    for attempt in range(1, 3):   # max 2 próby
+    global _consecutive_403, _cycle_403_stop
+
+    # Req 12 — rate limit guard
+    _check_rate_limit()
+
+    # Req 11 — ANTI-BURST: mandatory delay before every request
+    _human_delay(label)
+
+    for attempt in range(1, 4):   # max 3 attempts (Req 7)
         try:
-            time.sleep(random.uniform(VINTED_MIN_DELAY, VINTED_MAX_DELAY))
-            r = requests.get(url, headers=get_headers(), timeout=10)
+            r = requests.get(url, headers=get_headers(), timeout=15)
 
             if r.status_code == 200:
                 _consecutive_403 = 0
@@ -1550,33 +1695,44 @@ def vinted_fetch(url, label=""):
 
             if r.status_code == 429:
                 wait = VINTED_429_WAIT * attempt
-                print(f"  🚫 429 [{label}] — czekam {wait}s (próba {attempt})")
+                print(f"  🚫 429 [{label}] — czekam {wait}s (próba {attempt}/3)")
                 time.sleep(wait)
                 continue
 
             if r.status_code in (403, 401):
                 _consecutive_403 += 1
-                step_idx = min(_consecutive_403 - 1, len(_403_BACKOFF_STEPS) - 1)
-                backoff  = _403_BACKOFF_STEPS[step_idx]
-                print(f"  ⚠️ HTTP {r.status_code} [{label}] — próba {attempt}/2 "
-                      f"(seria {_consecutive_403}x → backoff {backoff}s)")
-                if _consecutive_403 >= _403_BACKOFF_THRESHOLD:
-                    print(f"  🛑 Seria {_consecutive_403}x 403 — backoff {backoff}s + odświeżam sesję")
-                    time.sleep(backoff)
-                    refresh_session()
-                    _consecutive_403 = 0
-                    print(f"  😴 Post-ban cooldown {VINTED_POST_BAN_COOLDOWN}s (IP cooling)...")
-                    time.sleep(VINTED_POST_BAN_COOLDOWN)
+
+                if attempt <= 2:
+                    # Req 7 — escalating retry waits
+                    wait_range = _403_RETRY_WAITS[attempt - 1]
+                    wait = random.uniform(*wait_range)
+                    print(f"  [403] retry={attempt}/3 "
+                          f"cooldown={wait:.0f}s "
+                          f"consecutive={_consecutive_403} "
+                          f"search={label}")
+                    time.sleep(wait)
+                    continue
                 else:
-                    time.sleep(backoff)
-                continue
+                    # Req 7 — 3rd failure: HARD STOP
+                    stop_sleep = random.uniform(_403_HARD_STOP_MIN, _403_HARD_STOP_MAX)
+                    print(f"  [403] retry=3/3 HARD STOP → "
+                          f"cycle stop + sleep {stop_sleep:.0f}s + session refresh "
+                          f"search={label}")
+                    _cycle_403_stop = True
+                    time.sleep(stop_sleep)
+                    _maybe_refresh_session()
+                    _consecutive_403 = 0
+                    return None
 
             print(f"  ⚠️ HTTP {r.status_code} [{label}]")
             return None
 
+        except requests.exceptions.Timeout:
+            print(f"  ⚠️ Timeout [{label}] próba {attempt}/3")
+            time.sleep(random.uniform(10, 20))
         except Exception as e:
             print(f"  ⚠️ Request error [{label}]: {e}")
-            time.sleep(10)
+            time.sleep(random.uniform(5, 15))
 
     return None
 
@@ -2747,8 +2903,14 @@ while True:
             threading.Thread(target=_update_medians_bg, daemon=True).start()
 
         cycle += 1
-        _consecutive_403 = 0   # reset na starcie cyklu — nie przenoś banów między cyklami
+        _consecutive_403  = 0   # reset na starcie cyklu
+        _cycle_403_stop   = False
+        cycle_start       = time.time()
+
         print(f"\n🔄 Cykl #{cycle}")
+
+        # Req 8 — session refresh (only when needed, not every cycle)
+        _maybe_refresh_session()
 
         # Propaguj mediany do searchów no_median w tej samej kategorii
         _cat_to_median: dict[str, float] = {}
@@ -2763,8 +2925,17 @@ while True:
                 if cat and cat in _cat_to_median:
                     market_prices[s["name"]] = _cat_to_median[cat]
 
-        # ── STEP 6 — Zbierz nowe itemy ze wszystkich searchów ──────────
-        # Tiered rotation: nie scrapujemy 61 searchów na raz (ban IP)
+        # ── Req 2+3: RANDOMIZED CYCLE SIZE + RANDOM SEARCH SELECTION ──
+        # 50% → 2 searches, 30% → 3, 20% → 4
+        _roll = random.random()
+        if _roll < 0.50:
+            n_searches = 2
+        elif _roll < 0.80:
+            n_searches = 3
+        else:
+            n_searches = 4
+
+        # Build pool from tiered rotation (same logic as before)
         TIER_A_LAYERS = {"wide_brand", "premium"}
         TIER_B_LAYERS = {"chaos", "category", "targeted"}
         TIER_C_LAYERS = {"football", "lego"}
@@ -2775,39 +2946,50 @@ while True:
         tier_c     = [s for s in SEARCHES if s.get("layer") in TIER_C_LAYERS]
         tier_grail = [s for s in SEARCHES if s.get("layer") in GRAIL_LAYERS]
 
-        this_cycle_searches = list(tier_grail) + list(tier_a)   # zawsze
+        # Always include at least one grail search + sample from other tiers
+        pool: list = list(tier_grail)
+        pool += random.sample(tier_a, min(len(tier_a), max(1, n_searches - 1)))
+        if cycle % 2 == 0 and tier_b:
+            pool += random.sample(tier_b, min(len(tier_b), 2))
+        if cycle % 4 == 0 and tier_c:
+            pool += random.sample(tier_c, min(len(tier_c), 1))
 
-        if cycle % 2 == 0:
-            random.shuffle(tier_b)
-            this_cycle_searches += tier_b[:12]
+        # Req 3 — shuffle EVERY time (never same order twice)
+        random.shuffle(pool)
+        this_cycle_searches = pool[:n_searches + 2]   # +2 buffer for skips
 
-        if cycle % 4 == 0:
-            random.shuffle(tier_c)
-            this_cycle_searches += tier_c[:8]
+        # Req 10 — early exit
+        if random.random() < 0.10:
+            print(f"  [CYCLE] early_exit=True (noise injection)")
+            this_cycle_searches = this_cycle_searches[:1]
 
-        if cycle % 6 == 0:
-            no_median_s = [s for s in SEARCHES if s.get("no_median")]
-            random.shuffle(no_median_s)
-            this_cycle_searches += no_median_s[:6]
-
-        print(f"  \U0001f50d Ten cykl: {len(this_cycle_searches)} searchów "
-              f"(grail={len(tier_grail)}, A={len(tier_a)}, "
-              f"B={'tak' if cycle%2==0 else 'nie'}, "
-              f"C={'tak' if cycle%4==0 else 'nie'})")
+        print(f"  [CYCLE] search_count={len(this_cycle_searches)} "
+              f"(target={n_searches})")
 
         # Zbierz wszystkie nowe itemy z tego cyklu
-        all_new_items:    list = []   # itemy do engine
-        special_items:    list = []   # (search, item) dla trybów specjalnych
+        all_new_items: list = []
+        special_items: list = []
         now = time.time()
+        searches_done = 0
 
         for search in this_cycle_searches:
-            print(f"  \u23f3 Sprawdzam: {search['name']}")
+            # Req 7 — hard stop if cycle marked for stop by 403
+            if _cycle_403_stop:
+                print(f"  [403] cycle_stop — przerywam cykl po banie")
+                break
+
+            # Req 6 — 20% chance: skip search entirely (noise)
+            if random.random() < 0.20:
+                print(f"  [SEARCH] skipped={search['name']} (noise injection)")
+                continue
+
+            print(f"  ⏳ Sprawdzam: {search['name']}")
             market_price = market_prices.get(search["name"])
             new_items, all_ids = check_search(search, seen, market_price)
-            print(f"  \u2714 Gotowe: {search['name']} \u2014 nowych: {len(new_items)}")
+            searches_done += 1
+            print(f"  [SEARCH] selected={search['name']} nowych={len(new_items)}")
 
-            # Oznacz jako seen tylko stare itemy (nie w new_items).
-            # Nowe itemy są oznaczane dopiero po engine evaluation.
+            # Oznacz jako seen tylko stare itemy
             new_ids = {str(it.get("id", "")) for it in new_items}
             for _id in all_ids:
                 if _id not in seen and str(_id) not in new_ids:
@@ -2819,20 +3001,24 @@ while True:
                 search.get("carhartt_mode")
             )
 
-            for item in new_items[:MAX_ALERTS_PER_SEARCH]:
+            # Req 6 — 10% chance: first page only (early stop within search)
+            items_to_take = 1 if random.random() < 0.10 else MAX_ALERTS_PER_SEARCH
+            for item in new_items[:items_to_take]:
                 if is_special:
                     special_items.append((search, item))
                 else:
                     all_new_items.append(item)
 
-        # ── STEP 7 — EVALUATE_AND_DECIDE dla wszystkich itemów ────────
-        # Requirement 1: JEDYNY punkt decyzyjny — evaluate_and_decide()
-        # Requirement 6: USUNIĘTO bezpośrednie wysyłanie "NEW ITEM"
+            # Req 4 — thinking pause between searches
+            _thinking_pause(after=search["name"])
+
+        cycle_duration = time.time() - cycle_start
+        print(f"  [CYCLE] search_count={searches_done} duration={cycle_duration:.0f}s")
+
+        # ── STEP 7 — EVALUATE_AND_DECIDE ────────────────────────────
         sent_this_cycle = 0
         MAX_PER_CYCLE   = 10
 
-        # 7a — special items (football/lego/carhartt) TEŻ przez engine
-        # Requirement 6: nie ma bypass — wszystko przez evaluate_and_decide
         for search, item in special_items:
             item["_search_meta"] = {
                 "football_mode":  search.get("football_mode"),
@@ -2842,7 +3028,6 @@ while True:
             }
             all_new_items.append(item)
 
-        # 7b — run_cycle_strict przez evaluate_and_decide (CHAOS + BRAND + GRAIL)
         if engine and all_new_items:
             engine_results = engine.run_cycle_strict(all_new_items, market_prices)
 
@@ -2854,10 +3039,8 @@ while True:
                 eng    = result.get("engine", "?")
                 profit = result.get("profit", 0)
                 conf   = result.get("confidence", 0)
-                is_gr  = result.get("is_grail", False)
                 reason = result.get("reason", "")
 
-                # Requirement 9: tylko te które przeszły evaluate_and_decide
                 photo     = item.get("photo") or get_item_photo(item["id"], item.get("link", ""))
                 alert_msg = engine.format_alert(result)
                 send_message(alert_msg, photo_url=photo, item_link=item.get("link"))
@@ -2868,14 +3051,24 @@ while True:
                 print(f"  {emoji} [{eng}] conf={conf:.1f} profit={profit:.0f}zł "
                       f"reason={reason} | {item['title'][:35]}")
 
-        # ── STEP 8 — FALLBACK: jeśli 0 wysłanych, rozszerz okno do 120 min ─
-        if sent_this_cycle == 0:
-            print(f"  \u26a0\ufe0f FALLBACK MODE \u2014 brak wyników, rozszerzam okno do 120 min")
+                # Req 10 — micro delay after each sent item
+                if random.random() < ITEM_IDLE_PCT:
+                    idle = random.uniform(ITEM_IDLE_MIN, ITEM_IDLE_MAX)
+                    print(f"  [ITEM] idle={idle:.1f}s (simulate reading)")
+                    time.sleep(idle)
+                else:
+                    time.sleep(random.uniform(ITEM_MICRO_DELAY_MIN, ITEM_MICRO_DELAY_MAX))
+
+        # ── FALLBACK ────────────────────────────────────────────────
+        if sent_this_cycle == 0 and not _cycle_403_stop:
+            print(f"  ⚠️ FALLBACK MODE — brak wyników, rozszerzam okno do 120 min")
             fallback_items: list = []
             _fallback_searches = list(SEARCHES)
             random.shuffle(_fallback_searches)
 
-            for search in _fallback_searches[:10]:
+            for search in _fallback_searches[:5]:   # ograniczone w fallback
+                if _cycle_403_stop:
+                    break
                 if search.get("football_mode") or search.get("lego_sw_mode"):
                     continue
                 fb_search = dict(search, _fallback_mode=True)
@@ -2884,8 +3077,9 @@ while True:
                     if _id not in seen:
                         seen[_id] = now
                 fallback_items.extend(fb_items[:2])
-                if len(fallback_items) >= 20:
+                if len(fallback_items) >= 15:
                     break
+                _thinking_pause(after=f"fallback:{search['name']}")
 
             if engine and fallback_items:
                 fb_results = engine.run_cycle_strict(fallback_items, market_prices)
@@ -2906,14 +3100,19 @@ while True:
 
         save_seen(seen)
 
-        # Part 3 — zapisz MarketDB po każdym cyklu (throttled wewnętrznie)
         if engine:
             engine.db.save()
             if DEBUG_PIPELINE:
-                print(f"  💾 MarketDB: {len(engine.db.db)} grup | "
-                      f"dirty={engine.db._dirty}")
+                print(f"  💾 MarketDB: {len(engine.db.db)} grup | dirty={engine.db._dirty}")
 
-        time.sleep(SLEEP_BETWEEN_CYCLES)
+        # Req 5 — CYCLE BREAK: 2–5 min, 20% chance 5–10 min
+        if random.random() < CYCLE_BREAK_LONG_PCT:
+            break_t = random.uniform(CYCLE_BREAK_LONG_MIN, CYCLE_BREAK_LONG_MAX)
+            print(f"  [CYCLE] extended_break={break_t:.0f}s (20% chance)")
+        else:
+            break_t = random.uniform(CYCLE_BREAK_MIN, CYCLE_BREAK_MAX)
+            print(f"  [CYCLE] break={break_t:.0f}s")
+        time.sleep(break_t)
 
     except Exception as e:
         # Part 6 — NIE ignoruj błędów głównej pętli cichutko
