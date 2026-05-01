@@ -6,6 +6,7 @@ import re
 import base64
 import random
 from statistics import median
+from bs4 import BeautifulSoup
 
 # ── Intelligence Engine ──────────────────
 try:
