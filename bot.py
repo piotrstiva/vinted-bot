@@ -2825,28 +2825,26 @@ while True:
                 else:
                     all_new_items.append(item)
 
-        # ── STEP 7 — MULTI-ENGINE EVALUATION ────────────────────────
-        # Part 1: chaos_items + brand_items + grail_items → all_items
+        # ── STEP 7 — EVALUATE_AND_DECIDE dla wszystkich itemów ────────
+        # Requirement 1: JEDYNY punkt decyzyjny — evaluate_and_decide()
+        # Requirement 6: USUNIĘTO bezpośrednie wysyłanie "NEW ITEM"
         sent_this_cycle = 0
         MAX_PER_CYCLE   = 10
 
-        # 7a — Tryby specjalne (football / lego / carhartt) — bypass engine
+        # 7a — special items (football/lego/carhartt) TEŻ przez engine
+        # Requirement 6: nie ma bypass — wszystko przez evaluate_and_decide
         for search, item in special_items:
-            if sent_this_cycle >= MAX_PER_CYCLE:
-                seen[item["id"]] = now
-                continue
-            photo = item.get("photo") or get_item_photo(item["id"], item.get("link", ""))
-            msg   = format_message(search, item)
-            send_message(msg, photo_url=photo, item_link=item.get("link"))
-            seen[item["id"]] = now
-            sent_this_cycle += 1
-            tag = "\u26bd" if search.get("football_mode") else "\U0001f9f1"
-            print(f"  {tag} {item['title'][:55]} | {item['price']:.0f} z\u0142")
+            item["_search_meta"] = {
+                "football_mode":  search.get("football_mode"),
+                "lego_sw_mode":   search.get("lego_sw_mode"),
+                "carhartt_mode":  search.get("carhartt_mode"),
+                "name":           search.get("name"),
+            }
+            all_new_items.append(item)
 
-        # 7b — run_cycle przez 3 silniki (CHAOS + BRAND + GRAIL)
+        # 7b — run_cycle_strict przez evaluate_and_decide (CHAOS + BRAND + GRAIL)
         if engine and all_new_items:
-            engine_results = engine.run_cycle(all_new_items, market_prices)
-            engine_results.sort(key=lambda r: -r.get("profit", 0))
+            engine_results = engine.run_cycle_strict(all_new_items, market_prices)
 
             for result in engine_results:
                 if sent_this_cycle >= MAX_PER_CYCLE:
@@ -2857,31 +2855,18 @@ while True:
                 profit = result.get("profit", 0)
                 conf   = result.get("confidence", 0)
                 is_gr  = result.get("is_grail", False)
+                reason = result.get("reason", "")
 
-                min_profit = {"GRAIL": 10, "BRAND": 25, "CHAOS": 15}.get(eng, 15)
-                if is_gr:
-                    min_profit = 10
-
-                if profit < min_profit:
-                    seen[item["id"]] = now
-                    continue
-
+                # Requirement 9: tylko te które przeszły evaluate_and_decide
                 photo     = item.get("photo") or get_item_photo(item["id"], item.get("link", ""))
                 alert_msg = engine.format_alert(result)
                 send_message(alert_msg, photo_url=photo, item_link=item.get("link"))
                 seen[item["id"]] = now
                 sent_this_cycle += 1
 
-                emoji = {"GRAIL": "\U0001f48e", "BRAND": "\U0001f7e3", "CHAOS": "\U0001f535"}.get(eng, "\u26aa")
-                print(f"  {emoji} [{eng}] conf={conf:.1f} profit={profit:.0f}z\u0142 | {item['title'][:40]}")
-
-        elif not engine:
-            for item in all_new_items[:5]:
-                msg   = format_message({}, item)
-                photo = item.get("photo") or get_item_photo(item["id"], item.get("link", ""))
-                send_message(msg, photo_url=photo, item_link=item.get("link"))
-                seen[item["id"]] = now
-                sent_this_cycle += 1
+                emoji = {"GRAIL": "💎", "BRAND": "🟣", "CHAOS": "🔵"}.get(eng, "⚪")
+                print(f"  {emoji} [{eng}] conf={conf:.1f} profit={profit:.0f}zł "
+                      f"reason={reason} | {item['title'][:35]}")
 
         # ── STEP 8 — FALLBACK: jeśli 0 wysłanych, rozszerz okno do 120 min ─
         if sent_this_cycle == 0:
@@ -2903,8 +2888,7 @@ while True:
                     break
 
             if engine and fallback_items:
-                fb_results = engine.run_cycle(fallback_items, market_prices)
-                fb_results.sort(key=lambda r: -r.get("profit", 0))
+                fb_results = engine.run_cycle_strict(fallback_items, market_prices)
                 for result in fb_results[:MAX_PER_CYCLE]:
                     item   = result["item"]
                     profit = result.get("profit", 0)
@@ -2916,7 +2900,7 @@ while True:
                     send_message(alert_msg, photo_url=photo, item_link=item.get("link"))
                     seen[item["id"]] = now
                     sent_this_cycle += 1
-                    print(f"  \U0001f501 FALLBACK [{result.get('engine','?')}] | {item['title'][:55]} | {item['price']:.0f} z\u0142")
+                    print(f"  🔁 FALLBACK [{result.get('engine','?')}] | {item['title'][:55]} | {item['price']:.0f} zł")
 
         print(f"  📊 Cykl #{cycle} zakończony — wysłano: {sent_this_cycle} alertów [CHAOS+BRAND+GRAIL]")
 
