@@ -1236,6 +1236,22 @@ class Engine:
             ("CHAOS", c_result),
         ]
 
+        # Task 1 — FULL DEBUG LOG: wszystkie 3 silniki per item
+        if DEBUG_ALERTS:
+            c_s = c_result.get("confidence", 0)
+            b_s = b_result.get("confidence", 0)
+            g_s = g_result.get("confidence", 0)
+            c_p = c_result.get("profit", 0)
+            b_p = b_result.get("profit", 0)
+            g_p = g_result.get("profit", 0)
+            g_is = g_result.get("is_grail", False)
+            c_r = c_result.get("_skip_reason", "—")
+            b_r = b_result.get("_skip_reason", "—")
+            print(f"  [SCORE] {title[:45]}")
+            print(f"    CHAOS: conf={c_s:.1f} profit={c_p:.0f} skip={c_r}")
+            print(f"    BRAND: conf={b_s:.1f} profit={b_p:.0f} skip={b_r}")
+            print(f"    GRAIL: conf={g_s:.1f} profit={g_p:.0f} grail={g_is}")
+
         # Failsafe (Requirement 10): żaden silnik nie zwrócił nic
         if all(r.get("confidence", 0) == 0 for _, r in candidates):
             return {
@@ -1262,23 +1278,32 @@ class Engine:
         brand_name = best.get("brand")
 
         # ── Requirement 5: FINAL DECISION RULES ───────────
+        # Task 3 — TYMCZASOWO OBNIŻONE PROGI (debug mode)
+        # Normalnie: profit>=30 AND conf>=6
+        # Teraz:     profit>=10 AND conf>=4  (żeby zobaczyć co przechodzi)
         send   = False
         reason = "below_threshold"
 
-        # CASE 2: grail override
+        # CASE 2: grail override (niezmienione — grail zawsze)
         if is_grail and profit >= 10:
             send   = True
             reason = f"grail(score={best.get('grail_score',0)})"
 
-        # CASE 1: standard flip
-        elif profit >= 30 and confidence >= 6.0:
+        # CASE 1: standard flip — obniżone z profit>=30,conf>=6 do profit>=10,conf>=4
+        elif profit >= 10 and confidence >= 4.0:
             send   = True
-            reason = f"standard_flip(profit={profit:.0f},conf={confidence:.1f})"
+            reason = f"flip(profit={profit:.0f},conf={confidence:.1f})"
 
-        # CASE 3: strong brand deal
-        elif best_name == "BRAND" and profit >= 25 and confidence >= 5.0:
+        # CASE 3: strong brand deal — obniżone z profit>=25 do profit>=10
+        elif best_name == "BRAND" and profit >= 10 and confidence >= 4.0:
             send   = True
-            reason = f"brand_deal(profit={profit:.0f})"
+            reason = f"brand(profit={profit:.0f})"
+
+        # CASE 4: Task 4 — fallback: wyślij top 1 nawet przy niskim score
+        # (obsługiwane przez run_cycle_strict — top 1 zawsze przechodzi)
+        elif confidence > 0:
+            # Zachowaj jako kandydata fallback (decyzja w run_cycle_strict)
+            reason = f"fallback_candidate(conf={confidence:.1f},profit={profit:.0f})"
 
         # Requirement 6: logging
         if DEBUG_ALERTS:
@@ -1298,13 +1323,17 @@ class Engine:
 
     def run_cycle_strict(self, items: list[dict], market_prices: dict | None = None) -> list[dict]:
         """
-        Requirement 1+6+8: Strict pipeline — każdy item przez evaluate_and_decide.
-        Zwraca max 10 wyników posortowanych po profit DESC.
+        Strict pipeline — każdy item przez evaluate_and_decide.
+        Task 3: obniżone progi.
+        Task 4: fallback TOP 1 gdy wszystkie odrzucone.
+        Task 5: deduplikacja po item_id.
+        Task 6: auto-save DB.
         """
         market_prices = market_prices or {}
-        total = len(items)
-        processed = 0
-        results = []
+        total      = len(items)
+        processed  = 0
+        results    = []
+        fallbacks  = []   # Task 4 — kandydaci fallback
 
         for item in items:
             try:
@@ -1312,40 +1341,66 @@ class Engine:
                 processed += 1
                 if r.get("send"):
                     results.append(r)
+                elif r.get("confidence", 0) > 0:
+                    # Task 4 — zachowaj jako fallback kandydata
+                    fallbacks.append(r)
             except Exception as e:
                 processed += 1
                 title = str(item.get("title", "?"))[:80] if isinstance(item, dict) else "?"
                 print(f"  ❌ ITEM ERROR: {e} | {title}")
 
-        # Requirement 9: sort by score DESC, limit 10
+        # Task 2 — pipeline metrics
+        print(f"  📊 Processed: {processed}/{total} | Accepted: {len(results)} | Fallbacks: {len(fallbacks)}")
+
+        # Task 4 — fallback: jeśli 0 zaakceptowanych → wyślij TOP 1 po confidence
+        if not results and fallbacks:
+            fallbacks.sort(key=lambda r: -(r.get("confidence", 0) + r.get("profit", 0)))
+            top1 = fallbacks[0]
+            top1["send"]       = True
+            top1["send_alert"] = True
+            top1["reason"]     = f"top1_fallback(conf={top1.get('confidence',0):.1f})"
+            results = [top1]
+            print(f"  ⚠️ FALLBACK TOP1: {top1.get('item',{}).get('title','?')[:50]} "
+                  f"| conf={top1.get('confidence',0):.1f}")
+
+        # Task 9: sort by profit+confidence DESC, limit 10
         results.sort(key=lambda r: -(r.get("profit", 0) + r.get("confidence", 0)))
 
-        # Dedup by item_id + brand cap
+        # Task 5 — dedup po item_id (prevent same item multiple times)
         brand_counts: dict[str, int] = {}
-        final = []
+        final    = []
+        sent_ids = set()   # Task 5: lokalny set per-cykl (nie tylko sesyjny)
+
         for r in results:
             item_id  = str(r.get("item", {}).get("id", ""))
             is_grail = r.get("is_grail", False)
+
+            # Task 5 — dedup: sprawdź ZARÓWNO sesyjny set jak i lokalny
+            if item_id and item_id in sent_ids:
+                continue
             if item_id and item_id in self._alerted_ids and not is_grail:
                 continue
+
             brand = r.get("brand") or ""
             if brand and not is_grail:
                 if brand_counts.get(brand, 0) >= 2:
                     continue
                 brand_counts[brand] = brand_counts.get(brand, 0) + 1
+
             if item_id:
+                sent_ids.add(item_id)
                 self._alerted_ids.add(item_id)
             final.append(r)
             if len(final) >= 10:
                 break
 
-        # Requirement 2 — pipeline metrics
-        print(f"  📊 Processed: {processed}/{total} | Sending: {len(final)}")
-
         if len(self._alerted_ids) > 10_000:
             self._alerted_ids = set(list(self._alerted_ids)[-5_000:])
 
-        self.db.save()
+        # Task 6 — auto-save DB po każdym cyklu
+        self.db.save(force=True)
+        print(f"  💾 MarketDB saved: {len(self.db.db)} grup → {DB_FILE}")
+
         return final
 
     def evaluate(self, item: dict, search: dict, market_price: float | None) -> dict:
