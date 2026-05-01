@@ -1347,28 +1347,15 @@ class Engine:
 
         self.db.save()
         return final
+
+    def evaluate(self, item: dict, search: dict, market_price: float | None) -> dict:
         """
-        Legacy evaluate() — deleguje do odpowiedniego silnika.
-        Grail → Brand → Chaos (kolejność priorytetów).
+        Legacy evaluate() — deleguje do evaluate_and_decide().
+        Zachowane dla backward compatibility.
         """
-        title  = item.get("title", "")
-        brand  = detect_brand(title)
-        mps    = {search.get("name", ""): market_price} if market_price else {}
-
-        # Grail ma priorytet
-        g = self.grail._evaluate(item)
-        if g["send_alert"]:
-            return self._to_legacy(g)
-
-        # Brand gdy jest brand
-        if brand:
-            b = self.brand._evaluate(item, mps)
-            if b["send_alert"]:
-                return self._to_legacy(b)
-
-        # Chaos fallback
-        c = self.chaos._evaluate(item)
-        return self._to_legacy(c)
+        mps = {search.get("name", ""): market_price} if market_price else {}
+        result = self.evaluate_and_decide(item, mps)
+        return self._to_legacy(result)
 
     def _to_legacy(self, r: dict) -> dict:
         """Konwertuje wynik silnika do formatu legacy."""
