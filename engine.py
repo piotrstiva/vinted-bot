@@ -1163,8 +1163,190 @@ class Engine:
 
         return final
 
-    # ── STARY INTERFEJS (kompatybilność z bot.py) ────
-    def evaluate(self, item: dict, search: dict, market_price: float | None) -> dict:
+    # ── SINGLE ENTRY POINT (Requirement 1) ──────────────
+    def evaluate_and_decide(self, item: dict, market_prices: dict | None = None) -> dict:
+        """
+        JEDYNY punkt decyzyjny — każdy item MUSI przez to przejść.
+        Uruchamia wszystkie 3 silniki, agreguje, podejmuje decyzję.
+
+        Returns:
+          send     : bool
+          engine   : str (winning engine)
+          reason   : str
+          profit   : float
+          confidence: float
+          ... (pola z wygrywającego silnika)
+        """
+        market_prices = market_prices or {}
+        title = ""
+        try:
+            title = str(item.get("title") or "")
+        except Exception:
+            pass
+
+        # ── Requirement 2: HARD FILTERS (przed jakimkolwiek silnikiem) ──
+        _HARD_TRASH = [
+            "blouse", "bluzka", "sukienka", "dress",
+            "crop top", "bikini", "bra ", "stanik",
+            "swimsuit", "bodysuit", "leggings", "legginsy",
+            "tights", "rajstopy", "coquette", "cute ",
+            "kombinezon damski",
+        ]
+        tl = title.lower()
+        for trash in _HARD_TRASH:
+            if trash in tl:
+                return {
+                    "send": False, "engine": None,
+                    "reason": f"hard_filter:{trash}",
+                    "profit": 0, "confidence": 0,
+                    "item": item, "send_alert": False,
+                }
+
+        if is_foreign_title(title):
+            return {
+                "send": False, "engine": None,
+                "reason": "foreign_language",
+                "profit": 0, "confidence": 0,
+                "item": item, "send_alert": False,
+            }
+
+        # ── Requirement 3: RUN ALL THREE ENGINES ──────────
+        try:
+            c_result = self.chaos._evaluate(item)
+        except Exception as e:
+            print(f"  ❌ [evaluate_and_decide] CHAOS error: {e} | {title[:60]}")
+            c_result = {"send_alert": False, "profit": 0, "confidence": 0, "engine": "CHAOS"}
+
+        try:
+            b_result = self.brand._evaluate(item, market_prices)
+        except Exception as e:
+            print(f"  ❌ [evaluate_and_decide] BRAND error: {e} | {title[:60]}")
+            b_result = {"send_alert": False, "profit": 0, "confidence": 0, "engine": "BRAND"}
+
+        try:
+            g_result = self.grail._evaluate(item)
+        except Exception as e:
+            print(f"  ❌ [evaluate_and_decide] GRAIL error: {e} | {title[:60]}")
+            g_result = {"send_alert": False, "profit": 0, "confidence": 0, "engine": "GRAIL"}
+
+        # ── Requirement 4: AGGREGATION ─────────────────────
+        candidates = [
+            ("GRAIL", g_result),
+            ("BRAND", b_result),
+            ("CHAOS", c_result),
+        ]
+
+        # Failsafe (Requirement 10): żaden silnik nie zwrócił nic
+        if all(r.get("confidence", 0) == 0 for _, r in candidates):
+            return {
+                "send": False, "engine": None,
+                "reason": "no_valid_score",
+                "profit": 0, "confidence": 0,
+                "item": item, "send_alert": False,
+            }
+
+        # Wybierz najlepszy wynik (max confidence, GRAIL ma priorytet)
+        best_name, best = max(
+            candidates,
+            key=lambda x: (
+                x[1].get("confidence", 0) +
+                (3.0 if x[0] == "GRAIL" and x[1].get("is_grail") else 0)
+            )
+        )
+        best = dict(best)
+        best["engine"] = best_name
+
+        profit     = best.get("profit", 0)
+        confidence = best.get("confidence", 0)
+        is_grail   = best.get("is_grail", False)
+        brand_name = best.get("brand")
+
+        # ── Requirement 5: FINAL DECISION RULES ───────────
+        send   = False
+        reason = "below_threshold"
+
+        # CASE 2: grail override
+        if is_grail and profit >= 10:
+            send   = True
+            reason = f"grail(score={best.get('grail_score',0)})"
+
+        # CASE 1: standard flip
+        elif profit >= 30 and confidence >= 6.0:
+            send   = True
+            reason = f"standard_flip(profit={profit:.0f},conf={confidence:.1f})"
+
+        # CASE 3: strong brand deal
+        elif best_name == "BRAND" and profit >= 25 and confidence >= 5.0:
+            send   = True
+            reason = f"brand_deal(profit={profit:.0f})"
+
+        # Requirement 6: logging
+        if DEBUG_ALERTS:
+            action = "📤 SEND" if send else "⏭  SKIP"
+            print(f"  [{best_name}] {action} | "
+                  f"conf={confidence:.1f} profit={profit:.0f} "
+                  f"grail={is_grail} brand={brand_name or '—'} | "
+                  f"reason={reason} | {title[:40]}")
+
+        return {
+            **best,
+            "send":       send,
+            "send_alert": send,
+            "reason":     reason,
+            "engine":     best_name,
+        }
+
+    def run_cycle_strict(self, items: list[dict], market_prices: dict | None = None) -> list[dict]:
+        """
+        Requirement 1+6+8: Strict pipeline — każdy item przez evaluate_and_decide.
+        Zwraca max 10 wyników posortowanych po profit DESC.
+        """
+        market_prices = market_prices or {}
+        total = len(items)
+        processed = 0
+        results = []
+
+        for item in items:
+            try:
+                r = self.evaluate_and_decide(item, market_prices)
+                processed += 1
+                if r.get("send"):
+                    results.append(r)
+            except Exception as e:
+                processed += 1
+                title = str(item.get("title", "?"))[:80] if isinstance(item, dict) else "?"
+                print(f"  ❌ ITEM ERROR: {e} | {title}")
+
+        # Requirement 9: sort by score DESC, limit 10
+        results.sort(key=lambda r: -(r.get("profit", 0) + r.get("confidence", 0)))
+
+        # Dedup by item_id + brand cap
+        brand_counts: dict[str, int] = {}
+        final = []
+        for r in results:
+            item_id  = str(r.get("item", {}).get("id", ""))
+            is_grail = r.get("is_grail", False)
+            if item_id and item_id in self._alerted_ids and not is_grail:
+                continue
+            brand = r.get("brand") or ""
+            if brand and not is_grail:
+                if brand_counts.get(brand, 0) >= 2:
+                    continue
+                brand_counts[brand] = brand_counts.get(brand, 0) + 1
+            if item_id:
+                self._alerted_ids.add(item_id)
+            final.append(r)
+            if len(final) >= 10:
+                break
+
+        # Requirement 2 — pipeline metrics
+        print(f"  📊 Processed: {processed}/{total} | Sending: {len(final)}")
+
+        if len(self._alerted_ids) > 10_000:
+            self._alerted_ids = set(list(self._alerted_ids)[-5_000:])
+
+        self.db.save()
+        return final
         """
         Legacy evaluate() — deleguje do odpowiedniego silnika.
         Grail → Brand → Chaos (kolejność priorytetów).
