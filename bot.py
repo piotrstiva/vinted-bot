@@ -122,6 +122,389 @@ BLOCKED_BRANDS = [
     "jack wolfskin", "the north face", "regatta",
 ]
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  🎯 SEARCH PROFILES — per-query filtering rules
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Each profile defines HOW items from a specific search query are filtered.
+# key = search["name"] (must match exactly)
+# strict=True → ALL required_phrases must appear in title
+# strict=False → at least one required_phrase is enough
+
+SEARCH_PROFILES: dict[str, dict] = {
+    # ── Vintage tees ──────────────────────────────────
+    "Single Stitch Vintage": {
+        "required_phrases": ["single stitch"],
+        "allowed_types":    ["t-shirt", "tee", "tshirt", "koszulka", "shirt", "top"],
+        "exclude_phrases":  ["sukienka", "dress", "bluzka", "spodnie", "jeans",
+                             "kurtka", "jacket", "bluza", "hoodie"],
+        "exclude_brands":   ["zara", "h&m", "shein", "bershka", "sinsay", "reserved"],
+        "strict":           True,
+    },
+    "Single Stitch": {
+        "required_phrases": ["single stitch"],
+        "allowed_types":    ["t-shirt", "tee", "tshirt", "koszulka", "shirt"],
+        "exclude_brands":   ["zara", "h&m", "shein", "bershka"],
+        "strict":           True,
+    },
+    "Band Tee Vintage Tour": {
+        "required_phrases": ["band", "tour", "tee", "shirt"],
+        "allowed_types":    ["t-shirt", "tee", "tshirt", "koszulka", "shirt"],
+        "exclude_phrases":  ["sukienka", "dress", "bluzka", "spodnie"],
+        "exclude_brands":   ["zara", "h&m", "shein", "bershka"],
+        "strict":           False,   # at least 1 phrase
+    },
+    "Nirvana Shirt Vintage": {
+        "required_phrases": ["nirvana"],
+        "allowed_types":    ["t-shirt", "tee", "tshirt", "koszulka", "shirt"],
+        "exclude_brands":   ["zara", "h&m", "shein", "bershka", "hm"],
+        "strict":           True,
+    },
+    "Metallica Shirt Vintage": {
+        "required_phrases": ["metallica"],
+        "allowed_types":    ["t-shirt", "tee", "tshirt", "koszulka", "shirt"],
+        "exclude_brands":   ["zara", "h&m", "shein", "bershka"],
+        "strict":           True,
+    },
+    "Harley Davidson Vintage": {
+        "required_phrases": ["harley"],
+        "allowed_types":    ["t-shirt", "tee", "tshirt", "koszulka", "shirt",
+                             "jacket", "kurtka", "hoodie", "bluza", "sweatshirt"],
+        "exclude_brands":   ["zara", "h&m", "shein"],
+        "strict":           True,
+    },
+    "Made In USA Vintage": {
+        "required_phrases": ["made in usa", "made in u.s.a"],
+        "allowed_types":    ["t-shirt", "tee", "tshirt", "koszulka", "shirt",
+                             "jacket", "kurtka", "hoodie", "jeans", "bluza"],
+        "exclude_brands":   ["zara", "h&m", "shein", "bershka"],
+        "strict":           True,
+    },
+    "Rap Tee Vintage": {
+        "required_phrases": ["rap", "hip hop", "hiphop", "hip-hop"],
+        "allowed_types":    ["t-shirt", "tee", "tshirt", "koszulka", "shirt"],
+        "exclude_brands":   ["zara", "h&m", "shein"],
+        "strict":           False,
+    },
+    # ── Hype / streetwear ─────────────────────────────
+    "Corteiz": {
+        "required_phrases": ["corteiz", "crtz"],
+        "exclude_brands":   ["zara", "h&m", "shein"],
+        "strict":           False,
+    },
+    "Broken Planet": {
+        "required_phrases": ["broken planet"],
+        "exclude_brands":   ["zara", "h&m", "shein"],
+        "strict":           True,
+    },
+    "Denim Tears": {
+        "required_phrases": ["denim tears"],
+        "strict":           True,
+    },
+    "Represent": {
+        "required_phrases": ["represent"],
+        "exclude_phrases":  ["represents", "reprezentuje", "reprezentacja"],
+        "strict":           True,
+    },
+    "Essentials Fear of God": {
+        "required_phrases": ["essentials", "fear of god", "fog"],
+        "strict":           False,
+    },
+    "Stussy": {
+        "required_phrases": ["stussy", "stüssy"],
+        "exclude_brands":   ["zara", "h&m", "shein"],
+        "strict":           False,
+    },
+    # ── Workwear / outdoor ────────────────────────────
+    "Carhartt WIP": {
+        "required_phrases": ["carhartt"],
+        "exclude_phrases":  ["dziecięcy", "kids", "baby", "dziecko"],
+        "strict":           True,
+    },
+    "Arc'teryx": {
+        "required_phrases": ["arcteryx", "arc'teryx", "arc teryx"],
+        "strict":           False,
+    },
+    "Arc'teryx Beta": {
+        "required_phrases": ["arcteryx", "arc'teryx", "arc teryx"],
+        "strict":           False,
+    },
+    "Salomon": {
+        "required_phrases": ["salomon"],
+        "exclude_phrases":  ["przepis", "salomona"],
+        "strict":           True,
+    },
+    "Salomon XT-6": {
+        "required_phrases": ["salomon"],
+        "strict":           True,
+    },
+    # ── Footwear ──────────────────────────────────────
+    "New Balance": {
+        "required_phrases": ["new balance"],
+        "allowed_types":    ["sneakers", "shoes", "buty", "trainers", "runners"],
+        "strict":           True,
+    },
+    "New Balance 1906R": {
+        "required_phrases": ["new balance", "1906"],
+        "strict":           True,
+    },
+    "ASICS": {
+        "required_phrases": ["asics"],
+        "allowed_types":    ["sneakers", "shoes", "buty", "trainers", "gel"],
+        "strict":           True,
+    },
+    # ── Vintage categories ────────────────────────────
+    "Vintage T-Shirt": {
+        "required_phrases": ["vintage"],
+        "allowed_types":    ["t-shirt", "tee", "tshirt", "koszulka", "shirt"],
+        "exclude_phrases":  ["sukienka", "dress", "bluzka", "spodnie", "legginsy",
+                             "bikini", "bra", "stanik", "swimsuit"],
+        "exclude_brands":   ["zara", "h&m", "shein", "bershka", "sinsay"],
+        "strict":           True,
+    },
+    "Vintage Hoodie": {
+        "required_phrases": ["vintage"],
+        "allowed_types":    ["hoodie", "bluza", "sweatshirt", "crewneck", "zip"],
+        "exclude_phrases":  ["sukienka", "dress", "bluzka"],
+        "exclude_brands":   ["zara", "h&m", "shein", "bershka"],
+        "strict":           True,
+    },
+    "Retro Jacket": {
+        "required_phrases": [],
+        "allowed_types":    ["jacket", "kurtka", "bomber", "varsity", "windbreaker",
+                             "anorak", "windrunner", "parka"],
+        "exclude_phrases":  ["sukienka", "bluzka", "spodnie", "legginsy"],
+        "exclude_brands":   ["zara", "h&m", "shein", "bershka"],
+        "strict":           False,
+    },
+    "Vintage Adidas": {
+        "required_phrases": ["adidas"],
+        "exclude_phrases":  ["kids", "dziecięcy", "baby"],
+        "strict":           True,
+    },
+    "Vintage Nike": {
+        "required_phrases": ["nike"],
+        "exclude_phrases":  ["kids", "dziecięcy", "baby", "sukienka", "dress"],
+        "strict":           True,
+    },
+    "90s Jacket": {
+        "required_phrases": ["90s", "90", "lata 90"],
+        "allowed_types":    ["jacket", "kurtka", "bomber", "windbreaker", "anorak"],
+        "exclude_phrases":  ["sukienka", "bluzka", "legginsy"],
+        "strict":           False,
+    },
+    "Baggy Jeans": {
+        "required_phrases": ["baggy", "wide leg", "wide-leg"],
+        "allowed_types":    ["jeans", "denim", "dżinsy", "spodnie"],
+        "exclude_phrases":  ["sukienka", "bluzka", "top"],
+        "strict":           False,
+    },
+    "Baggy Jeans Vintage": {
+        "required_phrases": ["baggy", "vintage"],
+        "allowed_types":    ["jeans", "denim", "dżinsy"],
+        "strict":           False,
+    },
+    "Leather Jacket Vintage": {
+        "required_phrases": ["leather", "skórzana", "skóra", "skorzana"],
+        "allowed_types":    ["jacket", "kurtka"],
+        "strict":           False,
+    },
+    "Shearling Jacket": {
+        "required_phrases": ["shearling", "kożuch", "kożuszek", "baranek"],
+        "allowed_types":    ["jacket", "kurtka", "coat", "płaszcz"],
+        "strict":           False,
+    },
+    "Varsity Jacket": {
+        "required_phrases": ["varsity", "college", "baseball"],
+        "allowed_types":    ["jacket", "kurtka"],
+        "strict":           False,
+    },
+    "Bomber Jacket Vintage": {
+        "required_phrases": ["bomber"],
+        "allowed_types":    ["jacket", "kurtka", "bomber"],
+        "strict":           True,
+    },
+    "Denim Jacket Vintage": {
+        "required_phrases": ["denim", "jeans", "jeansowa", "dżinsowa"],
+        "allowed_types":    ["jacket", "kurtka"],
+        "strict":           True,
+    },
+    "Cargo Pants": {
+        "required_phrases": ["cargo"],
+        "allowed_types":    ["pants", "spodnie", "trousers"],
+        "exclude_phrases":  ["sukienka", "spódnica", "top"],
+        "strict":           True,
+    },
+    # ── Designer sunglasses ───────────────────────────
+    "Designer Sunglasses": {
+        "required_phrases": ["okulary", "sunglasses", "glasses"],
+        "exclude_phrases":  ["korekcyjne", "prescription", "zerówki"],
+        "strict":           False,
+    },
+    # ── Football / LEGO / Carhartt — leave to validators ──
+    # (these go through their own validate_* functions)
+}
+
+# ── Profile lookup helper ─────────────────────────────
+def get_search_profile(search_name: str) -> dict:
+    """
+    Returns profile for a search or an empty default profile.
+    Falls back gracefully — no KeyError ever.
+    """
+    return SEARCH_PROFILES.get(search_name, {
+        "required_phrases": [],
+        "allowed_types":    [],
+        "exclude_phrases":  [],
+        "exclude_brands":   [],
+        "strict":           False,
+    })
+
+
+def apply_search_profile(title: str, price: float, profile: dict,
+                         reject_log: list) -> bool:
+    """
+    Apply structured profile filters to a single item.
+    Returns True if item PASSES (should be kept), False if REJECTED.
+    Appends reason to reject_log list for [REJECT_REASON] logging.
+
+    Filters applied in order:
+      1. exclude_phrases — hard reject
+      2. exclude_brands  — hard reject
+      3. required_phrases — strict (ALL) or loose (≥1)
+      4. allowed_types  — soft match if defined
+    """
+    if not profile:
+        return True  # no profile → pass through
+
+    tl = title.lower()
+
+    # 1. Exclude phrases (hard)
+    for phrase in profile.get("exclude_phrases", []):
+        if phrase in tl:
+            reject_log.append(f"exclude_phrase:{phrase}")
+            return False
+
+    # 2. Exclude brands (hard)
+    for brand in profile.get("exclude_brands", []):
+        if brand in tl:
+            reject_log.append(f"bad_brand:{brand}")
+            return False
+
+    # 3. Required phrases
+    required = profile.get("required_phrases", [])
+    if required:
+        if profile.get("strict", True):
+            # ALL required phrases must be present
+            missing = [p for p in required if p not in tl]
+            if missing:
+                reject_log.append(f"no_keyword:{','.join(missing)}")
+                return False
+        else:
+            # At least ONE required phrase
+            if not any(p in tl for p in required):
+                reject_log.append(f"no_keyword:{required[0]}")
+                return False
+
+    # 4. Allowed types — soft: if defined, at least one must match
+    allowed = profile.get("allowed_types", [])
+    if allowed:
+        if not any(t in tl for t in allowed):
+            reject_log.append("wrong_type")
+            return False
+
+    return True  # passed all filters
+
+
+# ── Human vibe filter ─────────────────────────────────
+def human_vibe_skip(title: str, pct: float = 0.12) -> bool:
+    """
+    Req 3 — 10–15% random skip to simulate human inattention.
+    Returns True if item should be SKIPPED (not kept).
+    """
+    return random.random() < pct
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  📦 ITEM PROCESSING — human-like depth + micro delays
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Req 2 — Dynamic depth config
+DEPTH_CONFIG = {
+    "low":    (10, 25),
+    "medium": (25, 50),
+    "deep":   (50, 80),
+}
+# Distribution: 30% low, 50% medium, 20% deep
+_DEPTH_CHOICES   = ["low",    "medium", "medium", "medium", "deep"]
+_DEPTH_WEIGHTS   = [0.30,     0.50,     None,     None,     0.20  ]
+
+# Req 1 — Per-item micro delay config
+ITEM_PROCESSING_MIN  = 0.8    # min delay after processing each item
+ITEM_PROCESSING_MAX  = 2.5    # max delay after processing each item
+ITEM_READ_PAUSE_PCT  = 0.15   # 15% chance of longer "reading" pause
+ITEM_READ_PAUSE_MIN  = 3.0
+ITEM_READ_PAUSE_MAX  = 8.0
+
+# Req 7 — Random idle config
+SEARCH_IDLE_PCT    = 0.20   # 20% chance of idle between searches
+SEARCH_IDLE_MIN    = 30.0
+SEARCH_IDLE_MAX    = 90.0
+# Fake scrolling
+SCROLL_ITER_MIN    = 2
+SCROLL_ITER_MAX    = 5
+SCROLL_STEP_MIN    = 2.0
+SCROLL_STEP_MAX    = 6.0
+
+
+def pick_depth() -> tuple[str, int]:
+    """
+    Req 2 — Pick a random depth level and max_items for this search pass.
+    Returns (depth_name, max_items).
+    """
+    depth = random.choices(
+        ["low", "medium", "deep"],
+        weights=[0.30, 0.50, 0.20],
+        k=1
+    )[0]
+    lo, hi  = DEPTH_CONFIG[depth]
+    max_it  = random.randint(lo, hi)
+    return depth, max_it
+
+
+def item_micro_delay(item_title: str = "") -> None:
+    """
+    Req 1 — Sleep after processing each item to simulate human reading speed.
+    15% chance of longer 'reading' pause.
+    """
+    if random.random() < ITEM_READ_PAUSE_PCT:
+        delay = random.uniform(ITEM_READ_PAUSE_MIN, ITEM_READ_PAUSE_MAX)
+        if DEBUG_ALERTS:
+            print(f"  [ITEM] reading_pause={delay:.1f}s | {item_title[:30]}")
+    else:
+        delay = random.uniform(ITEM_PROCESSING_MIN, ITEM_PROCESSING_MAX)
+    time.sleep(delay)
+
+
+def fake_scroll() -> None:
+    """
+    Req 7 — Simulate human scrolling through the page before processing.
+    """
+    steps = random.randint(SCROLL_ITER_MIN, SCROLL_ITER_MAX)
+    for _ in range(steps):
+        time.sleep(random.uniform(SCROLL_STEP_MIN, SCROLL_STEP_MAX))
+
+
+def maybe_random_idle(context: str = "") -> bool:
+    """
+    Req 7 — 20% chance of random idle pause (30–90s).
+    Returns True if idled.
+    """
+    if random.random() < SEARCH_IDLE_PCT:
+        idle = random.uniform(SEARCH_IDLE_MIN, SEARCH_IDLE_MAX)
+        print(f"  [IDLE] random_idle={idle:.0f}s context={context}")
+        time.sleep(idle)
+        return True
+    return False
+
 # ─────────────────────────────────────────
 #  🧥 CARHARTT — konfiguracja modeli
 # ─────────────────────────────────────────
@@ -2401,16 +2784,42 @@ def check_search(search, seen, market_price):
             age_str = f"{age_dbg}min" if age_dbg is not None else "?"
             print(f"  🔍 '{dbg['title'][:60]}' | {dbg['price']} zł | ⏱ {age_str}")
 
+        # ── Req 2 — DYNAMIC DEPTH: pick how many items to process ──
+        depth_name, max_items_this_run = pick_depth()
+        items = items[:max_items_this_run]
+        print(f"  [DEPTH] depth={depth_name} max_items={max_items_this_run} "
+              f"(available={len(tiered_items)})")
+
+        # ── Req 7 — FAKE SCROLL before processing (simulate page scan) ──
+        fake_scroll()
+
+        # ── Req 3 — Load search profile ──────────────────────────────
+        profile         = get_search_profile(search.get("name", ""))
+        profile_active  = bool(profile.get("required_phrases") or
+                               profile.get("exclude_phrases") or
+                               profile.get("allowed_types") or
+                               profile.get("exclude_brands"))
+
+        # ── Filter metric counters ────────────────────────────────────
+        cnt_profile_rej = 0
+        cnt_vibe_skip   = 0
+        reject_reasons: dict[str, int] = {}   # for [REJECT_REASON] log
+
         hidden_gem_mode = search.get("hidden_gem_mode", False)
         football_mode   = search.get("football_mode", False)
         lego_sw_mode    = search.get("lego_sw_mode", False)
         carhartt_mode   = search.get("carhartt_mode", False)
 
+        # Track pass rate for safeguard logic
+        _raw_candidates = 0  # items that reach profile check
+
         for item in items:
             if not item:
                 continue
             total_items += 1
-            # Part 2 — wrap każdy item w try/except z logowaniem
+
+            # Req 1 — micro delay after EVERY item (human reading speed)
+            # (applied at the end of the loop; put try/except around full block)
             try:
                 item_id = item.get("id", "")
                 title   = item.get("title", "")
@@ -2421,6 +2830,7 @@ def check_search(search, seen, market_price):
                 _sniper_ts = _SNIPER_SEEN.get(item_id)
                 if _sniper_ts and (_now_sn - _sniper_ts) < 6 * 3600:
                     cnt_seen += 1
+                    item_micro_delay(title)
                     continue
                 _SNIPER_SEEN[item_id] = _now_sn
                 if len(_SNIPER_SEEN) > 5000:
@@ -2434,46 +2844,76 @@ def check_search(search, seen, market_price):
                     print(f"  📤 NEW ITEM: {title[:60]} | age={age_min}min | {price} zł")
 
                 if not item_id or not href:
+                    item_micro_delay(title)
                     continue
 
                 _seen_ts = seen.get(item_id)
                 if _seen_ts and (time.time() - _seen_ts) < 6 * 3600:
                     cnt_seen += 1
+                    item_micro_delay(title)
                     continue
 
                 all_ids.append(item_id)
 
                 if not title or not href:
+                    item_micro_delay(title)
                     continue
 
                 _dedup_key = f"{title.lower().strip()}_{int(price or 0)}"
                 if _dedup_key in _seen_title_price:
                     cnt_seen += 1
+                    item_micro_delay(title)
                     continue
                 _seen_title_price.add(_dedup_key)
 
                 title_lower = title.lower()
                 if any(ex in title_lower for ex in GLOBAL_EXCLUDE):
+                    item_micro_delay(title)
                     continue
 
                 if any(b in title_lower for b in BLOCKED_BRANDS):
+                    item_micro_delay(title)
                     continue
 
                 exclude_kw = search.get("exclude_keywords", [])
                 if exclude_kw and any(ek in title_lower for ek in exclude_kw):
+                    item_micro_delay(title)
                     continue
 
                 if not price or price < search.get("min_price", 1):
                     cnt_price += 1
+                    item_micro_delay(title)
                     continue
 
                 if price < 18:
                     cnt_price += 1
+                    item_micro_delay(title)
                     continue
 
                 _non_latin = sum(1 for c in title if ord(c) > 591)
                 if _non_latin > len(title) * 0.3:
                     cnt_rejected += 1
+                    item_micro_delay(title)
+                    continue
+
+                # ── Req 3 — SEARCH PROFILE FILTER ────────────────────
+                # Special modes (football/lego/carhartt) bypass profile
+                # to keep their own validators working
+                _raw_candidates += 1
+                if profile_active and not football_mode and not lego_sw_mode and not carhartt_mode:
+                    _reject_log: list[str] = []
+                    if not apply_search_profile(title, price, profile, _reject_log):
+                        cnt_profile_rej += 1
+                        for reason in _reject_log:
+                            reject_reasons[reason] = reject_reasons.get(reason, 0) + 1
+                        item_micro_delay(title)
+                        continue
+
+                # ── Req 3 — HUMAN VIBE SKIP (10–15% random) ──────────
+                if human_vibe_skip(title, pct=0.12):
+                    cnt_vibe_skip += 1
+                    reject_reasons["vibe_skip"] = reject_reasons.get("vibe_skip", 0) + 1
+                    item_micro_delay(title)
                     continue
 
                 # ── PART 1 — CENTRAL FEATURE EXTRACTION ──────────────
@@ -2501,6 +2941,8 @@ def check_search(search, seen, market_price):
                 if not lego_sw_mode and not football_mode and not carhartt_mode:
                     if any(x in title_lower for x in TRASH_KEYWORDS_ITEM):
                         cnt_rejected += 1
+                        reject_reasons["trash_keyword"] = reject_reasons.get("trash_keyword", 0) + 1
+                        item_micro_delay(title)
                         continue
 
                 # Part 5 — scoring przez features (nigdy undefined variable)
@@ -2526,6 +2968,7 @@ def check_search(search, seen, market_price):
                         min_score = 2
                     if item_score < min_score:
                         cnt_kw += 1
+                        item_micro_delay(title)
                         continue
 
                 _item_score_val = item_score
@@ -2537,6 +2980,7 @@ def check_search(search, seen, market_price):
                     and price < 40
                 ):
                     cnt_rejected += 1
+                    item_micro_delay(title)
                     continue
 
                 steal_threshold = STEAL_PRICES.get(search["category"], 9999)
@@ -2599,6 +3043,7 @@ def check_search(search, seen, market_price):
                     )
                 if not qualifies:
                     cnt_rejected += 1
+                    item_micro_delay(title)
                     continue
 
                 reasons = []
@@ -2629,23 +3074,103 @@ def check_search(search, seen, market_price):
                     "item_score": _item_score_val,
                     "ts": time.time(),
                     "age_min": age_min,
-                    # Part 1 — przekaż features do engine
                     "_features": features,
                 })
 
                 processed_items += 1
 
+                # Req 1 — micro delay AFTER accepted item
+                item_micro_delay(title)
+
                 if len(found) >= MAX_FOUND:
                     break
 
             except Exception as e:
-                # Part 6 — NIE ignoruj błędów cichutko
                 print(f"  ❌ ITEM PIPELINE ERROR: {e} | "
                       f"item={item.get('title', '?')[:60] if item else '?'}")
                 if DEBUG_PIPELINE:
                     import traceback
                     traceback.print_exc()
+                item_micro_delay()
                 continue
+
+        # ── Req 4 — SAFEGUARD: 0 items after filter → relax ──────────
+        if processed_items == 0 and _raw_candidates > 0 and profile_active:
+            print(f"  [SAFEGUARD] 0 items passed profile — relaxing filters "
+                  f"(retrying {_raw_candidates} candidates without profile)")
+            # Retry the same items without profile restrictions
+            for item in items:
+                if not item:
+                    continue
+                try:
+                    item_id     = item.get("id", "")
+                    title       = item.get("title", "")
+                    href        = item.get("url", "")
+                    price       = item.get("price")
+                    title_lower = title.lower()
+                    if (not item_id or not href or not title or
+                            not price or price < 18):
+                        continue
+                    if any(ex in title_lower for ex in GLOBAL_EXCLUDE):
+                        continue
+                    TRASH_KEYWORDS_ITEM = [
+                        "sukienka", "dress", "bluzka", "bikini", "stanik",
+                        "swimsuit", "legginsy", "rajstopy",
+                    ]
+                    if any(x in title_lower for x in TRASH_KEYWORDS_ITEM):
+                        continue
+                    steal_threshold = STEAL_PRICES.get(search.get("category", "clothing"), 9999)
+                    is_steal_price  = price <= steal_threshold
+                    is_below_market = False
+                    discount_pct    = 0
+                    if market_price and market_price > 0:
+                        discount_pct    = (1 - price / market_price) * 100
+                        saving          = market_price - price
+                        is_below_market = discount_pct >= 30 and saving >= MIN_SAVING_PLN
+                    features = extract_item_features(item)
+                    qualifies = is_steal_price or is_below_market or features["is_vintage"]
+                    if not qualifies:
+                        continue
+                    found.append({
+                        "id": item_id, "title": title, "link": href,
+                        "price": price, "market_price": market_price,
+                        "discount_pct": discount_pct,
+                        "is_steal": is_steal_price, "is_below": is_below_market,
+                        "has_typo": False, "typo_brand": None,
+                        "is_hidden_gem": False, "mismatch": False,
+                        "ai_brand": None, "reasons": ["safeguard_relaxed"],
+                        "lego_sw_valid": False, "lego_sw_score": 0, "lego_set_info": {},
+                        "football_valid": False, "carhartt_valid": False,
+                        "carhartt_model": None, "carhartt_max": 0,
+                        "photo": item.get("photo"),
+                        "item_score": 1, "ts": time.time(),
+                        "age_min": parse_item_age_minutes(item),
+                        "_features": features,
+                    })
+                    processed_items += 1
+                    if len(found) >= MAX_FOUND:
+                        break
+                except Exception:
+                    continue
+
+        # ── Req 5 — CAP: too many items → tighten (keep top by price proximity to market) ──
+        if len(found) > 20:
+            # Keep items closest to market price (best deals = furthest below)
+            if market_price and market_price > 0:
+                found.sort(key=lambda x: x.get("price", 0) / market_price)
+            found = found[:20]
+            print(f"  [FILTER_CAP] trimmed to 20 best deals")
+
+        # ── Req 6 — [FILTER] logging ─────────────────────────────────
+        total_reached = _raw_candidates or total_items
+        ratio_pct = (processed_items / total_reached * 100) if total_reached > 0 else 0
+        print(f"  [FILTER] accepted={processed_items} rejected={cnt_profile_rej} "
+              f"vibe_skip={cnt_vibe_skip} "
+              f"ratio={ratio_pct:.0f}% ({processed_items}/{total_reached})")
+        if reject_reasons:
+            top_reasons = sorted(reject_reasons.items(), key=lambda x: -x[1])[:5]
+            for reason, count in top_reasons:
+                print(f"  [REJECT_REASON] {reason}: {count}x")
 
     except Exception as e:
         print(f"  ❌ check_search FATAL [{search['name']}]: {e}")
@@ -2999,6 +3524,9 @@ while True:
 
             # Req 4 — thinking pause between searches
             _thinking_pause(after=search["name"])
+
+            # Req 7 — 20% chance: random idle (30–90s) between searches
+            maybe_random_idle(context=search["name"])
 
         cycle_duration = time.time() - cycle_start
         print(f"  [CYCLE] search_count={searches_done} duration={cycle_duration:.0f}s")
