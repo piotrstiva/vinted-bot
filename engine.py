@@ -199,38 +199,89 @@ def freshness_boost(age_min: int) -> float:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 _ALL_BRANDS = sorted([
-    # Premium / hype
-    "arc'teryx", "arcteryx", "stone island", "cp company", "patagonia",
-    "supreme", "palace", "stussy", "bape", "fear of god", "essentials",
+    # Premium / outdoor
+    "arc'teryx", "arcteryx", "arc teryx",
+    "stone island", "cp company", "patagonia",
+    "supreme", "palace", "stussy", "bape",
+    "fear of god", "essentials",
     "corteiz", "crtz", "broken planet", "denim tears", "represent",
     # Sportswear
-    "nike", "adidas", "puma", "reebok", "new balance", "asics", "salomon",
+    "nike", "adidas", "puma", "reebok",
+    "new balance", "asics", "salomon",
     "vans", "converse", "timberland",
     # Workwear / denim
-    "carhartt", "carhartt wip", "dickies", "wrangler", "levi's", "levis",
-    "levi", "lee ", "ben davis",
-    # Outdoor
-    "the north face", "tnf", "columbia", "helly hansen",
-    # Classic
-    "ralph lauren", "lacoste", "fred perry", "champion",
+    "carhartt", "carhartt wip",
+    "dickies", "wrangler",
+    "levi's", "levis", "levi", "lee ",
+    "ben davis", "pointer brand",
+    # Outdoor / lifestyle
+    "the north face", "tnf",
+    "columbia", "helly hansen",
+    "columbia sportswear",
+    # Classic / preppy
+    "ralph lauren", "polo ralph lauren",
+    "lacoste", "fred perry", "champion",
     "tommy hilfiger", "calvin klein",
+    "nautica", "izod",
+    # Luxury — partial match safe
+    "gucci", "louis vuitton", "prada",
+    "hermes", "balenciaga", "versace",
+    "burberry", "fendi", "dior",
+    "off-white", "stone island",
+    "moncler", "canada goose", "moose knuckles",
+    # Added missing (diesel, etc.)
+    "diesel", "g-star", "g star",
+    "replay", "true religion",
     # Football
-    "umbro", "kappa", "lotto", "diadora", "hummel", "admiral",
-    "le coq sportif",
-    # Vintage basics
-    "screen stars", "hanes", "fruit of the loom", "gildan", "delta",
-    "brockum", "liquid blue", "nutmeg", "anvil", "tultex",
-    "salem sportswear", "russell athletic", "starter",
-    # Luxury
-    "gucci", "louis vuitton", "prada", "hermes", "balenciaga",
-    "versace", "burberry", "fendi", "dior", "off-white",
-    "stone island", "moncler", "canada goose",
+    "umbro", "kappa", "lotto", "diadora",
+    "hummel", "admiral", "le coq sportif",
+    "erima", "joma",
+    # Music / moto — collector value
+    "harley davidson", "harley-davidson", "harley",
+    "fruit of the loom", "gildan", "delta",
+    "brockum", "liquid blue", "nutmeg",
+    "anvil", "tultex",
+    "salem sportswear", "russell athletic",
+    "starter", "jerzees", "artex",
+    "signal sport", "logo 7", "chalk line",
 ], key=len, reverse=True)
 
 LUXURY_BRANDS = {
     "gucci", "louis vuitton", "prada", "hermes", "balenciaga",
     "versace", "burberry", "fendi", "dior", "off-white",
-    "moncler", "canada goose",
+    "moncler", "canada goose", "moose knuckles",
+}
+
+# Brands that guarantee minimum confidence 6.0 when detected (Global rule 2)
+STRONG_BRANDS = {
+    "arc'teryx", "arcteryx", "arc teryx",
+    "stone island", "cp company", "patagonia",
+    "supreme", "palace", "stussy", "bape",
+    "fear of god", "essentials",
+    "corteiz", "crtz", "broken planet", "denim tears", "represent",
+    "carhartt", "carhartt wip", "salomon",
+    "the north face", "tnf", "helly hansen",
+    "nike", "adidas", "new balance", "asics",
+    "levi's", "levis", "levi", "wrangler", "diesel",
+    "ralph lauren", "polo ralph lauren",
+    "gucci", "louis vuitton", "prada", "hermes",
+    "balenciaga", "versace", "burberry", "fendi", "dior",
+    "off-white", "moncler", "canada goose",
+    "harley davidson", "harley-davidson",
+}
+
+# Brands eligible for GRAIL layer (must also have rarity keyword)
+GRAIL_ELIGIBLE_BRANDS = {
+    # Vintage basics / print shops
+    "screen stars", "hanes", "fruit of the loom", "gildan",
+    "delta", "brockum", "liquid blue", "nutmeg", "anvil",
+    "tultex", "salem sportswear", "russell athletic",
+    "starter", "jerzees", "artex", "signal sport",
+    # Heritage / workwear with collector value
+    "carhartt", "levi's", "levis", "levi",
+    "wrangler", "ben davis",
+    # Music / merch brands
+    "harley davidson", "harley-davidson",
 }
 
 _ITEM_TYPES = [
@@ -249,11 +300,30 @@ _ITEM_TYPES = [
 
 
 def detect_brand(title: str) -> str | None:
+    """
+    Detects brand even if lowercase, partial, or inside longer text.
+    Returns normalized brand string (lowercase).
+    """
+    if not title:
+        return None
     t = title.lower()
     for brand in _ALL_BRANDS:
         if brand in t:
             return brand.strip()
     return None
+
+
+def brand_strength(brand: str | None) -> float:
+    """
+    Returns minimum confidence floor for a detected brand.
+    Global rule: if brand in STRONG_BRANDS → min conf = 6.0
+    """
+    if not brand:
+        return 0.0
+    if brand in STRONG_BRANDS:
+        return 6.0
+    # Known but not strong (kappa, lotto, umbro etc.)
+    return 4.0
 
 
 def detect_category(title: str) -> str | None:
@@ -521,7 +591,6 @@ class ChaosEngine:
         return results
 
     def _evaluate(self, item: dict) -> dict:
-        # Part 1 — single source of truth
         features = extract_item_features(item)
         title    = item.get("title", "") or ""
         price    = float(item.get("price") or 0)
@@ -530,7 +599,6 @@ class ChaosEngine:
                 "tier": "CHAOS", "profit": 0, "confidence": 0,
                 "anomaly_score": 0, "deal_tag": "NO_DATA"}
 
-        # Hard filters (tylko prawdziwe śmieci)
         if is_foreign_title(title):
             return {**base, "_skip_reason": "foreign_language"}
         if kw(title, _CHAOS_TRASH):
@@ -545,48 +613,62 @@ class ChaosEngine:
         brand = features["brand"]
         cat   = features["category"]
 
-        # ── Wycena rynkowa ──────────────────────────────
-        # Priorytet: heurystyczna cena brandu > DB > price * 1.6
+        # Market price: heuristic > DB > 1.6x fallback
         market_price    = None
         brand_heuristic = None
         if brand and cat:
             bp = _HEURISTIC_PRICES.get(brand)
             if bp:
-                brand_heuristic = bp.get(cat, bp["default"])
+                brand_heuristic = float(bp.get(cat, bp["default"]))
                 market_price    = brand_heuristic
+        if not market_price and brand and not cat:
+            bp = _HEURISTIC_PRICES.get(brand)
+            if bp:
+                market_price = float(bp["default"])
         if not market_price and cat:
-            # Szukaj w DB (chaos_cat lub brand_cat)
             db_key  = f"{brand}_{cat}" if brand else f"chaos_{cat}"
             db_data = self.db.lookup(db_key)
             if db_data and db_data.get("count", 0) >= 3:
                 market_price = db_data.get("median")
         if not market_price:
-            # Fallback: 1.6x ceny (zawsze dostępne)
             market_price = price * 1.6
 
         estimated_value = market_price
         profit          = estimated_value - price
 
-        # ── Part 5 — Confidence scoring ─────────────────
-        # Part 1 FIX: brak brandu = soft penalty, NIE blok
-        confidence = 4.0  # baseline
+        # Confidence: brand floor enforced (Global rule)
+        confidence = 4.0
+        b_strength = brand_strength(brand)
         if features["has_brand"]:
-            confidence += 1.5
+            confidence = max(confidence + 1.5, b_strength)
         else:
-            confidence -= 1.5   # Part 1: soft penalty zamiast hard block
+            confidence -= 1.5   # soft penalty, not block
 
-        if features["is_vintage"]:          confidence += 1.5
-        if kw(title, _CHAOS_STYLE_KW):      confidence += 1.0
-        if kw(title, _CHAOS_VINTAGE_KW):    confidence += 2.0
-        if cat == "jacket":                 confidence += 1.0
-        elif cat == "hoodie":               confidence += 0.5
-        elif cat == "sneakers":             confidence -= 1.5
+        if features["is_vintage"]:       confidence += 1.5
+        if kw(title, _CHAOS_VINTAGE_KW): confidence += 2.0
+        if kw(title, _CHAOS_STYLE_KW):   confidence += 0.5
+
+        # Vibe filter — FIX OVERKILL: reduce conf, NOT hard skip
+        if cat == "jacket":     confidence += 1.0
+        elif cat == "hoodie":   confidence += 0.5
+        elif cat == "sneakers": confidence -= 0.8   # was hard -1.5, now soft
         elif cat == "tshirt" and not features["is_vintage"]:
-            confidence -= 0.5
-        if 20 <= price <= 50:               confidence += 0.5
+            confidence -= 0.3   # was -0.5, now softer
+        if 20 <= price <= 50:   confidence += 0.5
         confidence += freshness_boost(age) * 0.3
 
-        # ── Part 3 — Undervaluation detection ───────────
+        _WOMENS_KW  = ["damska", "damski", "women", "woman", "damen", "femme"]
+        _SPORT_ONLY = {"lotto", "kappa", "diadora", "hummel", "admiral",
+                       "le coq sportif", "erima", "joma"}
+        if kw(title, _WOMENS_KW) and brand in _SPORT_ONLY:
+            return {**base, "_skip_reason": "womens_sport_brand"}
+
+        _SPORT_ACT = ["rowerow", "kolarski", "cycling", "fitness",
+                      "silowni", "running", "treningow"]
+        if kw(title, _SPORT_ACT) and cat == "tshirt":
+            return {**base, "_skip_reason": "sport_activity_tshirt"}
+
+        # Undervaluation detection
         anomaly_score = 0
         if market_price and market_price > price:
             ratio = price / market_price
@@ -599,57 +681,41 @@ class ChaosEngine:
 
         confidence = round(min(max(confidence, 0.0), 10.0), 2)
 
-        # ── Filtr damskich koszulek sportowych ──────────
-        _WOMENS_KW  = ["damska", "damski", "women", "woman", "damen",
-                       "femme", "donna", "feminino"]
-        _SPORT_ONLY = {"lotto", "kappa", "diadora", "hummel", "admiral",
-                       "le coq sportif", "erima", "joma"}
-        if kw(title, _WOMENS_KW) and brand in _SPORT_ONLY:
-            return {**base, "_skip_reason": "womens_sport_brand"}
-
-        _SPORT_ACT = ["rowerow", "kolarski", "cycling", "fitness",
-                      "siłowni", "silowni", "running", "treningow"]
-        if kw(title, _SPORT_ACT) and cat == "tshirt":
-            return {**base, "_skip_reason": "sport_activity_tshirt"}
-
-        # ── Part 6 — Soft filter (tylko oczywiste śmieci) ──
         if profit < 10 and anomaly_score == 0:
             return {**base, "_skip_reason": "low_profit_no_anomaly",
                     "confidence": confidence, "profit": round(profit, 2)}
 
-        # ── Part 4 — Relaxed send rule ───────────────────
+        # CHAOS send rule: profit >= 30 (raised); exception strong brand >= 20
+        is_strong_brand = brand in STRONG_BRANDS
         if DEBUG_ALERTS:
-            # Part 5 — debug mode: obniż próg żeby zobaczyć co przechodzi
             send = profit >= 15
         else:
             send = (
-                (profit >= 25 and confidence >= 5.5)
-                or (profit >= 15 and anomaly_score >= 2)
+                (profit >= 30 and confidence >= 5.0)
+                or (profit >= 20 and is_strong_brand)
+                or (profit >= 15 and anomaly_score >= 2 and is_strong_brand)
             )
 
-        # ── Part 2 — DB learning: zawsze, brand NIE wymagany ──
+        # DB learning
         if cat:
-            chaos_key = f"chaos_{cat}"
-            self.db.add_sample(chaos_key, price)
+            self.db.add_sample(f"chaos_{cat}", price)
         if brand and cat:
             self.db.add_sample(f"{brand}_{cat}", price)
         elif cat:
-            # Part 2 FIX: category_unknown dla itemów bez brandu
             self.db.add_sample(f"{cat}_unknown", price)
         if features["is_vintage"] and cat:
             self.db.add_sample(f"vintage_{cat}", price)
 
-        # Deal tag z DB
         deal_tag = "NO_DATA"
         if cat:
             db_key   = f"{brand}_{cat}" if brand else f"chaos_{cat}"
             deal_tag = self.db.get_deal_tag(db_key, price)
 
-        # Part 5 — zawsze loguj przy DEBUG_ALERTS
         if DEBUG_ALERTS:
-            action = "📤 ALERT" if send else "⏭  SKIP"
+            action = "\U0001f4e4 ALERT" if send else "\u23ed  SKIP"
             print(f"  {action}: conf={confidence:.1f} profit={profit:.0f} "
-                  f"anomaly={anomaly_score} brand={brand or '—'} | {title[:45]}")
+                  f"anomaly={anomaly_score} brand={brand or '\u2014'} "
+                  f"strong={is_strong_brand} | {title[:45]}")
 
         return {
             **base,
@@ -661,40 +727,61 @@ class ChaosEngine:
             "anomaly_score":   anomaly_score,
             "brand":           brand,
             "category":        cat,
+            "is_strong_brand": is_strong_brand,
             "age_min":         age,
             "deal_tag":        deal_tag,
             "_skip_reason":    None if send else "below_threshold",
         }
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  🟣 BRAND ENGINE
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
 # Heurystyczne ceny rynkowe per brand+category (gdy brak DB)
 _HEURISTIC_PRICES: dict[str, dict[str, float]] = {
-    "arc'teryx":    {"jacket": 700, "hoodie": 450, "sneakers": 500, "default": 400},
-    "arcteryx":     {"jacket": 700, "hoodie": 450, "default": 400},
-    "stone island": {"jacket": 800, "hoodie": 500, "default": 450},
-    "cp company":   {"jacket": 600, "hoodie": 400, "default": 350},
-    "patagonia":    {"jacket": 500, "hoodie": 350, "default": 280},
-    "supreme":      {"jacket": 600, "hoodie": 350, "tshirt": 280, "default": 300},
-    "palace":       {"jacket": 500, "hoodie": 300, "tshirt": 250, "default": 250},
-    "stussy":       {"jacket": 350, "hoodie": 250, "tshirt": 180, "default": 200},
-    "corteiz":      {"jacket": 500, "hoodie": 300, "tshirt": 200, "default": 250},
-    "broken planet":{"hoodie": 400, "tshirt": 250, "default": 300},
-    "carhartt":     {"jacket": 350, "hoodie": 220, "tshirt": 130, "default": 180},
-    "carhartt wip": {"jacket": 400, "hoodie": 280, "default": 220},
-    "dickies":      {"jacket": 200, "cargo": 150, "default": 120},
-    "salomon":      {"sneakers": 380, "jacket": 450, "default": 280},
-    "new balance":  {"sneakers": 220, "jacket": 220, "default": 160},
-    "asics":        {"sneakers": 200, "default": 150},
-    "nike":         {"sneakers": 250, "jacket": 220, "hoodie": 180, "tshirt": 120, "default": 160},
-    "adidas":       {"sneakers": 220, "jacket": 200, "hoodie": 160, "tshirt": 110, "default": 140},
-    "levi's":       {"jeans": 160, "jacket": 220, "default": 140},
-    "levis":        {"jeans": 160, "jacket": 220, "default": 140},
-    "levi":         {"jeans": 150, "jacket": 200, "default": 130},
-    "wrangler":     {"jeans": 130, "jacket": 180, "default": 120},
+    "arc'teryx":     {"jacket": 700, "hoodie": 450, "sneakers": 500, "default": 400},
+    "arcteryx":      {"jacket": 700, "hoodie": 450, "default": 400},
+    "arc teryx":     {"jacket": 700, "hoodie": 450, "default": 400},
+    "stone island":  {"jacket": 800, "hoodie": 500, "tshirt": 350, "default": 450},
+    "cp company":    {"jacket": 600, "hoodie": 400, "default": 350},
+    "patagonia":     {"jacket": 500, "hoodie": 350, "default": 280},
+    "supreme":       {"jacket": 600, "hoodie": 350, "tshirt": 280, "default": 300},
+    "palace":        {"jacket": 500, "hoodie": 300, "tshirt": 250, "default": 250},
+    "stussy":        {"jacket": 350, "hoodie": 250, "tshirt": 180, "default": 200},
+    "corteiz":       {"jacket": 500, "hoodie": 300, "tshirt": 200, "default": 250},
+    "broken planet": {"hoodie": 400, "tshirt": 250, "default": 300},
+    "represent":     {"jacket": 600, "hoodie": 400, "tshirt": 300, "default": 350},
+    "carhartt":      {"jacket": 350, "hoodie": 220, "tshirt": 130, "default": 180},
+    "carhartt wip":  {"jacket": 400, "hoodie": 280, "default": 220},
+    "dickies":       {"jacket": 200, "cargo": 150, "default": 120},
+    "salomon":       {"sneakers": 380, "jacket": 450, "default": 280},
+    "the north face":{"jacket": 400, "hoodie": 280, "default": 250},
+    "tnf":           {"jacket": 400, "hoodie": 280, "default": 250},
+    "helly hansen":  {"jacket": 350, "hoodie": 220, "default": 200},
+    "new balance":   {"sneakers": 220, "jacket": 220, "default": 160},
+    "asics":         {"sneakers": 200, "default": 150},
+    "nike":          {"sneakers": 250, "jacket": 220, "hoodie": 180, "tshirt": 120, "default": 160},
+    "adidas":        {"sneakers": 220, "jacket": 200, "hoodie": 160, "tshirt": 110, "default": 140},
+    "levi's":        {"jeans": 160, "jacket": 220, "default": 140},
+    "levis":         {"jeans": 160, "jacket": 220, "default": 140},
+    "levi":          {"jeans": 150, "jacket": 200, "default": 130},
+    "wrangler":      {"jeans": 130, "jacket": 180, "default": 120},
+    "diesel":        {"jeans": 180, "jacket": 200, "hoodie": 150, "default": 140},
+    "g-star":        {"jeans": 160, "jacket": 180, "default": 130},
+    "g star":        {"jeans": 160, "jacket": 180, "default": 130},
+    "ralph lauren":  {"polo": 150, "tshirt": 140, "jacket": 250, "default": 160},
+    "polo ralph lauren": {"polo": 150, "tshirt": 140, "jacket": 250, "default": 160},
+    "gucci":         {"jacket": 2000, "hoodie": 1500, "tshirt": 900, "default": 1200},
+    "balenciaga":    {"jacket": 3000, "hoodie": 2000, "tshirt": 800, "sneakers": 2500, "default": 1500},
+    "off-white":     {"jacket": 2000, "hoodie": 1200, "tshirt": 700, "default": 1000},
+    "moncler":       {"jacket": 3000, "default": 2000},
+    "canada goose":  {"jacket": 2500, "default": 1800},
+    # Vintage basics — grail items priced by collectibility
+    "screen stars":  {"tshirt": 150, "default": 120},
+    "brockum":       {"tshirt": 250, "default": 200},
+    "liquid blue":   {"tshirt": 200, "default": 160},
+    "nutmeg":        {"tshirt": 180, "default": 150},
+    "hanes":         {"tshirt": 80,  "default": 60},
+    "fruit of the loom": {"tshirt": 80, "default": 60},
+    "harley davidson": {"tshirt": 200, "jacket": 400, "hoodie": 250, "default": 180},
+    "harley-davidson": {"tshirt": 200, "jacket": 400, "hoodie": 250, "default": 180},
 }
 
 
@@ -749,7 +836,7 @@ class BrandEngine:
         if is_foreign_title(title):
             return {**base, "_skip_reason": "foreign_language"}
 
-        # Part 5 — używaj features["has_brand"] zamiast if brand
+        # Part 5 — brand REQUIRED (global rule: no_brand skip stays valid for BRAND engine)
         if not features["has_brand"]:
             return {**base, "_skip_reason": "no_brand"}
         if not category:
@@ -759,13 +846,15 @@ class BrandEngine:
         if age > MAX_ITEM_AGE_MINUTES * 4:
             return {**base, "_skip_reason": "stale"}
 
-        median_price = self._find_median(brand, category, market_prices)
-        profit       = (median_price - price) if median_price else 0.0
+        median_price    = self._find_median(brand, category, market_prices)
+        profit          = (median_price - price) if median_price else 0.0
+        is_strong_brand = brand in STRONG_BRANDS
 
-        # Part 5 — scoring przez features
-        conf = 3.0   # has_brand +3
+        # Confidence: apply brand_strength floor (Global rule)
+        b_floor = brand_strength(brand)
+        conf    = max(3.0, b_floor - 2.0)  # start from floor minus room to grow
         if category:
-            conf += 2.0   # category +2
+            conf += 2.0
 
         if median_price and median_price > 0:
             ratio = price / median_price
@@ -777,10 +866,11 @@ class BrandEngine:
 
         conf += freshness_boost(age) * 0.4
 
+        # Luxury fake guard (price too low → probably fake)
         if brand in LUXURY_BRANDS and price < 100:
             conf -= 3.0
 
-        # Part 3 — Undervaluation detection
+        # Undervaluation detection
         anomaly_score = 0
         if median_price and median_price > 0:
             if price < median_price * 0.70:
@@ -790,42 +880,50 @@ class BrandEngine:
                 anomaly_score = 1
                 conf         += 0.5
 
+        # Apply brand floor AFTER all adjustments (Global rule: min 6.0 for strong)
+        if is_strong_brand:
+            conf = max(conf, b_floor)
+
         conf = round(min(max(conf, 0.0), 10.0), 2)
 
-        # Part 4 — Relaxed send rule
+        # Send rule aligned with final decision (CASE 1: profit>=40, CASE 3b: profit>=25)
         if DEBUG_ALERTS:
             send = profit >= 15
         else:
             send = (
-                (profit >= 25 and conf >= 5.5)
-                or (profit >= 15 and anomaly_score >= 2)
+                (is_strong_brand and profit >= 25)    # strong brand: lower bar
+                or (profit >= 25 and conf >= 5.5)
+                or (profit >= 15 and anomaly_score >= 2 and is_strong_brand)
             )
 
-        # Part 2 — DB learning zawsze
+        # DB learning
         if category:
             self.db.add_sample(f"{brand}_{category}", price)
-            self.db.add_sample(f"chaos_{category}", price)   # cross-learn
+            self.db.add_sample(f"chaos_{category}", price)
 
-        # Deal tag z DB
         db_key   = f"{brand}_{category}" if category else brand
         deal_tag = self.db.get_deal_tag(db_key, price)
 
         if DEBUG_ALERTS:
             action = "📤 ALERT" if send else "⏭  SKIP"
             print(f"  {action}: conf={conf:.1f} profit={profit:.0f} "
-                  f"anomaly={anomaly_score} brand={brand} | {title[:45]}")
+                  f"anomaly={anomaly_score} brand={brand} strong={is_strong_brand} "
+                  f"| {title[:45]}")
 
         return {
             **base,
-            "send_alert":      send,
-            "profit":          round(profit, 2),
-            "median_price":    round(median_price, 2) if median_price else None,
-            "estimated_value": round(median_price, 2) if median_price else 0,
-            "confidence":      conf,
-            "anomaly_score":   anomaly_score,
-            "age_min":         age,
-            "deal_tag":        deal_tag,
-            "_skip_reason":    None if send else "below_threshold",
+            "send_alert":       send,
+            "profit":           round(profit, 2),
+            "median_price":     round(median_price, 2) if median_price else None,
+            "estimated_value":  round(median_price, 2) if median_price else 0,
+            "confidence":       conf,
+            "anomaly_score":    anomaly_score,
+            "brand":            brand,
+            "category":         category,
+            "is_strong_brand":  is_strong_brand,
+            "age_min":          age,
+            "deal_tag":         deal_tag,
+            "_skip_reason":     None if send else "below_threshold",
         }
 
     def _find_median(self, brand: str, category: str, market_prices: dict) -> float | None:
@@ -924,9 +1022,8 @@ class GrailEngine:
         return results
 
     def _evaluate(self, item: dict) -> dict:
-        # Part 1 — single source of truth
         features = extract_item_features(item)
-        title    = item.get("title", "")
+        title    = item.get("title", "") or ""
         price    = float(item.get("price") or 0)
         t        = title.lower()
 
@@ -941,62 +1038,98 @@ class GrailEngine:
         if age > MAX_ITEM_AGE_MINUTES * 6:
             return {**base, "_skip_reason": "stale"}
 
+        brand = features["brand"]
+        cat   = features["category"]
+
+        # ── STRICT MODE: grail requires grail-eligible brand OR rarity keyword ──
+        # "basic jeans" and "generic y2k" must NOT become grails
+        _RARITY_KW = [
+            "vintage", "90s", "80s", "70s", "rare", "single stitch",
+            "archive", "made in usa", "deadstock",
+            "band tee", "tour tee", "rap tee", "bootleg",
+        ]
+        has_rarity      = any(r in t for r in _RARITY_KW)
+        is_grail_brand  = brand in GRAIL_ELIGIBLE_BRANDS if brand else False
+
+        # Anti-grail: items that must NEVER qualify regardless of score
+        _LOW_EFFORT = [
+            "basic jeans", "spodnie codzienne", "bluza zwykla",
+            "koszulka zwykla", "y2k aesthetic", "y2k outfit",
+        ]
+        if any(le in t for le in _LOW_EFFORT):
+            return {**base, "_skip_reason": "low_effort_item"}
+
         # Grail scoring
-        score    = 0
-        kw_hits  = sum(1 for k in _GRAIL_KEYWORDS if k in t)
+        score   = 0
+        kw_hits = sum(1 for k in _GRAIL_KEYWORDS if k in t)
         if kw_hits >= 1:   score += 2
         if kw_hits >= 2:   score += 1
 
         if kw(title, _GRAIL_BRANDS):   score += 2
 
-        # Extra signals
-        if "tour"                       in t: score += 1
-        if "single stitch"              in t: score += 1
-        if "band" in t or "movie" in t      : score += 1
-        if "bootleg"                    in t: score += 1
+        if "tour"            in t: score += 1
+        if "single stitch"   in t: score += 1
+        if "band" in t and ("tee" in t or "shirt" in t or "tour" in t): score += 1
+        if "bootleg"         in t: score += 1
+        if features["is_vintage"]:     score += 1
 
-        # Part 1 — używaj features["is_vintage"]
-        if features["is_vintage"]:   score += 1
+        # ── STRICT GATE: is_grail requires brand+rarity OR very high kw score ──
+        # Eliminates "generic y2k" and "basic jeans" grails
+        if is_grail_brand and has_rarity:
+            is_grail_qualified = score >= 3
+        elif has_rarity and kw_hits >= 2:
+            # No grail brand, but very strong keywords (multiple hits)
+            is_grail_qualified = score >= 4
+        elif is_grail_brand and kw_hits >= 1:
+            is_grail_qualified = score >= 3
+        else:
+            # Neither grail brand NOR strong rarity → never grail
+            is_grail_qualified = False
 
         estimated = self._estimate_value(title, price, score)
         profit    = estimated - price
 
-        # Part 3 — Undervaluation detection
+        # Undervaluation
         anomaly_score = 0
         if estimated > 0 and price < estimated * 0.70:
             anomaly_score = 2
-            score        += 2   # underpriced → extra grail points
+            if is_grail_qualified:
+                score += 2
         elif estimated > 0 and price < estimated * 0.85:
             anomaly_score = 1
-            score        += 1
+            if is_grail_qualified:
+                score += 1
 
-        is_grail = score >= 3
+        is_grail = is_grail_qualified and score >= 3
         conf     = float(score) * 1.2 + freshness_boost(age) * 0.4
-        conf     = round(min(max(conf, 0.0), 10.0), 2)
+        # Grail brand boosts confidence floor
+        if is_grail_brand:
+            conf = max(conf, brand_strength(brand))
+        conf = round(min(max(conf, 0.0), 10.0), 2)
 
-        # Part 4 — Relaxed send rule: grail OR undervalued
+        # Send rule: grail AND profit >= 10 (final decision gate raises to 50)
         if DEBUG_ALERTS:
-            send = profit >= 10 and is_grail and not is_foreign_title(title)
+            send = profit >= 10 and is_grail
         else:
             send = (
                 (is_grail and profit >= 10)
-                or (profit >= 15 and anomaly_score >= 2)
+                or (profit >= 15 and anomaly_score >= 2 and is_grail)
             )
 
-        # Part 2 — DB learning: zawsze, bez brandu też
-        cat = features["category"]
+        # DB learning
         if cat:
             self.db.add_sample(f"grail_{cat}", price)
-            self.db.add_sample(f"chaos_{cat}", price)      # cross-learn
+            self.db.add_sample(f"chaos_{cat}", price)
         if features["has_brand"] and cat:
-            self.db.add_sample(f"{features['brand']}_{cat}", price)
+            self.db.add_sample(f"{brand}_{cat}", price)
         elif cat:
-            self.db.add_sample(f"{cat}_unknown", price)   # Part 2 FIX
+            self.db.add_sample(f"{cat}_unknown", price)
 
         if DEBUG_ALERTS:
-            action = "📤 ALERT" if send else "⏭  SKIP"
+            action = "\U0001f4e4 ALERT" if send else "\u23ed  SKIP"
             print(f"  {action}: conf={conf:.1f} profit={profit:.0f} "
-                  f"anomaly={anomaly_score} grail={is_grail} | {title[:45]}")
+                  f"score={score} grail={is_grail} brand={brand or '\u2014'} "
+                  f"grail_brand={is_grail_brand} rarity={has_rarity} | {title[:40]}")
 
         return {
             **base,
@@ -1007,10 +1140,12 @@ class GrailEngine:
             "estimated_value": round(estimated, 2),
             "confidence":      conf,
             "anomaly_score":   anomaly_score,
-            "brand":           features["brand"],
+            "brand":           brand,
             "category":        cat,
+            "is_grail_brand":  is_grail_brand,
+            "has_rarity":      has_rarity,
             "age_min":         age,
-            "_skip_reason":    None if send else ("not_grail" if not is_grail else "low_profit"),
+            "_skip_reason":    None if send else ("strict_gate" if not is_grail else "low_profit"),
         }
 
     def _estimate_value(self, title: str, price: float, score: int) -> float:
@@ -1027,9 +1162,6 @@ class GrailEngine:
         return price * min(mult, 3.0)
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  📨 FORMAT ALERT — unified
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def format_alert(result: dict) -> str:
     """Formatuje alert Telegram. Obsługuje wyniki z CHAOS, BRAND i GRAIL engine."""
@@ -1230,13 +1362,55 @@ class Engine:
             g_result = {"send_alert": False, "profit": 0, "confidence": 0, "engine": "GRAIL"}
 
         # ── Requirement 4: AGGREGATION ─────────────────────
-        candidates = [
-            ("GRAIL", g_result),
-            ("BRAND", b_result),
-            ("CHAOS", c_result),
-        ]
+        # ── AGGREGATION: Hierarchy BRAND > GRAIL > CHAOS (Global rule 2) ──
+        # BRAND wins if brand is strong AND brand engine returned a result
+        # GRAIL wins next if is_grail qualifies
+        # CHAOS is fallback
+        brand_name  = b_result.get("brand")
+        is_strong   = b_result.get("is_strong_brand", False) or (
+            brand_name in STRONG_BRANDS if brand_name else False
+        )
+        is_grail    = g_result.get("is_grail", False)
 
-        # Task 1 — FULL DEBUG LOG: wszystkie 3 silniki per item
+        # Apply hierarchy strictly
+        if features_brand := detect_brand(title):
+            # Brand exists → BRAND layer is authoritative for brand strength
+            if not is_strong:
+                # Brand detected but not STRONG_BRANDS → downgrade
+                b_result = dict(b_result)
+                b_result["confidence"] = min(b_result.get("confidence", 0), 5.0)
+
+        # Select engine by hierarchy
+        if is_strong and b_result.get("confidence", 0) >= 6.0:
+            best_name = "BRAND"
+            best      = dict(b_result)
+        elif is_grail and g_result.get("is_grail_brand", False) or (
+             is_grail and g_result.get("has_rarity", False)):
+            best_name = "GRAIL"
+            best      = dict(g_result)
+        elif b_result.get("confidence", 0) > 0 and b_result.get("_skip_reason") not in ("no_brand", "no_category"):
+            # Non-strong brand but brand engine produced result
+            best_name = "BRAND"
+            best      = dict(b_result)
+        elif c_result.get("confidence", 0) > 0:
+            best_name = "CHAOS"
+            best      = dict(c_result)
+        else:
+            # Fallback: pick highest confidence
+            best_name, best = max(
+                [("GRAIL", g_result), ("BRAND", b_result), ("CHAOS", c_result)],
+                key=lambda x: x[1].get("confidence", 0)
+            )
+            best = dict(best)
+
+        best["engine"] = best_name
+
+        profit     = best.get("profit", 0)
+        confidence = best.get("confidence", 0)
+        is_grail   = best.get("is_grail", False)
+        brand_name = best.get("brand")
+
+        # ── Debug log: all 3 engines ──────────────────────
         if DEBUG_ALERTS:
             c_s = c_result.get("confidence", 0)
             b_s = b_result.get("confidence", 0)
@@ -1249,11 +1423,13 @@ class Engine:
             b_r = b_result.get("_skip_reason", "—")
             print(f"  [SCORE] {title[:45]}")
             print(f"    CHAOS: conf={c_s:.1f} profit={c_p:.0f} skip={c_r}")
-            print(f"    BRAND: conf={b_s:.1f} profit={b_p:.0f} skip={b_r}")
-            print(f"    GRAIL: conf={g_s:.1f} profit={g_p:.0f} grail={g_is}")
+            print(f"    BRAND: conf={b_s:.1f} profit={b_p:.0f} skip={b_r} strong={is_strong}")
+            print(f"    GRAIL: conf={g_s:.1f} profit={g_p:.0f} grail={g_is} "
+                  f"brand={g_result.get('is_grail_brand')} rarity={g_result.get('has_rarity')}")
+            print(f"    WINNER: {best_name}")
 
-        # Failsafe (Requirement 10): żaden silnik nie zwrócił nic
-        if all(r.get("confidence", 0) == 0 for _, r in candidates):
+        # Failsafe: no engine returned a valid score
+        if all(r.get("confidence", 0) == 0 for r in [c_result, b_result, g_result]):
             return {
                 "send": False, "engine": None,
                 "reason": "no_valid_score",
@@ -1261,57 +1437,54 @@ class Engine:
                 "item": item, "send_alert": False,
             }
 
-        # Wybierz najlepszy wynik (max confidence, GRAIL ma priorytet)
-        best_name, best = max(
-            candidates,
-            key=lambda x: (
-                x[1].get("confidence", 0) +
-                (3.0 if x[0] == "GRAIL" and x[1].get("is_grail") else 0)
-            )
-        )
-        best = dict(best)
-        best["engine"] = best_name
-
-        profit     = best.get("profit", 0)
-        confidence = best.get("confidence", 0)
-        is_grail   = best.get("is_grail", False)
-        brand_name = best.get("brand")
-
-        # ── Requirement 5: FINAL DECISION RULES ───────────
-        # Task 3 — TYMCZASOWO OBNIŻONE PROGI (debug mode)
-        # Normalnie: profit>=30 AND conf>=6
-        # Teraz:     profit>=10 AND conf>=4  (żeby zobaczyć co przechodzi)
+        # ── FINAL DECISION RULES (spec-compliant) ─────────
         send   = False
         reason = "below_threshold"
 
-        # CASE 2: grail override (niezmienione — grail zawsze)
-        if is_grail and profit >= 10:
-            send   = True
-            reason = f"grail(score={best.get('grail_score',0)})"
+        if DEBUG_ALERTS:
+            # Debug mode: lower thresholds to see what flows
+            if is_grail and profit >= 10:
+                send   = True
+                reason = f"grail_debug(score={best.get('grail_score',0)})"
+            elif is_strong and profit >= 20:
+                send   = True
+                reason = f"brand_strong_debug(profit={profit:.0f})"
+            elif profit >= 20 and confidence >= 5.0:
+                send   = True
+                reason = f"flip_debug(profit={profit:.0f},conf={confidence:.1f})"
+            elif confidence > 0:
+                reason = f"fallback_candidate(conf={confidence:.1f},profit={profit:.0f})"
+        else:
+            # CASE 1: Strong brand AND profit >= 40 → SEND (priority HIGH)
+            if is_strong and profit >= 40:
+                send   = True
+                reason = f"brand_strong(profit={profit:.0f},conf={confidence:.1f})"
 
-        # CASE 1: standard flip — obniżone z profit>=30,conf>=6 do profit>=10,conf>=4
-        elif profit >= 10 and confidence >= 4.0:
-            send   = True
-            reason = f"flip(profit={profit:.0f},conf={confidence:.1f})"
+            # CASE 2: Grail AND profit >= 50 → SEND
+            elif is_grail and profit >= 50:
+                send   = True
+                reason = f"grail(score={best.get('grail_score',0)},profit={profit:.0f})"
 
-        # CASE 3: strong brand deal — obniżone z profit>=25 do profit>=10
-        elif best_name == "BRAND" and profit >= 10 and confidence >= 4.0:
-            send   = True
-            reason = f"brand(profit={profit:.0f})"
+            # CASE 3: Chaos (or non-strong brand) AND profit >= 30 → SEND
+            elif best_name == "CHAOS" and profit >= 30 and confidence >= 5.0:
+                send   = True
+                reason = f"chaos_flip(profit={profit:.0f},conf={confidence:.1f})"
 
-        # CASE 4: Task 4 — fallback: wyślij top 1 nawet przy niskim score
-        # (obsługiwane przez run_cycle_strict — top 1 zawsze przechodzi)
-        elif confidence > 0:
-            # Zachowaj jako kandydata fallback (decyzja w run_cycle_strict)
-            reason = f"fallback_candidate(conf={confidence:.1f},profit={profit:.0f})"
+            # CASE 3b: Brand (non-strong) AND profit >= 25
+            elif best_name == "BRAND" and profit >= 25 and confidence >= 5.5:
+                send   = True
+                reason = f"brand_deal(profit={profit:.0f},conf={confidence:.1f})"
 
-        # Requirement 6: logging
+            # Fallback candidate (for run_cycle_strict TOP-1)
+            elif confidence > 0:
+                reason = f"fallback_candidate(conf={confidence:.1f},profit={profit:.0f})"
+
         if DEBUG_ALERTS:
             action = "📤 SEND" if send else "⏭  SKIP"
             print(f"  [{best_name}] {action} | "
                   f"conf={confidence:.1f} profit={profit:.0f} "
-                  f"grail={is_grail} brand={brand_name or '—'} | "
-                  f"reason={reason} | {title[:40]}")
+                  f"grail={is_grail} brand={brand_name or '—'} "
+                  f"strong={is_strong} | reason={reason}")
 
         return {
             **best,
