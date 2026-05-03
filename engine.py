@@ -70,6 +70,10 @@ def extract_item_features(item: dict) -> dict:
         t      = title.lower()
 
         brand    = detect_brand(title)
+        # Fix 2 — Band Brand System: band = brand dla celów scoringu
+        band     = detect_band(title)
+        if not brand and band:
+            brand = band   # traktuj band jak brand
         category = detect_category(title)
 
         # Zbierz pasujące tagi
@@ -83,13 +87,18 @@ def extract_item_features(item: dict) -> dict:
         tags = [tag for tag in _TAGS if tag in t]
 
         is_vintage = _is_vintage(title)
+        # Fix 2 — band is strong if also vintage/90s/single stitch
+        _band_raw   = detect_band(title)
+        is_strong_band = bool(_band_raw and is_vintage)
 
         feat = {
-            "brand":      brand,
-            "has_brand":  brand is not None,
-            "is_vintage": is_vintage,
-            "category":   category,
-            "keywords":   tags,
+            "brand":         brand,
+            "has_brand":     brand is not None,
+            "is_vintage":    is_vintage,
+            "category":      category,
+            "keywords":      tags,
+            "band":          _band_raw,           # Fix 2
+            "is_strong_band": is_strong_band,     # Fix 2
         }
 
         if DEBUG_PIPELINE:
@@ -541,6 +550,36 @@ _CHAOS_TRASH = [
     "kombinezon", "rajstopy",
 ]
 
+# Fix 1 — LOW VALUE: brak brand + brak vintage → HARD SKIP
+_LOW_VALUE_KEYWORDS = [
+    "top", "blouse", "basic", "casual wear", "everyday",
+    "bershka", "h&m", "shein", "fashion nova", "primark",
+    "sinsay", "reserved", "stradivarius", "pull&bear",
+]
+
+# Fix 2 — BAND BRANDS: muzyczne merche traktowane jak brand
+BAND_BRANDS = [
+    "nirvana", "metallica", "acdc", "ac/dc", "slipknot", "korn",
+    "rammstein", "deftones", "tool", "pantera", "megadeth", "maiden",
+    "iron maiden", "black sabbath", "led zeppelin", "pink floyd",
+    "grateful dead", "wu-tang", "tupac", "biggie", "eminem",
+    "ramones", "sex pistols", "the clash", "pearl jam", "soundgarden",
+    "alice in chains", "rage against", "system of a down",
+]
+
+
+def detect_band(title: str) -> str | None:
+    """
+    Fix 2 — Wykrywa band brand w tytule.
+    Jeśli wykryty → traktowany jak brand (has_brand=True, strong=True gdy vintage).
+    """
+    t = title.lower()
+    for band in BAND_BRANDS:
+        if band in t:
+            return band
+    return None
+
+
 _CHAOS_STYLE_KW = [
     "y2k", "grunge", "archive", "workwear", "streetwear",
     "vintage", "90s", "80s", "70s", "retro", "distressed",
@@ -610,8 +649,26 @@ class ChaosEngine:
         if age > MAX_ITEM_AGE_MINUTES * 6:
             return {**base, "_skip_reason": "stale"}
 
-        brand = features["brand"]
-        cat   = features["category"]
+        brand     = features["brand"]
+        band      = features.get("band")
+        cat       = features["category"]
+        is_vint   = features["is_vintage"]
+        has_brand = features["has_brand"]   # True jeśli brand LUB band
+
+        # Fix 4 — CHAOS QUALITY GUARD
+        # no_brand AND no_rarity AND generic_item → HARD SKIP
+        has_rarity = kw(title, _CHAOS_VINTAGE_KW) or is_vint
+        has_style  = kw(title, _CHAOS_STYLE_KW)
+        if not has_brand and not has_rarity and not has_style:
+            if DEBUG_ALERTS:
+                print(f"  [QUALITY] skip_reason=no_market_value | {title[:50]}")
+            return {**base, "_skip_reason": "no_market_value"}
+
+        # Fix 1 — LOW_VALUE_KEYWORDS: brak brand + brak vintage → SKIP
+        if kw(title, _LOW_VALUE_KEYWORDS) and not has_brand and not is_vint:
+            if DEBUG_ALERTS:
+                print(f"  [QUALITY] skip_reason=low_value_item | {title[:50]}")
+            return {**base, "_skip_reason": "low_value_item"}
 
         # Market price: heuristic > DB > 1.6x fallback
         market_price    = None
@@ -642,6 +699,13 @@ class ChaosEngine:
         if features["has_brand"]:
             confidence = max(confidence + 1.5, b_strength)
         else:
+            confidence = max(confidence - 0.5, 1.0)   # bez brandu — niższy start
+
+        # Fix 2 — Band Brand boost
+        if features.get("band"):
+            confidence += 1.5
+            if features.get("is_strong_band"):   # band + vintage
+                confidence += 1.0   # np. "nirvana vintage tee 90s" → extra boost
             confidence -= 1.5   # soft penalty, not block
 
         if features["is_vintage"]:       confidence += 1.5
@@ -685,15 +749,26 @@ class ChaosEngine:
             return {**base, "_skip_reason": "low_profit_no_anomaly",
                     "confidence": confidence, "profit": round(profit, 2)}
 
-        # CHAOS send rule: profit >= 30 (raised); exception strong brand >= 20
+        # Fix 1 — CHAOS send rule: PODNIESIONE PROGI
+        # profit >= 50 AND conf >= 6.0 (normalna ścieżka)
+        # Wyjątki: strong brand lub band brand obniżają próg
         is_strong_brand = brand in STRONG_BRANDS
+        is_band         = bool(features.get("band"))
+        is_strong_band_feat = features.get("is_strong_band", False)
+
         if DEBUG_ALERTS:
-            send = profit >= 15
+            # Debug mode — obniżony próg dla testów
+            send = profit >= 15 and confidence >= 4.0
         else:
             send = (
-                (profit >= 30 and confidence >= 5.0)
-                or (profit >= 20 and is_strong_brand)
-                or (profit >= 15 and anomaly_score >= 2 and is_strong_brand)
+                # Standard: wysoki profit + conf
+                (profit >= 50 and confidence >= 6.0)
+                # Strong brand (arc'teryx, supreme, carhartt etc.) — niższy próg
+                or (profit >= 30 and is_strong_brand and confidence >= 5.0)
+                # Band brand + vintage (nirvana vintage tee, harley tour shirt) — grail-like
+                or (profit >= 20 and is_band and is_strong_band_feat and confidence >= 5.0)
+                # Anomaly (cena << rynek) z brand
+                or (profit >= 20 and anomaly_score >= 2 and is_strong_brand)
             )
 
         # DB learning
@@ -1040,18 +1115,26 @@ class GrailEngine:
 
         brand = features["brand"]
         cat   = features["category"]
+        band  = features.get("band")
 
-        # ── STRICT MODE: grail requires grail-eligible brand OR rarity keyword ──
-        # "basic jeans" and "generic y2k" must NOT become grails
+        # Fix 3 — GRAIL LOGIC PATCH
+        # rarity NIE wystarcza samo w sobie.
+        # Wymagane: rarity + (grail_brand OR band OR grail_category)
         _RARITY_KW = [
             "vintage", "90s", "80s", "70s", "rare", "single stitch",
             "archive", "made in usa", "deadstock",
             "band tee", "tour tee", "rap tee", "bootleg",
         ]
+        _GRAIL_CATEGORIES = {"tshirt", "hoodie", "jacket"}   # tylko clothing — nie jeans/sneakers
         has_rarity      = any(r in t for r in _RARITY_KW)
         is_grail_brand  = brand in GRAIL_ELIGIBLE_BRANDS if brand else False
+        is_band         = bool(band)
+        is_grail_cat    = cat in _GRAIL_CATEGORIES
 
-        # Anti-grail: items that must NEVER qualify regardless of score
+        # Fix 3 — Patch: grail wymaga KOMBINACJI, nie samej rzadkości
+        has_grail_qualifier = is_grail_brand or is_band or (has_rarity and is_grail_cat)
+
+        # Anti-grail: items that must NEVER qualify
         _LOW_EFFORT = [
             "basic jeans", "spodnie codzienne", "bluza zwykla",
             "koszulka zwykla", "y2k aesthetic", "y2k outfit",
@@ -1073,17 +1156,28 @@ class GrailEngine:
         if "bootleg"         in t: score += 1
         if features["is_vintage"]:     score += 1
 
-        # ── STRICT GATE: is_grail requires brand+rarity OR very high kw score ──
-        # Eliminates "generic y2k" and "basic jeans" grails
+        # Fix 2 — Band brand boost score
+        if is_band:
+            score += 2   # band = traktowany jak grail-eligible brand
+
+        # Fix 3 — STRICT GATE: grail wymaga brand+rarity LUB band+rarity LUB silne kw
+        if not has_grail_qualifier:
+            # Brak qualifiera → NIGDY grail (np. generic "y2k baggy jeans")
+            if DEBUG_ALERTS:
+                print(f"  [QUALITY] skip_reason=no_grail_qualifier | {title[:50]}")
+            return {**base, "_skip_reason": "no_grail_qualifier"}
+
         if is_grail_brand and has_rarity:
             is_grail_qualified = score >= 3
+        elif is_band and has_rarity:
+            is_grail_qualified = score >= 3   # band + vintage = grail-like
+        elif is_band and kw_hits >= 1:
+            is_grail_qualified = score >= 3
         elif has_rarity and kw_hits >= 2:
-            # No grail brand, but very strong keywords (multiple hits)
             is_grail_qualified = score >= 4
         elif is_grail_brand and kw_hits >= 1:
             is_grail_qualified = score >= 3
         else:
-            # Neither grail brand NOR strong rarity → never grail
             is_grail_qualified = False
 
         estimated = self._estimate_value(title, price, score)
