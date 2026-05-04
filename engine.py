@@ -88,23 +88,17 @@ def extract_item_features(item: dict) -> dict:
 
         is_vintage = _is_vintage(title)
         # Fix 2 — band is strong if also vintage/90s/single stitch
-        _band_raw      = detect_band(title)
+        _band_raw   = detect_band(title)
         is_strong_band = bool(_band_raw and is_vintage)
 
-        # Rule 4 — VALUE SIGNALS
-        _val_count = count_value_signals(title)
-        _has_vals  = _val_count > 0
-
         feat = {
-            "brand":              brand,
-            "has_brand":          brand is not None,
-            "is_vintage":         is_vintage,
-            "category":           category,
-            "keywords":           tags,
-            "band":               _band_raw,
-            "is_strong_band":     is_strong_band,
-            "value_signal_count": _val_count,
-            "has_value_signals":  _has_vals,
+            "brand":         brand,
+            "has_brand":     brand is not None,
+            "is_vintage":    is_vintage,
+            "category":      category,
+            "keywords":      tags,
+            "band":          _band_raw,           # Fix 2
+            "is_strong_band": is_strong_band,     # Fix 2
         }
 
         if DEBUG_PIPELINE:
@@ -564,64 +558,14 @@ _LOW_VALUE_KEYWORDS = [
 ]
 
 # Fix 2 — BAND BRANDS: muzyczne merche traktowane jak brand
-# Rule 1: bands are mid-tier brands — treated like brand for scoring
-# Rule 2: Do NOT add fast fashion here
-# Rule 3: Do NOT expand luxury brands here
 BAND_BRANDS = [
-    # Classic rock / metal
     "nirvana", "metallica", "acdc", "ac/dc", "slipknot", "korn",
-    "rammstein", "deftones", "tool", "pantera", "megadeth",
+    "rammstein", "deftones", "tool", "pantera", "megadeth", "maiden",
     "iron maiden", "black sabbath", "led zeppelin", "pink floyd",
-    "grateful dead", "ramones", "sex pistols", "the clash",
-    "pearl jam", "soundgarden", "alice in chains",
-    "rage against", "system of a down",
-    # Hip-hop / rap
-    "wu-tang", "wu tang", "tupac", "biggie", "eminem",
-    "public enemy", "beastie boys", "nas", "jay-z",
-    # Pop / other collectible
-    "rolling stones", "david bowie", "the who",
-    "bruce springsteen", "johnny cash", "fleetwood mac",
-    "guns n roses", "aerosmith", "kiss band",
+    "grateful dead", "wu-tang", "tupac", "biggie", "eminem",
+    "ramones", "sex pistols", "the clash", "pearl jam", "soundgarden",
+    "alice in chains", "rage against", "system of a down",
 ]
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  💎 VALUE SIGNALS — Rule 4
-#  Items with these signals get confidence boost even without brand
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-VALUE_SIGNALS = [
-    "single stitch",   # premium vintage construction
-    "made in usa",     # collector signal
-    "made in u.s.a",
-    "90s",             # decade marker
-    "80s",
-    "wool",            # material quality signal
-    "cashmere",
-    "merino",
-    "deadstock",       # unworn vintage
-    "unwashed",        # collector term
-    "og",              # original / first run
-    "1st press",
-    "first press",
-    "screen printed",
-    "tour tee",
-    "band tee",
-    "concert tee",
-    "promo only",
-    "promo shirt",
-    "bootleg",
-    "archive",
-    "rare",
-]
-
-def has_value_signals(title: str) -> bool:
-    """True if title contains at least one VALUE_SIGNAL."""
-    t = title.lower()
-    return any(sig in t for sig in VALUE_SIGNALS)
-
-def count_value_signals(title: str) -> int:
-    """Count how many VALUE_SIGNALs are present."""
-    t = title.lower()
-    return sum(1 for sig in VALUE_SIGNALS if sig in t)
 
 
 def detect_band(title: str) -> str | None:
@@ -726,18 +670,6 @@ class ChaosEngine:
                 print(f"  [QUALITY] skip_reason=low_value_item | {title[:50]}")
             return {**base, "_skip_reason": "low_value_item"}
 
-        # Rule 5 — SOFT_GRAIL routing: no brand but strong value signals
-        # → route to soft grail path with boosted confidence
-        # This increases diversity without increasing spam
-        val_count   = features.get("value_signal_count", 0)
-        has_vals    = features.get("has_value_signals", False)
-        is_soft_grail = (
-            not has_brand
-            and has_vals
-            and val_count >= 2
-            and (features["is_vintage"] or features.get("band"))
-        )
-
         # Market price: heuristic > DB > 1.6x fallback
         market_price    = None
         brand_heuristic = None
@@ -780,17 +712,6 @@ class ChaosEngine:
         if kw(title, _CHAOS_VINTAGE_KW): confidence += 2.0
         if kw(title, _CHAOS_STYLE_KW):   confidence += 0.5
 
-        # Rule 4 — VALUE SIGNALS boost (wool, single stitch, 90s, made in usa etc.)
-        if val_count == 1:   confidence += 0.5
-        elif val_count == 2: confidence += 1.0
-        elif val_count >= 3: confidence += 1.5   # multiple strong signals
-
-        # Rule 5 — SOFT_GRAIL boost: no brand but strong signals combination
-        if is_soft_grail:
-            confidence += 1.5
-            if DEBUG_ALERTS:
-                print(f"  [SOFT_GRAIL] routed: val_count={val_count} | {title[:45]}")
-
         # Vibe filter — FIX OVERKILL: reduce conf, NOT hard skip
         if cat == "jacket":     confidence += 1.0
         elif cat == "hoodie":   confidence += 0.5
@@ -831,25 +752,23 @@ class ChaosEngine:
         # Fix 1 — CHAOS send rule: PODNIESIONE PROGI
         # profit >= 50 AND conf >= 6.0 (normalna ścieżka)
         # Wyjątki: strong brand lub band brand obniżają próg
-        is_strong_brand     = brand in STRONG_BRANDS
-        is_band             = bool(features.get("band"))
+        is_strong_brand = brand in STRONG_BRANDS
+        is_band         = bool(features.get("band"))
         is_strong_band_feat = features.get("is_strong_band", False)
 
         if DEBUG_ALERTS:
+            # Debug mode — obniżony próg dla testów
             send = profit >= 15 and confidence >= 4.0
         else:
             send = (
                 # Standard: wysoki profit + conf
                 (profit >= 50 and confidence >= 6.0)
-                # Strong brand — niższy próg
+                # Strong brand (arc'teryx, supreme, carhartt etc.) — niższy próg
                 or (profit >= 30 and is_strong_brand and confidence >= 5.0)
-                # Band brand + vintage — grail-like
+                # Band brand + vintage (nirvana vintage tee, harley tour shirt) — grail-like
                 or (profit >= 20 and is_band and is_strong_band_feat and confidence >= 5.0)
-                # Anomaly z brand
+                # Anomaly (cena << rynek) z brand
                 or (profit >= 20 and anomaly_score >= 2 and is_strong_brand)
-                # Rule 5 — SOFT_GRAIL: no brand but strong value signals
-                # Lower threshold to increase diversity without spam
-                or (is_soft_grail and profit >= 30 and confidence >= 5.5)
             )
 
         # DB learning
@@ -875,20 +794,18 @@ class ChaosEngine:
 
         return {
             **base,
-            "send_alert":        send,
-            "profit":            round(profit, 2),
-            "estimated_value":   round(estimated_value, 2),
-            "market_price":      round(market_price, 2) if market_price else None,
-            "confidence":        confidence,
-            "anomaly_score":     anomaly_score,
-            "brand":             brand,
-            "category":          cat,
-            "is_strong_brand":   is_strong_brand,
-            "is_soft_grail":     is_soft_grail,
-            "value_signal_count": val_count,
-            "age_min":           age,
-            "deal_tag":          deal_tag,
-            "_skip_reason":      None if send else "below_threshold",
+            "send_alert":      send,
+            "profit":          round(profit, 2),
+            "estimated_value": round(estimated_value, 2),
+            "market_price":    round(market_price, 2) if market_price else None,
+            "confidence":      confidence,
+            "anomaly_score":   anomaly_score,
+            "brand":           brand,
+            "category":        cat,
+            "is_strong_brand": is_strong_brand,
+            "age_min":         age,
+            "deal_tag":        deal_tag,
+            "_skip_reason":    None if send else "below_threshold",
         }
 
 
@@ -940,21 +857,6 @@ _HEURISTIC_PRICES: dict[str, dict[str, float]] = {
     "fruit of the loom": {"tshirt": 80, "default": 60},
     "harley davidson": {"tshirt": 200, "jacket": 400, "hoodie": 250, "default": 180},
     "harley-davidson": {"tshirt": 200, "jacket": 400, "hoodie": 250, "default": 180},
-    # Band brands — mid-tier pricing (Rule 1: mid-tier brand)
-    # Value depends on vintage/rarity combo; base = single stitch era prices
-    "nirvana":       {"tshirt": 280, "hoodie": 200, "default": 220},
-    "metallica":     {"tshirt": 250, "hoodie": 180, "default": 200},
-    "pink floyd":    {"tshirt": 220, "hoodie": 160, "default": 180},
-    "ac/dc":         {"tshirt": 200, "hoodie": 150, "default": 160},
-    "acdc":          {"tshirt": 200, "hoodie": 150, "default": 160},
-    "grateful dead": {"tshirt": 350, "hoodie": 250, "default": 280},
-    "led zeppelin":  {"tshirt": 220, "hoodie": 160, "default": 180},
-    "rolling stones":{"tshirt": 200, "hoodie": 150, "default": 160},
-    "black sabbath": {"tshirt": 200, "hoodie": 150, "default": 160},
-    "wu-tang":       {"tshirt": 300, "hoodie": 220, "default": 240},
-    "wu tang":       {"tshirt": 300, "hoodie": 220, "default": 240},
-    "tupac":         {"tshirt": 250, "hoodie": 180, "default": 200},
-    "iron maiden":   {"tshirt": 200, "hoodie": 150, "default": 160},
 }
 
 
@@ -1254,11 +1156,6 @@ class GrailEngine:
         if "bootleg"         in t: score += 1
         if features["is_vintage"]:     score += 1
 
-        # Rule 4 — VALUE SIGNALS boost in grail context
-        val_count = features.get("value_signal_count", 0)
-        if val_count >= 1:   score += 1
-        if val_count >= 3:   score += 1   # extra for multiple quality signals
-
         # Fix 2 — Band brand boost score
         if is_band:
             score += 2   # band = traktowany jak grail-eligible brand
@@ -1379,10 +1276,6 @@ def format_alert(result: dict) -> str:
 
     if is_grail:
         header = f"💎 GRAIL  ·  score={result.get('grail_score', 0)}"
-    elif result.get("is_soft_grail"):
-        header = "✨ SOFT GRAIL"
-    elif result.get("band"):
-        header = f"🎸 BAND DEAL  ·  {result.get('band', '').upper()}"
     elif engine == "CHAOS":
         header = "🔵 CHAOS FLIP"
     elif engine == "BRAND":
@@ -1872,12 +1765,9 @@ class Engine:
     def record_buy(self, *args):   pass
 
 
-# Re-export so bot.py can import directly
+# Re-export extract_item_features so bot.py can import it directly
 __all__ = [
     "Engine", "MarketDB", "ChaosEngine", "BrandEngine", "GrailEngine",
     "format_alert", "extract_item_features",
-    "detect_brand", "detect_band", "detect_category", "is_foreign_title",
-    "has_value_signals", "count_value_signals",
-    "BAND_BRANDS", "VALUE_SIGNALS", "STRONG_BRANDS",
-    "GRAIL_ELIGIBLE_BRANDS",
+    "detect_brand", "detect_category", "is_foreign_title",
 ]
