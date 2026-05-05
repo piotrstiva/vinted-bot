@@ -223,6 +223,9 @@ _ALL_BRANDS = sorted([
     "dickies", "wrangler",
     "levi's", "levis", "levi", "lee ",
     "ben davis", "pointer brand",
+    # Denim — spec DENIM_KEYWORDS
+    "diesel", "g-star", "g star", "true religion",
+    "replay", "roca wear", "rocawear", "evisu",
     # Outdoor / lifestyle
     "the north face", "tnf",
     "columbia", "helly hansen",
@@ -232,27 +235,36 @@ _ALL_BRANDS = sorted([
     "lacoste", "fred perry", "champion",
     "tommy hilfiger", "calvin klein",
     "nautica", "izod",
-    # Luxury — partial match safe
+    # Luxury
     "gucci", "louis vuitton", "prada",
     "hermes", "balenciaga", "versace",
     "burberry", "fendi", "dior",
     "off-white", "stone island",
     "moncler", "canada goose", "moose knuckles",
-    # Added missing (diesel, etc.)
-    "diesel", "g-star", "g star",
-    "replay", "true religion",
     # Football
     "umbro", "kappa", "lotto", "diadora",
     "hummel", "admiral", "le coq sportif",
     "erima", "joma",
-    # Music / moto — collector value
-    "harley davidson", "harley-davidson", "harley",
+    # Harley — all variations (spec HARLEY_KEYWORDS)
+    "harley davidson", "harley-davidson",
+    "harley tee", "harley vintage", "harley",
+    # Vintage basics
+    "screen stars", "hanes beefy", "hanes",
     "fruit of the loom", "gildan", "delta",
     "brockum", "liquid blue", "nutmeg",
     "anvil", "tultex",
     "salem sportswear", "russell athletic",
     "starter", "jerzees", "artex",
     "signal sport", "logo 7", "chalk line",
+    # Band names — spec BAND_KEYWORDS (detect_brand picks them up)
+    "nirvana", "metallica", "ramones", "acdc", "ac/dc",
+    "pink floyd", "slipknot", "grateful dead",
+    "led zeppelin", "black sabbath", "iron maiden",
+    "wu-tang", "wu tang", "tupac",
+    "rolling stones", "david bowie",
+    "pearl jam", "soundgarden", "alice in chains",
+    "rage against", "system of a down",
+    "sex pistols", "the clash",
 ], key=len, reverse=True)
 
 LUXURY_BRANDS = {
@@ -261,7 +273,7 @@ LUXURY_BRANDS = {
     "moncler", "canada goose", "moose knuckles",
 }
 
-# Brands that guarantee minimum confidence 6.0 when detected (Global rule 2)
+# Brands that guarantee minimum confidence 6.0 when detected
 STRONG_BRANDS = {
     "arc'teryx", "arcteryx", "arc teryx",
     "stone island", "cp company", "patagonia",
@@ -276,21 +288,32 @@ STRONG_BRANDS = {
     "gucci", "louis vuitton", "prada", "hermes",
     "balenciaga", "versace", "burberry", "fendi", "dior",
     "off-white", "moncler", "canada goose",
+    # Harley — all spec variants
     "harley davidson", "harley-davidson",
+    # Denim — spec
+    "true religion", "roca wear", "rocawear",
 }
 
-# Brands eligible for GRAIL layer (must also have rarity keyword)
+# Brands eligible for GRAIL (must also have rarity keyword)
 GRAIL_ELIGIBLE_BRANDS = {
     # Vintage basics / print shops
-    "screen stars", "hanes", "fruit of the loom", "gildan",
-    "delta", "brockum", "liquid blue", "nutmeg", "anvil",
+    "screen stars", "hanes beefy", "hanes",
+    "fruit of the loom", "gildan", "delta",
+    "brockum", "liquid blue", "nutmeg", "anvil",
     "tultex", "salem sportswear", "russell athletic",
     "starter", "jerzees", "artex", "signal sport",
     # Heritage / workwear with collector value
     "carhartt", "levi's", "levis", "levi",
     "wrangler", "ben davis",
-    # Music / merch brands
-    "harley davidson", "harley-davidson",
+    # Harley — all spec variants
+    "harley davidson", "harley-davidson", "harley",
+    # Band names — grail-eligible when + rarity (spec BAND_KEYWORDS)
+    "nirvana", "metallica", "ramones", "acdc", "ac/dc",
+    "pink floyd", "slipknot", "grateful dead",
+    "led zeppelin", "black sabbath", "iron maiden",
+    "wu-tang", "wu tang", "tupac",
+    "rolling stones", "david bowie",
+    "pearl jam", "soundgarden",
 }
 
 _ITEM_TYPES = [
@@ -557,20 +580,59 @@ _LOW_VALUE_KEYWORDS = [
     "sinsay", "reserved", "stradivarius", "pull&bear",
 ]
 
-# Fix 2 — BAND BRANDS: muzyczne merche traktowane jak brand
-BAND_BRANDS = [
-    "nirvana", "metallica", "acdc", "ac/dc", "slipknot", "korn",
-    "rammstein", "deftones", "tool", "pantera", "megadeth", "maiden",
-    "iron maiden", "black sabbath", "led zeppelin", "pink floyd",
-    "grateful dead", "wu-tang", "tupac", "biggie", "eminem",
-    "ramones", "sex pistols", "the clash", "pearl jam", "soundgarden",
-    "alice in chains", "rage against", "system of a down",
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  🎸 KEYWORD GROUPS (spec)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+VINTAGE_SIGNALS = [
+    "single stitch", "made in usa", "all over print", "aop",
+    "screen stars", "hanes beefy", "giant tag", "fruit of the loom usa",
+    "made in the usa", "made in u.s.a", "deadstock", "nos",
 ]
+
+BAND_KEYWORDS = [
+    "nirvana", "metallica", "ramones", "acdc", "ac/dc",
+    "pink floyd", "slipknot", "grateful dead",
+    "led zeppelin", "black sabbath", "iron maiden",
+    "wu-tang", "wu tang", "tupac",
+    "rolling stones", "david bowie", "pearl jam",
+    "soundgarden", "alice in chains", "sex pistols",
+    "rage against", "system of a down", "korn",
+    "rammstein", "deftones", "tool", "pantera", "megadeth",
+    "the clash", "biggie", "eminem",
+]
+
+HARLEY_KEYWORDS = [
+    "harley davidson", "harley-davidson",
+    "harley tee", "harley vintage", "harley",
+    "daytona", "sturgis", "bike week",
+    "flame", "skull", "eagle",
+]
+
+DENIM_KEYWORDS = [
+    "diesel", "levis", "levi's", "levi", "carhartt",
+    "true religion", "g star", "g-star", "roca wear", "rocawear",
+]
+
+RARITY_KEYWORDS = [
+    "rare", "deadstock", "nos", "archive", "sample", "og",
+    "promo", "unreleased", "limited", "one of a kind", "1/1",
+    "1st press", "first press",
+]
+
+LOW_EFFORT = [
+    "y2k aesthetic", "clean girl", "soft girl",
+    "basic", "vintage style", "vintage vibe",
+    "aesthetic", "cottagecore", "indie kid", "dark academia",
+]
+
+# Band brand list — synced with BAND_KEYWORDS
+BAND_BRANDS = BAND_KEYWORDS[:]   # same list, different name for legacy compatibility
 
 
 def detect_band(title: str) -> str | None:
     """
-    Fix 2 — Wykrywa band brand w tytule.
+    Wykrywa band brand w tytule.
     Jeśli wykryty → traktowany jak brand (has_brand=True, strong=True gdy vintage).
     """
     t = title.lower()
@@ -578,6 +640,102 @@ def detect_band(title: str) -> str | None:
         if band in t:
             return band
     return None
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  🎯 PATTERN SCORING (spec — core system)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+_TEE_TYPES    = ["tee", "t-shirt", "tshirt", "shirt", "koszulka"]
+_DENIM_TYPES  = ["jeans", "denim", "dżinsy", "pants", "trousers", "spodnie"]
+_HOODIE_TYPES = ["hoodie", "zip", "bluza", "sweatshirt", "crewneck"]
+
+def compute_pattern_score(title: str, brand: str | None, band: str | None) -> tuple[int, list[str]]:
+    """
+    Compute pattern_score from keyword combinations.
+    Returns (total_score, matched_pattern_names).
+    Category enforcement: patterns only trigger if item type matches.
+
+    +3  vintage_signal + tee
+    +4  band + (tour OR 90s OR single stitch OR made in usa)
+    +5  band + tour + vintage_signal
+    +4  harley + (flame OR skull OR eagle) + vintage
+    +3  denim brand + (faded OR bootcut OR usa)
+    +2  rarity + brand
+    -2  LOW_EFFORT keywords (penalty)
+    """
+    t       = title.lower()
+    score   = 0
+    matched: list[str] = []
+
+    is_tee    = any(tp in t for tp in _TEE_TYPES)
+    is_denim  = any(dp in t for dp in _DENIM_TYPES)
+
+    # +3: vintage_signal + tee (category enforced)
+    if is_tee and any(vs in t for vs in VINTAGE_SIGNALS):
+        score += 3
+        hit = next(vs for vs in VINTAGE_SIGNALS if vs in t)
+        matched.append(f"vintage_signal_tee({hit})(+3)")
+
+    # Band patterns (category: tee or hoodie preferred but not enforced — band merch is always a tee)
+    if band:
+        # +4: band + (tour OR 90s OR single stitch OR made in usa)
+        _band_boosters = ["tour", "90s", "single stitch", "made in usa",
+                          "vintage", "deadstock", "80s", "70s"]
+        _hits = [b for b in _band_boosters if b in t]
+        if _hits:
+            # +5 if ALSO has vintage_signal (stronger combo)
+            has_vs = any(vs in t for vs in VINTAGE_SIGNALS)
+            if "tour" in _hits and has_vs:
+                score += 5
+                matched.append(f"band_tour_vintage({band})(+5)")
+            else:
+                score += 4
+                matched.append(f"band_context({band},{_hits[0]})(+4)")
+
+    # +4: harley + (flame OR skull OR eagle) + vintage (category: not enforced, moto merch)
+    _harley_present = any(h in t for h in ["harley davidson", "harley-davidson", "harley"])
+    _harley_imagery = ["flame", "skull", "eagle", "sturgis", "daytona", "bike week"]
+    _harley_era     = ["90s", "80s", "vintage", "2000s"]
+    if _harley_present:
+        _img_hit = next((h for h in _harley_imagery if h in t), None)
+        _era_hit = next((e for e in _harley_era if e in t), None)
+        if _img_hit and _era_hit:
+            score += 4
+            matched.append(f"harley_imagery_vintage({_img_hit},{_era_hit})(+4)")
+        elif _img_hit:
+            # Harley safeguard: imagery alone without era → +2 only
+            score += 2
+            matched.append(f"harley_imagery({_img_hit})(+2)")
+        # else: plain harley mention without imagery → no pattern bonus
+
+    # +3: denim brand + (faded OR bootcut OR usa) — category enforced: jeans/pants
+    _denim_brand_variants = [d.strip() for d in DENIM_KEYWORDS]
+    if is_denim and any(db in t for db in _denim_brand_variants):
+        _denim_q = ["faded", "bootcut", "made in usa", "wash", "distressed",
+                    "raw denim", "selvedge", "usa made"]
+        _dq_hit = next((d for d in _denim_q if d in t), None)
+        if _dq_hit:
+            _brand_hit = next(db for db in _denim_brand_variants if db in t)
+            score += 3
+            matched.append(f"denim_premium({_brand_hit},{_dq_hit})(+3)")
+
+    # +2: rarity keyword present (bonus for any item with rarity signal + quality context)
+    _rar_hit = next((r for r in RARITY_KEYWORDS if r in t), None)
+    if _rar_hit:
+        # +2 always when rarity present (brand amplifies value)
+        # Even no-brand items with deadstock/rare/nos deserve the signal
+        if brand or band or any(vs in t for vs in VINTAGE_SIGNALS):
+            score += 2
+            matched.append(f"rarity_signal({brand or band or 'vintage'},{_rar_hit})(+2)")
+
+    # LOW_EFFORT penalty (-2 from confidence, returned as negative score)
+    _le_hit = next((le for le in LOW_EFFORT if le in t), None)
+    if _le_hit:
+        score -= 2
+        matched.append(f"low_effort({_le_hit})(-2)")
+
+    return score, matched
 
 
 _CHAOS_STYLE_KW = [
@@ -732,6 +890,9 @@ class ChaosEngine:
         if kw(title, _SPORT_ACT) and cat == "tshirt":
             return {**base, "_skip_reason": "sport_activity_tshirt"}
 
+        # ── PATTERN SCORING (core system) ─────────────────
+        pattern_score, matched_patterns = compute_pattern_score(title, brand, band)
+
         # Undervaluation detection
         anomaly_score = 0
         if market_price and market_price > price:
@@ -743,31 +904,41 @@ class ChaosEngine:
                 anomaly_score = 1
                 confidence   += 0.5
 
+        # Pattern score → confidence boost (positive patterns only)
+        pos_pattern = max(0, pattern_score)   # exclude LOW_EFFORT penalty from boost
+        if pos_pattern >= 5:  confidence += 2.0
+        elif pos_pattern >= 3: confidence += 1.0
+        elif pos_pattern >= 1: confidence += 0.5
+
+        # LOW_EFFORT penalty (spec: -2.0 confidence)
+        if any("low_effort" in p for p in matched_patterns):
+            confidence -= 2.0
+
         confidence = round(min(max(confidence, 0.0), 10.0), 2)
 
-        if profit < 10 and anomaly_score == 0:
+        if profit < 10 and anomaly_score == 0 and pattern_score <= 0:
             return {**base, "_skip_reason": "low_profit_no_anomaly",
-                    "confidence": confidence, "profit": round(profit, 2)}
+                    "confidence": confidence, "profit": round(profit, 2),
+                    "pattern_score": pattern_score, "matched_patterns": matched_patterns}
 
-        # Fix 1 — CHAOS send rule: PODNIESIONE PROGI
-        # profit >= 50 AND conf >= 6.0 (normalna ścieżka)
-        # Wyjątki: strong brand lub band brand obniżają próg
-        is_strong_brand = brand in STRONG_BRANDS
-        is_band         = bool(features.get("band"))
+        # CHAOS send rule (spec thresholds: profit>=40, conf>=6)
+        is_strong_brand     = brand in STRONG_BRANDS
+        is_band             = bool(features.get("band"))
         is_strong_band_feat = features.get("is_strong_band", False)
 
         if DEBUG_ALERTS:
-            # Debug mode — obniżony próg dla testów
             send = profit >= 15 and confidence >= 4.0
         else:
             send = (
-                # Standard: wysoki profit + conf
-                (profit >= 50 and confidence >= 6.0)
-                # Strong brand (arc'teryx, supreme, carhartt etc.) — niższy próg
+                # Spec: CHAOS profit >= 40 AND conf >= 6
+                (profit >= 40 and confidence >= 6.0)
+                # Pattern shortcut: high pattern score unlocks lower profit threshold
+                or (pattern_score >= 5 and profit >= 30 and confidence >= 5.5)
+                # Strong brand — lower profit bar
                 or (profit >= 30 and is_strong_brand and confidence >= 5.0)
-                # Band brand + vintage (nirvana vintage tee, harley tour shirt) — grail-like
+                # Band brand + vintage
                 or (profit >= 20 and is_band and is_strong_band_feat and confidence >= 5.0)
-                # Anomaly (cena << rynek) z brand
+                # Anomaly + brand
                 or (profit >= 20 and anomaly_score >= 2 and is_strong_brand)
             )
 
@@ -786,26 +957,31 @@ class ChaosEngine:
             db_key   = f"{brand}_{cat}" if brand else f"chaos_{cat}"
             deal_tag = self.db.get_deal_tag(db_key, price)
 
+        # Task 6 — debug log with pattern info
         if DEBUG_ALERTS:
-            action = "\U0001f4e4 ALERT" if send else "\u23ed  SKIP"
+            action = "📤 ALERT" if send else "⏭  SKIP"
             print(f"  {action}: conf={confidence:.1f} profit={profit:.0f} "
-                  f"anomaly={anomaly_score} brand={brand or '\u2014'} "
-                  f"strong={is_strong_brand} | {title[:45]}")
+                  f"pattern_score={pattern_score} anomaly={anomaly_score} "
+                  f"brand={brand or '—'} strong={is_strong_brand}")
+            if matched_patterns:
+                print(f"    matched_patterns={matched_patterns}")
 
         return {
             **base,
-            "send_alert":      send,
-            "profit":          round(profit, 2),
-            "estimated_value": round(estimated_value, 2),
-            "market_price":    round(market_price, 2) if market_price else None,
-            "confidence":      confidence,
-            "anomaly_score":   anomaly_score,
-            "brand":           brand,
-            "category":        cat,
-            "is_strong_brand": is_strong_brand,
-            "age_min":         age,
-            "deal_tag":        deal_tag,
-            "_skip_reason":    None if send else "below_threshold",
+            "send_alert":       send,
+            "profit":           round(profit, 2),
+            "estimated_value":  round(estimated_value, 2),
+            "market_price":     round(market_price, 2) if market_price else None,
+            "confidence":       confidence,
+            "anomaly_score":    anomaly_score,
+            "pattern_score":    pattern_score,
+            "matched_patterns": matched_patterns,
+            "brand":            brand,
+            "category":         cat,
+            "is_strong_brand":  is_strong_brand,
+            "age_min":          age,
+            "deal_tag":         deal_tag,
+            "_skip_reason":     None if send else "below_threshold",
         }
 
 
@@ -857,6 +1033,25 @@ _HEURISTIC_PRICES: dict[str, dict[str, float]] = {
     "fruit of the loom": {"tshirt": 80, "default": 60},
     "harley davidson": {"tshirt": 200, "jacket": 400, "hoodie": 250, "default": 180},
     "harley-davidson": {"tshirt": 200, "jacket": 400, "hoodie": 250, "default": 180},
+    "harley tee":      {"tshirt": 200, "default": 180},
+    # Band brands — mid-tier pricing (priced for vintage era originals)
+    "nirvana":        {"tshirt": 280, "hoodie": 200, "default": 220},
+    "metallica":      {"tshirt": 250, "hoodie": 180, "default": 200},
+    "pink floyd":     {"tshirt": 220, "hoodie": 160, "default": 180},
+    "acdc":           {"tshirt": 200, "hoodie": 150, "default": 160},
+    "ac/dc":          {"tshirt": 200, "hoodie": 150, "default": 160},
+    "ramones":        {"tshirt": 200, "hoodie": 150, "default": 160},
+    "grateful dead":  {"tshirt": 350, "hoodie": 250, "default": 280},
+    "led zeppelin":   {"tshirt": 220, "hoodie": 160, "default": 180},
+    "rolling stones": {"tshirt": 200, "hoodie": 150, "default": 160},
+    "black sabbath":  {"tshirt": 200, "hoodie": 150, "default": 160},
+    "iron maiden":    {"tshirt": 200, "hoodie": 150, "default": 160},
+    "wu-tang":        {"tshirt": 300, "hoodie": 220, "default": 240},
+    "wu tang":        {"tshirt": 300, "hoodie": 220, "default": 240},
+    "tupac":          {"tshirt": 250, "hoodie": 180, "default": 200},
+    "slipknot":       {"tshirt": 180, "hoodie": 140, "default": 150},
+    # Vintage tag brands
+    "hanes beefy":    {"tshirt": 100, "default": 80},
 }
 
 
@@ -1160,23 +1355,52 @@ class GrailEngine:
         if is_band:
             score += 2   # band = traktowany jak grail-eligible brand
 
-        # Fix 3 — STRICT GATE: grail wymaga brand+rarity LUB band+rarity LUB silne kw
-        if not has_grail_qualifier:
-            # Brak qualifiera → NIGDY grail (np. generic "y2k baggy jeans")
-            if DEBUG_ALERTS:
-                print(f"  [QUALITY] skip_reason=no_grail_qualifier | {title[:50]}")
-            return {**base, "_skip_reason": "no_grail_qualifier"}
+        # ── PATTERN SCORING ────────────────────────────────
+        pattern_score, matched_patterns = compute_pattern_score(title, brand, band)
 
-        if is_grail_brand and has_rarity:
+        # LOW_EFFORT → grail = False (spec rule)
+        has_low_effort = any("low_effort" in p for p in matched_patterns)
+        if has_low_effort:
+            if DEBUG_ALERTS:
+                print(f"  [QUALITY] skip_reason=low_effort_grail_blocked | {title[:50]}")
+            return {**base, "_skip_reason": "low_effort_grail_blocked",
+                    "pattern_score": pattern_score, "matched_patterns": matched_patterns}
+
+        # Grail scoring (classic keywords)
+        score   = 0
+        kw_hits = sum(1 for k in _GRAIL_KEYWORDS if k in t)
+        if kw_hits >= 1:   score += 2
+        if kw_hits >= 2:   score += 1
+
+        if kw(title, _GRAIL_BRANDS):   score += 2
+        if "tour"          in t: score += 1
+        if "single stitch" in t: score += 1
+        if "band" in t and ("tee" in t or "shirt" in t or "tour" in t): score += 1
+        if "bootleg"       in t: score += 1
+        if features["is_vintage"]:     score += 1
+        if is_band:                    score += 2   # band = grail-eligible
+
+        # Pattern score feeds into grail score
+        pos_ps = max(0, pattern_score)
+        score += pos_ps // 2   # +1 per 2 pattern points (no double counting)
+
+        # ── SPEC GRAIL LOGIC ───────────────────────────────
+        # ALLOW grail if: pattern_score >= 5 AND (rarity OR brand in STRONG_BRANDS)
+        #              OR: brand in GRAIL_BRANDS AND rarity
+        # BLOCK grail if: only LOW_EFFORT, generic Y2K, no real pattern
+        has_rarity_hit  = any(r in t for r in RARITY_KEYWORDS)
+        has_grail_brand = brand in GRAIL_ELIGIBLE_BRANDS if brand else False
+
+        if pattern_score >= 5 and (has_rarity_hit or brand in STRONG_BRANDS or is_band):
+            is_grail_qualified = True   # spec CASE 1: pattern>=5 + quality signal
+        elif has_grail_brand and has_rarity_hit:
+            is_grail_qualified = score >= 3   # spec CASE 2: grail brand + rarity
+        elif is_band and (has_rarity_hit or has_rarity):
             is_grail_qualified = score >= 3
-        elif is_band and has_rarity:
-            is_grail_qualified = score >= 3   # band + vintage = grail-like
-        elif is_band and kw_hits >= 1:
-            is_grail_qualified = score >= 3
+        elif is_band and pattern_score >= 4:
+            is_grail_qualified = score >= 3   # band + strong pattern (tour+vintage)
         elif has_rarity and kw_hits >= 2:
             is_grail_qualified = score >= 4
-        elif is_grail_brand and kw_hits >= 1:
-            is_grail_qualified = score >= 3
         else:
             is_grail_qualified = False
 
@@ -1187,27 +1411,29 @@ class GrailEngine:
         anomaly_score = 0
         if estimated > 0 and price < estimated * 0.70:
             anomaly_score = 2
-            if is_grail_qualified:
-                score += 2
+            if is_grail_qualified: score += 2
         elif estimated > 0 and price < estimated * 0.85:
             anomaly_score = 1
-            if is_grail_qualified:
-                score += 1
+            if is_grail_qualified: score += 1
 
         is_grail = is_grail_qualified and score >= 3
         conf     = float(score) * 1.2 + freshness_boost(age) * 0.4
-        # Grail brand boosts confidence floor
-        if is_grail_brand:
+        if has_grail_brand:
             conf = max(conf, brand_strength(brand))
+        # LOW_EFFORT penalty on confidence
+        if has_low_effort:
+            conf -= 2.0
         conf = round(min(max(conf, 0.0), 10.0), 2)
 
-        # Send rule: grail AND profit >= 10 (final decision gate raises to 50)
+        # Spec threshold: GRAIL profit >= 50 AND pattern_score >= 5
         if DEBUG_ALERTS:
             send = profit >= 10 and is_grail
         else:
             send = (
-                (is_grail and profit >= 10)
-                or (profit >= 15 and anomaly_score >= 2 and is_grail)
+                # Spec: GRAIL profit >= 50 AND pattern_score >= 5
+                (is_grail and profit >= 50 and pattern_score >= 5)
+                # OR: grail + high profit even without full pattern
+                or (is_grail and profit >= 30 and anomaly_score >= 2)
             )
 
         # DB learning
@@ -1219,27 +1445,32 @@ class GrailEngine:
         elif cat:
             self.db.add_sample(f"{cat}_unknown", price)
 
+        # Task 6 — debug log with pattern info
         if DEBUG_ALERTS:
-            action = "\U0001f4e4 ALERT" if send else "\u23ed  SKIP"
+            action = "📤 ALERT" if send else "⏭  SKIP"
             print(f"  {action}: conf={conf:.1f} profit={profit:.0f} "
-                  f"score={score} grail={is_grail} brand={brand or '\u2014'} "
-                  f"grail_brand={is_grail_brand} rarity={has_rarity} | {title[:40]}")
+                  f"grail_score={score} pattern_score={pattern_score} "
+                  f"grail={is_grail} rarity={has_rarity_hit} | {title[:40]}")
+            if matched_patterns:
+                print(f"    matched_patterns={matched_patterns}")
 
         return {
             **base,
-            "send_alert":      send,
-            "is_grail":        is_grail,
-            "grail_score":     score,
-            "profit":          round(profit, 2),
-            "estimated_value": round(estimated, 2),
-            "confidence":      conf,
-            "anomaly_score":   anomaly_score,
-            "brand":           brand,
-            "category":        cat,
-            "is_grail_brand":  is_grail_brand,
-            "has_rarity":      has_rarity,
-            "age_min":         age,
-            "_skip_reason":    None if send else ("strict_gate" if not is_grail else "low_profit"),
+            "send_alert":       send,
+            "is_grail":         is_grail,
+            "grail_score":      score,
+            "profit":           round(profit, 2),
+            "estimated_value":  round(estimated, 2),
+            "confidence":       conf,
+            "anomaly_score":    anomaly_score,
+            "pattern_score":    pattern_score,
+            "matched_patterns": matched_patterns,
+            "brand":            brand,
+            "category":         cat,
+            "is_grail_brand":   has_grail_brand,
+            "has_rarity":       has_rarity_hit,
+            "age_min":          age,
+            "_skip_reason":     None if send else ("not_grail" if not is_grail else "low_profit_pattern"),
         }
 
     def _estimate_value(self, title: str, price: float, score: int) -> float:
@@ -1258,54 +1489,73 @@ class GrailEngine:
 
 
 def format_alert(result: dict) -> str:
-    """Formatuje alert Telegram. Obsługuje wyniki z CHAOS, BRAND i GRAIL engine."""
+    """Formatuje alert Telegram. GRAIL/BRAND/CHAOS + spec output: pattern_score, flags."""
     engine   = result.get("engine", "?")
     item     = result.get("item", {})
     title    = item.get("title", "")
     price    = item.get("price", 0)
-    profit   = result.get("profit", 0)
+    profit   = result.get("profit", 0) or result.get("estimated_profit", 0)
     conf     = result.get("confidence", 0)
-    brand    = result.get("brand") or ""
+    brand    = result.get("brand") or result.get("brand_detected") or ""
     category = result.get("category") or ""
-    age_min  = result.get("age_min", 0)
+    age_min  = result.get("age_min", 0) or 0
     is_grail = result.get("is_grail", False)
     est_val  = result.get("estimated_value") or result.get("median_price") or 0
+    pattern_score    = result.get("pattern_score", 0)
+    matched_patterns = result.get("matched_patterns", [])
+    flags            = result.get("flags", {})
+    has_vintage      = flags.get("vintage_signal", False)
+    has_rarity       = flags.get("rarity", False)
+    is_low_effort    = flags.get("low_effort", False)
 
-    clean    = re.sub(r',?\s*(marka|stan|rozmiar|brand|size|condition):.*',
-                      '', title, flags=re.IGNORECASE).strip()
+    clean = re.sub(r',?\s*(marka|stan|rozmiar|brand|size|condition):.*',
+                   '', title, flags=re.IGNORECASE).strip()
 
     if is_grail:
-        header = f"💎 GRAIL  ·  score={result.get('grail_score', 0)}"
+        header = f"💎 GRAIL  · score={result.get('grail_score',0)} pattern={pattern_score}"
+    elif result.get("is_soft_grail"):
+        header = f"✨ SOFT GRAIL  · pattern={pattern_score}"
+    elif result.get("band"):
+        header = f"🎸 BAND  · {result.get('band','').upper()}  · pattern={pattern_score}"
     elif engine == "CHAOS":
-        header = "🔵 CHAOS FLIP"
+        header = f"🔵 CHAOS FLIP  · pattern={pattern_score}"
     elif engine == "BRAND":
-        header = "🟣 BRAND DEAL"
+        header = f"🟣 BRAND DEAL  · pattern={pattern_score}"
     else:
-        header = "⚪ DEAL"
+        header = f"⚪ DEAL  · pattern={pattern_score}"
 
     age_str = f"{age_min}min" if age_min < 360 else "?"
 
     lines = [
-        f"{'━'*30}",
-        f"{header}  ·  conf={conf:.1f}/10",
-        f"{'━'*30}",
+        "━" * 30,
+        f"{header}  · conf={conf:.1f}/10",
+        "━" * 30,
         "",
         f"📦  {clean[:90]}",
         "",
         f"💰  Cena:     {price:.0f} zł",
     ]
-
     if est_val and est_val > price:
         lines.append(f"📈  Wycena:   ~{est_val:.0f} zł")
         disc = (1 - price / est_val) * 100
         lines.append(f"✂️   Taniej o: {disc:.0f}%")
-
     if profit >= 10:
         lines.append(f"💚  Profit:   ~{profit:.0f} zł")
 
+    flag_parts = []
+    if has_vintage:   flag_parts.append("🕹 vintage")
+    if has_rarity:    flag_parts.append("💎 rarity")
+    if is_low_effort: flag_parts.append("⚠️ low_effort")
+    if flag_parts:
+        lines.append("  ·  ".join(flag_parts))
+
+    top_patterns = [p for p in matched_patterns if "low_effort" not in p][:2]
+    if top_patterns:
+        lines.append(f"🎯  {', '.join(top_patterns)}")
+
     meta = []
-    if brand:      meta.append(f"🏷 {brand}")
-    if category:   meta.append(f"📂 {category}")
+    if brand:          meta.append(f"🏷 {brand}")
+    if category:       meta.append(f"📂 {category}")
     if age_str != "?": meta.append(f"⏱ {age_str}")
     if meta:
         lines.append("  ·  ".join(meta))
@@ -1419,22 +1669,19 @@ class Engine:
             "kombinezon damski",
         ]
         tl = title.lower()
+        _skip_base = {
+            "profit": 0, "confidence": 0, "item": item,
+            "send_alert": False, "send": False, "engine": None,
+            "pattern_score": 0, "matched_patterns": [],
+            "brand_detected": None, "estimated_profit": 0,
+            "flags": {"rarity": False, "vintage_signal": False, "low_effort": False},
+        }
         for trash in _HARD_TRASH:
             if trash in tl:
-                return {
-                    "send": False, "engine": None,
-                    "reason": f"hard_filter:{trash}",
-                    "profit": 0, "confidence": 0,
-                    "item": item, "send_alert": False,
-                }
+                return {**_skip_base, "reason": f"hard_filter:{trash}"}
 
         if is_foreign_title(title):
-            return {
-                "send": False, "engine": None,
-                "reason": "foreign_language",
-                "profit": 0, "confidence": 0,
-                "item": item, "send_alert": False,
-            }
+            return {**_skip_base, "reason": "foreign_language"}
 
         # ── Requirement 3: RUN ALL THREE ENGINES ──────────
         try:
@@ -1531,7 +1778,9 @@ class Engine:
                 "item": item, "send_alert": False,
             }
 
-        # ── FINAL DECISION RULES (spec-compliant) ─────────
+        # ── FINAL DECISION RULES (spec: single decision, strict hierarchy) ──
+        pattern_score   = best.get("pattern_score", 0)
+        matched_patterns= best.get("matched_patterns", [])
         send   = False
         reason = "below_threshold"
 
@@ -1539,53 +1788,78 @@ class Engine:
             # Debug mode: lower thresholds to see what flows
             if is_grail and profit >= 10:
                 send   = True
-                reason = f"grail_debug(score={best.get('grail_score',0)})"
+                ps     = best.get("grail_score", 0)
+                reason = f"grail_debug(score={ps},pattern={pattern_score})"
             elif is_strong and profit >= 20:
                 send   = True
                 reason = f"brand_strong_debug(profit={profit:.0f})"
             elif profit >= 20 and confidence >= 5.0:
                 send   = True
-                reason = f"flip_debug(profit={profit:.0f},conf={confidence:.1f})"
+                reason = f"flip_debug(profit={profit:.0f},conf={confidence:.1f},pattern={pattern_score})"
             elif confidence > 0:
                 reason = f"fallback_candidate(conf={confidence:.1f},profit={profit:.0f})"
         else:
-            # CASE 1: Strong brand AND profit >= 40 → SEND (priority HIGH)
-            if is_strong and profit >= 40:
+            # GRAIL priority (spec: profit>=50 AND pattern_score>=5)
+            if is_grail and profit >= 50 and pattern_score >= 5:
+                send   = True
+                reason = f"grail(score={best.get('grail_score',0)},pattern={pattern_score},profit={profit:.0f})"
+
+            # GRAIL fallback: anomaly shortcut
+            elif is_grail and profit >= 30 and best.get("anomaly_score", 0) >= 2:
+                send   = True
+                reason = f"grail_anomaly(profit={profit:.0f},anomaly={best.get('anomaly_score',0)})"
+
+            # BRAND strong (spec: profit>=40)
+            elif is_strong and profit >= 40:
                 send   = True
                 reason = f"brand_strong(profit={profit:.0f},conf={confidence:.1f})"
 
-            # CASE 2: Grail AND profit >= 50 → SEND
-            elif is_grail and profit >= 50:
-                send   = True
-                reason = f"grail(score={best.get('grail_score',0)},profit={profit:.0f})"
-
-            # CASE 3: Chaos (or non-strong brand) AND profit >= 30 → SEND
-            elif best_name == "CHAOS" and profit >= 30 and confidence >= 5.0:
-                send   = True
-                reason = f"chaos_flip(profit={profit:.0f},conf={confidence:.1f})"
-
-            # CASE 3b: Brand (non-strong) AND profit >= 25
-            elif best_name == "BRAND" and profit >= 25 and confidence >= 5.5:
+            # BRAND normal (spec: profit>=25 AND conf>=5.5)
+            elif best_name == "BRAND" and not is_strong and profit >= 25 and confidence >= 5.5:
                 send   = True
                 reason = f"brand_deal(profit={profit:.0f},conf={confidence:.1f})"
 
-            # Fallback candidate (for run_cycle_strict TOP-1)
-            elif confidence > 0:
-                reason = f"fallback_candidate(conf={confidence:.1f},profit={profit:.0f})"
+            # CHAOS (spec: profit>=40 AND conf>=6)
+            elif best_name == "CHAOS" and profit >= 40 and confidence >= 6.0:
+                send   = True
+                reason = f"chaos_flip(profit={profit:.0f},conf={confidence:.1f})"
 
+            # Pattern shortcut: high pattern score lowers CHAOS bar
+            elif best_name == "CHAOS" and pattern_score >= 5 and profit >= 30 and confidence >= 5.5:
+                send   = True
+                reason = f"chaos_pattern(pattern={pattern_score},profit={profit:.0f})"
+
+            elif confidence > 0:
+                reason = f"fallback_candidate(conf={confidence:.1f},profit={profit:.0f},pattern={pattern_score})"
+
+        # Task 6 — Debug log with pattern_score + matched_patterns
         if DEBUG_ALERTS:
             action = "📤 SEND" if send else "⏭  SKIP"
             print(f"  [{best_name}] {action} | "
                   f"conf={confidence:.1f} profit={profit:.0f} "
+                  f"pattern_score={pattern_score} "
                   f"grail={is_grail} brand={brand_name or '—'} "
                   f"strong={is_strong} | reason={reason}")
+            if matched_patterns:
+                print(f"    matched_patterns={matched_patterns}")
 
+        # Mandatory output format (spec)
         return {
             **best,
-            "send":       send,
-            "send_alert": send,
-            "reason":     reason,
-            "engine":     best_name,
+            "send":             send,
+            "send_alert":       send,
+            "reason":           reason,
+            "engine":           best_name,
+            # Spec output fields
+            "brand_detected":   brand_name,
+            "estimated_profit": round(profit, 2),
+            "pattern_score":    pattern_score,
+            "matched_patterns": matched_patterns,
+            "flags": {
+                "rarity":         bool(best.get("has_rarity") or any("rarity" in p for p in matched_patterns)),
+                "vintage_signal": bool(best.get("is_vintage") or any(vs in title.lower() for vs in VINTAGE_SIGNALS)),
+                "low_effort":     bool(any("low_effort" in p for p in matched_patterns)),
+            },
         }
 
     def run_cycle_strict(self, items: list[dict], market_prices: dict | None = None) -> list[dict]:
