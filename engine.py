@@ -1864,81 +1864,203 @@ class Engine:
 
     def run_cycle_strict(self, items: list[dict], market_prices: dict | None = None) -> list[dict]:
         """
-        Strict pipeline — każdy item przez evaluate_and_decide.
-        Task 3: obniżone progi.
-        Task 4: fallback TOP 1 gdy wszystkie odrzucone.
-        Task 5: deduplikacja po item_id.
-        Task 6: auto-save DB.
+        Ranking & Selection Layer — post-processing po evaluate_and_decide.
+
+        Pipeline:
+          1. Evaluate every item
+          2. Build candidate_pool (profit>=30, conf>=5) + fallback pool
+          3. Compute final_score per candidate
+          4. Dynamic profit threshold (pool>15 → min_profit=50)
+          5. Anti-spam: near-duplicate removal
+          6. Cluster by brand+category+pattern (max 2/cluster, max 4 if GRAIL)
+          7. Sort: GRAIL > BRAND > CHAOS, then final_score DESC
+          8. Dynamic TOP-N selection
+          9. Debug output
         """
         market_prices = market_prices or {}
-        total      = len(items)
-        processed  = 0
-        results    = []
-        fallbacks  = []   # Task 4 — kandydaci fallback
+        total     = len(items)
+        processed = 0
+        all_scored: list[dict] = []   # wszystkie wyniki z evaluate_and_decide
 
+        # ── Step 1: evaluate every item ─────────────────────────────────
         for item in items:
             try:
                 r = self.evaluate_and_decide(item, market_prices)
                 processed += 1
-                if r.get("send"):
-                    results.append(r)
-                elif r.get("confidence", 0) > 0:
-                    # Task 4 — zachowaj jako fallback kandydata
-                    fallbacks.append(r)
+                all_scored.append(r)
             except Exception as e:
                 processed += 1
                 title = str(item.get("title", "?"))[:80] if isinstance(item, dict) else "?"
                 print(f"  ❌ ITEM ERROR: {e} | {title}")
 
-        # Task 2 — pipeline metrics
-        print(f"  📊 Processed: {processed}/{total} | Accepted: {len(results)} | Fallbacks: {len(fallbacks)}")
+        print(f"  📊 Processed: {processed}/{total} | Scored: {len(all_scored)}")
 
-        # Task 4 — fallback: jeśli 0 zaakceptowanych → wyślij TOP 1 po confidence
-        if not results and fallbacks:
-            fallbacks.sort(key=lambda r: -(r.get("confidence", 0) + r.get("profit", 0)))
-            top1 = fallbacks[0]
-            top1["send"]       = True
-            top1["send_alert"] = True
-            top1["reason"]     = f"top1_fallback(conf={top1.get('confidence',0):.1f})"
-            results = [top1]
-            print(f"  ⚠️ FALLBACK TOP1: {top1.get('item',{}).get('title','?')[:50]} "
-                  f"| conf={top1.get('confidence',0):.1f}")
+        # ── Step 2: candidate_pool (profit>=30, conf>=5) ─────────────────
+        candidate_pool = [
+            r for r in all_scored
+            if r.get("profit", 0) >= 30 and r.get("confidence", 0) >= 5.0
+        ]
+        fallback_pool = [
+            r for r in all_scored
+            if r not in candidate_pool and r.get("confidence", 0) > 0
+        ]
 
-        # Task 9: sort by profit+confidence DESC, limit 10
-        results.sort(key=lambda r: -(r.get("profit", 0) + r.get("confidence", 0)))
+        print(f"  📋 Candidates: {len(candidate_pool)} | Fallbacks: {len(fallback_pool)}")
 
-        # Task 5 — dedup po item_id (prevent same item multiple times)
+        # Fallback: zero kandydatów → weź top-1 z fallback pool
+        if not candidate_pool and fallback_pool:
+            fallback_pool.sort(key=lambda r: -(r.get("confidence", 0) + r.get("profit", 0)))
+            top1 = dict(fallback_pool[0])
+            top1["send"] = top1["send_alert"] = True
+            top1["reason"] = f"top1_fallback(conf={top1.get('confidence',0):.1f})"
+            print(f"  ⚠️ FALLBACK TOP1: {top1.get('item',{}).get('title','?')[:50]}")
+            self.db.save(force=True)
+            return [top1]
+
+        # ── Step 3: compute final_score ──────────────────────────────────
+        def _final_score(r: dict) -> float:
+            profit  = r.get("profit", 0) or r.get("estimated_profit", 0)
+            pattern = r.get("pattern_score", 0)
+            conf    = r.get("confidence", 0)
+            return profit * 1.0 + pattern * 8 + conf * 3
+
+        for r in candidate_pool:
+            r["final_score"] = round(_final_score(r), 2)
+
+        # ── Step 4: dynamic profit threshold ────────────────────────────
+        min_profit = 50 if len(candidate_pool) > 15 else 30
+        candidate_pool = [r for r in candidate_pool if r.get("profit", 0) >= min_profit]
+        print(f"  🎚 min_profit={min_profit} → after threshold: {len(candidate_pool)} candidates")
+
+        # ── Step 5: anti-spam / near-duplicate removal ───────────────────
+        def _title_similarity(a: str, b: str) -> float:
+            """Simple token-overlap similarity (0–1). No external libs."""
+            ta = set(a.lower().split())
+            tb = set(b.lower().split())
+            if not ta or not tb:
+                return 0.0
+            return len(ta & tb) / max(len(ta), len(tb))
+
+        deduped: list[dict] = []
+        for r in candidate_pool:
+            r_title = str(r.get("item", {}).get("title", ""))
+            r_price = float(r.get("item", {}).get("price", 0) or 0)
+            r_brand = r.get("brand") or ""
+            is_dup  = False
+
+            for kept in deduped:
+                k_title = str(kept.get("item", {}).get("title", ""))
+                k_price = float(kept.get("item", {}).get("price", 0) or 0)
+                k_brand = kept.get("brand") or ""
+
+                sim = _title_similarity(r_title, k_title)
+                price_close = k_price > 0 and abs(r_price - k_price) / k_price <= 0.10
+                same_brand  = r_brand and r_brand == k_brand
+
+                if sim >= 0.80 and price_close and same_brand:
+                    is_dup = True
+                    break
+
+            if not is_dup:
+                deduped.append(r)
+
+        removed_dups = len(candidate_pool) - len(deduped)
+        if removed_dups > 0:
+            print(f"  🧹 Anti-spam removed {removed_dups} near-duplicates")
+        candidate_pool = deduped
+
+        # ── Step 6: clustering ───────────────────────────────────────────
+        def _cluster_key(r: dict) -> str:
+            brand    = (r.get("brand") or "unknown").lower().replace(" ", "_")
+            category = (r.get("category") or r.get("context_category") or "other").lower()
+            patterns = r.get("matched_patterns", [])
+            main_pat = patterns[0].split("(")[0] if patterns else "generic"
+            key      = f"{brand}__{category}__{main_pat}"
+            r["cluster_key"] = key
+            return key
+
+        cluster_counts: dict[str, int] = {}
+        clustered: list[dict] = []
+
+        # Sort by final_score DESC before clustering so best items win cluster slots
+        candidate_pool.sort(key=lambda r: -r.get("final_score", 0))
+
+        for r in candidate_pool:
+            ck       = _cluster_key(r)
+            is_grail = r.get("is_grail", False)
+            max_per  = 4 if is_grail else 2
+
+            if cluster_counts.get(ck, 0) < max_per:
+                cluster_counts[ck] = cluster_counts.get(ck, 0) + 1
+                clustered.append(r)
+
+        print(f"  🔗 After clustering: {len(clustered)} (from {len(candidate_pool)})")
+
+        # ── Step 7: sort — GRAIL > BRAND > CHAOS, then final_score DESC ─
+        _ENGINE_PRIO = {"GRAIL": 0, "BRAND": 1, "CHAOS": 2}
+
+        clustered.sort(key=lambda r: (
+            _ENGINE_PRIO.get(r.get("engine", "CHAOS"), 2),
+            -r.get("final_score", 0),
+        ))
+
+        # ── Step 8: dynamic TOP-N selection ─────────────────────────────
+        grail_items = [r for r in clustered if r.get("is_grail")]
+        chaos_items = [r for r in clustered if r.get("engine") == "CHAOS" and not r.get("is_grail")]
+        other_items = [r for r in clustered if r not in grail_items and r not in chaos_items]
+
+        if len(grail_items) >= 5:
+            selected = grail_items[:5] + chaos_items[:3]
+        else:
+            selected = clustered[:7]
+
+        # ── Step 9: assign ranking_position + dedup by item_id ──────────
         brand_counts: dict[str, int] = {}
-        final    = []
-        sent_ids = set()   # Task 5: lokalny set per-cykl (nie tylko sesyjny)
+        sent_ids: set[str] = set()
+        final: list[dict]  = []
 
-        for r in results:
+        for pos, r in enumerate(selected, start=1):
             item_id  = str(r.get("item", {}).get("id", ""))
             is_grail = r.get("is_grail", False)
 
-            # Task 5 — dedup: sprawdź ZARÓWNO sesyjny set jak i lokalny
+            # Session-level dedup
             if item_id and item_id in sent_ids:
                 continue
             if item_id and item_id in self._alerted_ids and not is_grail:
                 continue
 
+            # Brand cap (max 2 per brand, grails exempt)
             brand = r.get("brand") or ""
             if brand and not is_grail:
                 if brand_counts.get(brand, 0) >= 2:
                     continue
                 brand_counts[brand] = brand_counts.get(brand, 0) + 1
 
+            r["ranking_position"] = pos
+            r["send"] = r["send_alert"] = True
+
             if item_id:
                 sent_ids.add(item_id)
                 self._alerted_ids.add(item_id)
             final.append(r)
-            if len(final) >= 10:
-                break
+
+        # Debug summary
+        if DEBUG_ALERTS:
+            print(f"\n  {'═'*55}")
+            print(f"  RANKING SUMMARY — sending {len(final)} items")
+            print(f"  {'═'*55}")
+            for r in final:
+                title   = str(r.get("item", {}).get("title", ""))[:40]
+                print(f"  #{r['ranking_position']:2d} [{r.get('engine','?'):5s}] "
+                      f"final={r.get('final_score',0):.0f} "
+                      f"profit={r.get('profit',0):.0f} "
+                      f"conf={r.get('confidence',0):.1f} "
+                      f"cluster={r.get('cluster_key','?')[:30]} | {title}")
+            print(f"  {'═'*55}\n")
 
         if len(self._alerted_ids) > 10_000:
             self._alerted_ids = set(list(self._alerted_ids)[-5_000:])
 
-        # Task 6 — auto-save DB po każdym cyklu
         self.db.save(force=True)
         print(f"  💾 MarketDB saved: {len(self.db.db)} grup → {DB_FILE}")
 
