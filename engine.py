@@ -294,7 +294,19 @@ STRONG_BRANDS = {
     "true religion", "roca wear", "rocawear",
 }
 
-# Brands eligible for GRAIL (must also have rarity keyword)
+# ── Task 1: Brand tiers ───────────────────────────────
+# BLOCKED: reject immediately, no evaluation
+BLOCKED_BRANDS = {
+    "corteiz", "crtz",   # removed from STRONG — high hype, low real margin on Vinted
+}
+
+# LOW_ROI: penalise confidence + final_score, reject if no pattern
+LOW_ROI_BRANDS = {
+    "essentials", "fear of god essentials",
+    "zara", "h&m", "shein",
+    "bershka", "sinsay", "reserved", "primark",
+    "pull&bear", "stradivarius",
+}
 GRAIL_ELIGIBLE_BRANDS = {
     # Vintage basics / print shops
     "screen stars", "hanes beefy", "hanes",
@@ -1489,7 +1501,7 @@ class GrailEngine:
 
 
 def format_alert(result: dict) -> str:
-    """Formatuje alert Telegram. GRAIL/BRAND/CHAOS + spec output: pattern_score, flags."""
+    """Formatuje alert Telegram. GRAIL/BRAND/CHAOS + Task 7 spec output."""
     engine   = result.get("engine", "?")
     item     = result.get("item", {})
     title    = item.get("title", "")
@@ -1501,35 +1513,46 @@ def format_alert(result: dict) -> str:
     age_min  = result.get("age_min", 0) or 0
     is_grail = result.get("is_grail", False)
     est_val  = result.get("estimated_value") or result.get("median_price") or 0
+
+    # Task 7 spec fields
     pattern_score    = result.get("pattern_score", 0)
     matched_patterns = result.get("matched_patterns", [])
+    final_score      = result.get("final_score", 0)
+    rank_pos         = result.get("ranking_position")
     flags            = result.get("flags", {})
     has_vintage      = flags.get("vintage_signal", False)
     has_rarity       = flags.get("rarity", False)
     is_low_effort    = flags.get("low_effort", False)
+    fast_snipe       = flags.get("fast_snipe", False) or result.get("fast_snipe", False)
+    quality_pass     = flags.get("quality_pass", True) or result.get("quality_pass", True)
 
     clean = re.sub(r',?\s*(marka|stan|rozmiar|brand|size|condition):.*',
                    '', title, flags=re.IGNORECASE).strip()
 
-    if is_grail:
-        header = f"💎 GRAIL  · score={result.get('grail_score',0)} pattern={pattern_score}"
-    elif result.get("is_soft_grail"):
-        header = f"✨ SOFT GRAIL  · pattern={pattern_score}"
-    elif result.get("band"):
-        header = f"🎸 BAND  · {result.get('band','').upper()}  · pattern={pattern_score}"
-    elif engine == "CHAOS":
-        header = f"🔵 CHAOS FLIP  · pattern={pattern_score}"
-    elif engine == "BRAND":
-        header = f"🟣 BRAND DEAL  · pattern={pattern_score}"
-    else:
-        header = f"⚪ DEAL  · pattern={pattern_score}"
+    # Header — sniper gets ⚡ prefix
+    snipe_prefix = "⚡ SNIPER  · " if fast_snipe else ""
+    rank_str     = f"#{rank_pos}  · " if rank_pos else ""
 
-    age_str = f"{age_min}min" if age_min < 360 else "?"
+    if is_grail:
+        header = f"{snipe_prefix}{rank_str}💎 GRAIL  · score={result.get('grail_score',0)} pattern={pattern_score}"
+    elif result.get("is_soft_grail"):
+        header = f"{snipe_prefix}{rank_str}✨ SOFT GRAIL  · pattern={pattern_score}"
+    elif result.get("band"):
+        header = f"{snipe_prefix}{rank_str}🎸 BAND  · {result.get('band','').upper()}  · pattern={pattern_score}"
+    elif engine == "CHAOS":
+        header = f"{snipe_prefix}{rank_str}🔵 CHAOS FLIP  · pattern={pattern_score}"
+    elif engine == "BRAND":
+        header = f"{snipe_prefix}{rank_str}🟣 BRAND DEAL  · pattern={pattern_score}"
+    else:
+        header = f"{snipe_prefix}{rank_str}⚪ DEAL  · pattern={pattern_score}"
+
+    age_str = f"{age_min}min" if age_min and age_min < 360 else "?"
 
     lines = [
-        "━" * 30,
+        "━" * 32,
         f"{header}  · conf={conf:.1f}/10",
-        "━" * 30,
+        f"final_score={final_score:.0f}  · quality={'✅' if quality_pass else '⚠️'}",
+        "━" * 32,
         "",
         f"📦  {clean[:90]}",
         "",
@@ -1542,13 +1565,16 @@ def format_alert(result: dict) -> str:
     if profit >= 10:
         lines.append(f"💚  Profit:   ~{profit:.0f} zł")
 
+    # Flags line
     flag_parts = []
-    if has_vintage:   flag_parts.append("🕹 vintage")
-    if has_rarity:    flag_parts.append("💎 rarity")
-    if is_low_effort: flag_parts.append("⚠️ low_effort")
+    if fast_snipe:     flag_parts.append("⚡ fast_snipe")
+    if has_vintage:    flag_parts.append("🕹 vintage")
+    if has_rarity:     flag_parts.append("💎 rarity")
+    if is_low_effort:  flag_parts.append("⚠️ low_effort")
     if flag_parts:
         lines.append("  ·  ".join(flag_parts))
 
+    # Top 2 matched patterns (no low_effort clutter)
     top_patterns = [p for p in matched_patterns if "low_effort" not in p][:2]
     if top_patterns:
         lines.append(f"🎯  {', '.join(top_patterns)}")
@@ -1683,6 +1709,13 @@ class Engine:
         if is_foreign_title(title):
             return {**_skip_base, "reason": "foreign_language"}
 
+        # ── Task 1: BLOCKED_BRANDS — immediate reject ─────────────────────
+        _detected_brand_early = detect_brand(title)
+        if _detected_brand_early in BLOCKED_BRANDS:
+            return {**_skip_base,
+                    "reason": f"blocked_brand:{_detected_brand_early}",
+                    "brand_detected": _detected_brand_early}
+
         # ── Requirement 3: RUN ALL THREE ENGINES ──────────
         try:
             c_result = self.chaos._evaluate(item)
@@ -1750,6 +1783,22 @@ class Engine:
         confidence = best.get("confidence", 0)
         is_grail   = best.get("is_grail", False)
         brand_name = best.get("brand")
+
+        # ── Task 1: LOW_ROI_BRANDS adjustments ───────────────────────────
+        _pattern_score_early = best.get("pattern_score", 0)
+        if brand_name in LOW_ROI_BRANDS:
+            confidence = max(0.0, confidence - 2.0)
+            best["confidence"] = confidence
+            # Reject immediately if no pattern compensates
+            if _pattern_score_early == 0:
+                if DEBUG_ALERTS:
+                    print(f"  [QUALITY] skip_reason=low_roi_no_pattern brand={brand_name}")
+                return {
+                    **_skip_base,
+                    "reason": f"low_roi_no_pattern:{brand_name}",
+                    "brand_detected": brand_name,
+                    "confidence": confidence,
+                }
 
         # ── Debug log: all 3 engines ──────────────────────
         if DEBUG_ALERTS:
@@ -1843,6 +1892,10 @@ class Engine:
             if matched_patterns:
                 print(f"    matched_patterns={matched_patterns}")
 
+        # Task 4 — Sniper flag (age<=10 AND profit>=70)
+        _age_val    = best.get("age_min", 999) or 999
+        _fast_snipe = bool(_age_val <= 10 and profit >= 70)
+
         # Mandatory output format (spec)
         return {
             **best,
@@ -1850,6 +1903,8 @@ class Engine:
             "send_alert":       send,
             "reason":           reason,
             "engine":           best_name,
+            "fast_snipe":       _fast_snipe,
+            "quality_pass":     send,
             # Spec output fields
             "brand_detected":   brand_name,
             "estimated_profit": round(profit, 2),
@@ -1859,6 +1914,8 @@ class Engine:
                 "rarity":         bool(best.get("has_rarity") or any("rarity" in p for p in matched_patterns)),
                 "vintage_signal": bool(best.get("is_vintage") or any(vs in title.lower() for vs in VINTAGE_SIGNALS)),
                 "low_effort":     bool(any("low_effort" in p for p in matched_patterns)),
+                "fast_snipe":     _fast_snipe,
+                "quality_pass":   send,
             },
         }
 
@@ -1895,46 +1952,104 @@ class Engine:
 
         print(f"  📊 Processed: {processed}/{total} | Scored: {len(all_scored)}")
 
-        # ── Step 2: candidate_pool (profit>=30, conf>=5) ─────────────────
-        candidate_pool = [
-            r for r in all_scored
-            if r.get("profit", 0) >= 30 and r.get("confidence", 0) >= 5.0
-        ]
-        fallback_pool = [
-            r for r in all_scored
-            if r not in candidate_pool and r.get("confidence", 0) > 0
-        ]
+        # ── Step 2: STRICT QUALITY GATE (Task 2) ────────────────────────
+        # Reject before ranking if ANY condition fails
+        def _quality_pass(r: dict) -> tuple[bool, str]:
+            """Returns (passes, reject_reason). Task 2 spec."""
+            eng    = r.get("engine", "CHAOS")
+            profit = r.get("profit", 0) or r.get("estimated_profit", 0)
+            conf   = r.get("confidence", 0)
+            ps     = r.get("pattern_score", 0)
+            brand  = r.get("brand") or r.get("brand_detected")
 
-        print(f"  📋 Candidates: {len(candidate_pool)} | Fallbacks: {len(fallback_pool)}")
+            if profit < 40:
+                return False, f"profit<40({profit:.0f})"
+            if conf < 6.5:
+                return False, f"conf<6.5({conf:.1f})"
+            if eng == "CHAOS" and ps == 0 and not brand:
+                return False, "chaos_no_pattern_no_brand"
+            # CHAOS additional restriction (Task 2)
+            if eng == "CHAOS":
+                is_strong = brand in STRONG_BRANDS if brand else False
+                if profit < 60 and not is_strong:
+                    return False, f"chaos_profit<60_not_strong({profit:.0f})"
+            return True, "ok"
 
-        # Fallback: zero kandydatów → weź top-1 z fallback pool
+        candidate_pool = []
+        fallback_pool  = []
+        for r in all_scored:
+            passes, reject_reason = _quality_pass(r)
+            r["quality_pass"]    = passes
+            r["quality_reason"]  = reject_reason
+            if passes:
+                candidate_pool.append(r)
+            elif r.get("confidence", 0) > 0:
+                fallback_pool.append(r)
+
+        print(f"  📋 Quality gate: {len(candidate_pool)} pass | "
+              f"{len(fallback_pool)} fallback | "
+              f"{len(all_scored)-len(candidate_pool)-len(fallback_pool)} rejected")
+
+        # Fallback: zero candidates → top-1 relaxed
         if not candidate_pool and fallback_pool:
             fallback_pool.sort(key=lambda r: -(r.get("confidence", 0) + r.get("profit", 0)))
             top1 = dict(fallback_pool[0])
             top1["send"] = top1["send_alert"] = True
             top1["reason"] = f"top1_fallback(conf={top1.get('confidence',0):.1f})"
+            top1["quality_pass"] = False
+            top1["fast_snipe"]   = False
+            top1["final_score"]  = top1.get("profit", 0) + top1.get("confidence", 0) * 3
+            top1["cluster_key"]  = "fallback__generic__none"
             print(f"  ⚠️ FALLBACK TOP1: {top1.get('item',{}).get('title','?')[:50]}")
             self.db.save(force=True)
             return [top1]
 
-        # ── Step 3: compute final_score ──────────────────────────────────
+        # ── Step 3: FINAL_SCORE with multipliers (Task 3) ───────────────
         def _final_score(r: dict) -> float:
             profit  = r.get("profit", 0) or r.get("estimated_profit", 0)
             pattern = r.get("pattern_score", 0)
             conf    = r.get("confidence", 0)
-            return profit * 1.0 + pattern * 8 + conf * 3
+            eng     = r.get("engine", "CHAOS")
+            is_le   = any("low_effort" in p for p in r.get("matched_patterns", []))
+
+            base = profit * 1.0 + pattern * 8 + conf * 3
+
+            # Task 3 — multipliers
+            if pattern == 0:
+                base *= 0.7                    # no pattern penalty
+            if is_le:
+                base *= 0.5                    # low effort heavy penalty
+            if eng == "GRAIL":
+                base *= 1.25                   # GRAIL priority boost
+            if pattern >= 4:
+                base *= 1.15                   # high pattern reward
+
+            return round(base, 2)
 
         for r in candidate_pool:
-            r["final_score"] = round(_final_score(r), 2)
+            # Task 4 — SNIPER MODE: age <=10 AND profit >= 70
+            age         = r.get("age_min", 999)
+            profit_val  = r.get("profit", 0)
+            fast_snipe  = (age <= 10 and profit_val >= 70)
+            r["fast_snipe"] = fast_snipe
+
+            score = _final_score(r)
+            if fast_snipe:
+                score *= 1.3       # Task 4 multiplier
+            r["final_score"] = round(score, 2)
+
+            if fast_snipe and DEBUG_ALERTS:
+                print(f"  ⚡ SNIPER: age={age}m profit={profit_val:.0f} "
+                      f"final_score={r['final_score']:.0f} | "
+                      f"{r.get('item',{}).get('title','?')[:40]}")
 
         # ── Step 4: dynamic profit threshold ────────────────────────────
-        min_profit = 50 if len(candidate_pool) > 15 else 30
+        min_profit = 50 if len(candidate_pool) > 15 else 40
         candidate_pool = [r for r in candidate_pool if r.get("profit", 0) >= min_profit]
-        print(f"  🎚 min_profit={min_profit} → after threshold: {len(candidate_pool)} candidates")
+        print(f"  🎚 min_profit={min_profit} → {len(candidate_pool)} candidates")
 
         # ── Step 5: anti-spam / near-duplicate removal ───────────────────
         def _title_similarity(a: str, b: str) -> float:
-            """Simple token-overlap similarity (0–1). No external libs."""
             ta = set(a.lower().split())
             tb = set(b.lower().split())
             if not ta or not tb:
@@ -1947,20 +2062,16 @@ class Engine:
             r_price = float(r.get("item", {}).get("price", 0) or 0)
             r_brand = r.get("brand") or ""
             is_dup  = False
-
             for kept in deduped:
                 k_title = str(kept.get("item", {}).get("title", ""))
                 k_price = float(kept.get("item", {}).get("price", 0) or 0)
                 k_brand = kept.get("brand") or ""
-
-                sim = _title_similarity(r_title, k_title)
+                sim         = _title_similarity(r_title, k_title)
                 price_close = k_price > 0 and abs(r_price - k_price) / k_price <= 0.10
                 same_brand  = r_brand and r_brand == k_brand
-
                 if sim >= 0.80 and price_close and same_brand:
                     is_dup = True
                     break
-
             if not is_dup:
                 deduped.append(r)
 
@@ -1969,10 +2080,10 @@ class Engine:
             print(f"  🧹 Anti-spam removed {removed_dups} near-duplicates")
         candidate_pool = deduped
 
-        # ── Step 6: clustering ───────────────────────────────────────────
+        # ── Step 6: clustering (Task 5 — max 2 per cluster) ─────────────
         def _cluster_key(r: dict) -> str:
             brand    = (r.get("brand") or "unknown").lower().replace(" ", "_")
-            category = (r.get("category") or r.get("context_category") or "other").lower()
+            category = (r.get("category") or "other").lower()
             patterns = r.get("matched_patterns", [])
             main_pat = patterns[0].split("(")[0] if patterns else "generic"
             key      = f"{brand}__{category}__{main_pat}"
@@ -1982,14 +2093,12 @@ class Engine:
         cluster_counts: dict[str, int] = {}
         clustered: list[dict] = []
 
-        # Sort by final_score DESC before clustering so best items win cluster slots
         candidate_pool.sort(key=lambda r: -r.get("final_score", 0))
 
         for r in candidate_pool:
-            ck       = _cluster_key(r)
-            is_grail = r.get("is_grail", False)
-            max_per  = 4 if is_grail else 2
-
+            ck      = _cluster_key(r)
+            # Task 5 spec: max 2 per cluster (grails also capped at 2)
+            max_per = 2
             if cluster_counts.get(ck, 0) < max_per:
                 cluster_counts[ck] = cluster_counts.get(ck, 0) + 1
                 clustered.append(r)
@@ -1998,23 +2107,18 @@ class Engine:
 
         # ── Step 7: sort — GRAIL > BRAND > CHAOS, then final_score DESC ─
         _ENGINE_PRIO = {"GRAIL": 0, "BRAND": 1, "CHAOS": 2}
-
         clustered.sort(key=lambda r: (
             _ENGINE_PRIO.get(r.get("engine", "CHAOS"), 2),
             -r.get("final_score", 0),
         ))
 
-        # ── Step 8: dynamic TOP-N selection ─────────────────────────────
-        grail_items = [r for r in clustered if r.get("is_grail")]
-        chaos_items = [r for r in clustered if r.get("engine") == "CHAOS" and not r.get("is_grail")]
-        other_items = [r for r in clustered if r not in grail_items and r not in chaos_items]
+        # ── Step 8: TOP-5 HARD LIMIT (Task 6) ───────────────────────────
+        # NEVER exceed 5 items per cycle
+        MAX_OUTPUT = 5
+        selected   = clustered[:MAX_OUTPUT]
+        print(f"  🎯 TOP-{MAX_OUTPUT} selection: {len(selected)} items")
 
-        if len(grail_items) >= 5:
-            selected = grail_items[:5] + chaos_items[:3]
-        else:
-            selected = clustered[:7]
-
-        # ── Step 9: assign ranking_position + dedup by item_id ──────────
+        # ── Step 9: assign ranking_position + session dedup ─────────────
         brand_counts: dict[str, int] = {}
         sent_ids: set[str] = set()
         final: list[dict]  = []
@@ -2029,34 +2133,61 @@ class Engine:
             if item_id and item_id in self._alerted_ids and not is_grail:
                 continue
 
-            # Brand cap (max 2 per brand, grails exempt)
+            # Brand cap (max 2 per brand per cycle, grails exempt)
             brand = r.get("brand") or ""
             if brand and not is_grail:
                 if brand_counts.get(brand, 0) >= 2:
                     continue
                 brand_counts[brand] = brand_counts.get(brand, 0) + 1
 
+            # Ensure all Task 7 output fields are present
             r["ranking_position"] = pos
-            r["send"] = r["send_alert"] = True
+            r["send"]             = r["send_alert"] = True
+            r.setdefault("final_score",    0.0)
+            r.setdefault("pattern_score",  0)
+            r.setdefault("matched_patterns", [])
+            r.setdefault("brand_detected", r.get("brand"))
+            r.setdefault("estimated_profit", r.get("profit", 0))
+            r.setdefault("cluster_key",    "unknown__other__generic")
+            r.setdefault("quality_pass",   True)
+            r.setdefault("fast_snipe",     False)
+            r.setdefault("flags", {
+                "rarity":         bool(r.get("has_rarity")),
+                "vintage_signal": bool(r.get("is_vintage") or any(
+                    vs in str(r.get("item", {}).get("title", "")).lower()
+                    for vs in VINTAGE_SIGNALS)),
+                "low_effort":     any("low_effort" in p
+                                      for p in r.get("matched_patterns", [])),
+                "fast_snipe":     r.get("fast_snipe", False),
+                "quality_pass":   r.get("quality_pass", True),
+            })
 
             if item_id:
                 sent_ids.add(item_id)
                 self._alerted_ids.add(item_id)
             final.append(r)
 
-        # Debug summary
+        # Task 7 — mandatory debug output
         if DEBUG_ALERTS:
-            print(f"\n  {'═'*55}")
-            print(f"  RANKING SUMMARY — sending {len(final)} items")
-            print(f"  {'═'*55}")
+            print(f"\n  {'═'*60}")
+            print(f"  RANKING SUMMARY — sending {len(final)}/{len(selected)} items")
+            print(f"  {'═'*60}")
             for r in final:
-                title   = str(r.get("item", {}).get("title", ""))[:40]
-                print(f"  #{r['ranking_position']:2d} [{r.get('engine','?'):5s}] "
+                title    = str(r.get("item", {}).get("title", ""))[:38]
+                flags    = r.get("flags", {})
+                snipe_tag = " ⚡SNIPE" if flags.get("fast_snipe") else ""
+                le_tag    = " ⚠️LE" if flags.get("low_effort") else ""
+                print(f"  #{r['ranking_position']:2d} [{r.get('engine','?'):5s}]{snipe_tag}{le_tag} "
                       f"final={r.get('final_score',0):.0f} "
                       f"profit={r.get('profit',0):.0f} "
                       f"conf={r.get('confidence',0):.1f} "
-                      f"cluster={r.get('cluster_key','?')[:30]} | {title}")
-            print(f"  {'═'*55}\n")
+                      f"pattern={r.get('pattern_score',0)} "
+                      f"brand={r.get('brand_detected') or '—'} "
+                      f"cluster={r.get('cluster_key','?')[:25]}")
+                print(f"         {title}")
+                if r.get("matched_patterns"):
+                    print(f"         patterns={r['matched_patterns'][:2]}")
+            print(f"  {'═'*60}\n")
 
         if len(self._alerted_ids) > 10_000:
             self._alerted_ids = set(list(self._alerted_ids)[-5_000:])
