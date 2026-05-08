@@ -641,6 +641,119 @@ LOW_EFFORT = [
 # Band brand list — synced with BAND_KEYWORDS
 BAND_BRANDS = BAND_KEYWORDS[:]   # same list, different name for legacy compatibility
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  🚫 FAKE VINTAGE DETECTION
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Fast fashion brands that produce cheap licensed band reprints
+FAST_FASHION_BRANDS = {
+    "h&m", "hm", "bershka", "pull&bear", "pull bear",
+    "zara", "primark", "cropp", "sinsay", "house",
+    "c&a", "new yorker", "divided", "topshop",
+    "shein", "fashion nova", "urban outfitters basic",
+}
+
+# Signals that indicate a genuine vintage band tee
+AUTHENTICITY_SIGNALS = [
+    "single stitch", "made in usa", "made in u.s.a",
+    "faded", "90s", "80s", "70s", "giant", "giant tag",
+    "brockum", "screen stars", "fruit of the loom usa",
+    "hanes beefy", "all over print", "aop", "tour",
+    "concert tee", "concert shirt", "original",
+    "deadstock", "nos", "1st press", "first press",
+]
+
+# Reprint/fast-fashion signals that invalidate band tee authenticity
+REPRINT_SIGNALS = [
+    "primark", "h&m", "hm brand", "modern fit", "slim fit",
+    "new collection", "licensed tee", "licensed product",
+    "officially licensed", "divided", "fast fashion",
+    "high street", "retail tag", "store tag",
+]
+
+
+def detect_fake_vintage(
+    title: str,
+    brand: str | None,
+    band: str | None,
+    confidence: float,
+    pattern_score: int,
+    is_grail: bool,
+) -> dict:
+    """
+    Detects fake/reprint vintage band tees.
+
+    Returns dict with:
+      - is_fake_vintage  : bool
+      - confidence       : adjusted float
+      - pattern_score    : adjusted int
+      - is_grail         : adjusted bool
+      - reject           : bool  (confidence dropped below 5)
+      - reason           : str
+      - cap_engine       : str | None  (force max engine tier)
+      - cap_confidence   : float | None
+    """
+    t = title.lower()
+    result = {
+        "is_fake_vintage": False,
+        "confidence":      confidence,
+        "pattern_score":   pattern_score,
+        "is_grail":        is_grail,
+        "reject":          False,
+        "reason":          None,
+        "cap_engine":      None,
+        "cap_confidence":  None,
+    }
+
+    if not band:
+        return result   # nie jest band tee → nie sprawdzamy
+
+    # ── Rule 1: band + fast fashion brand → fake reprint ─────────────
+    brand_lower = (brand or "").lower()
+    is_ff_brand = brand_lower in FAST_FASHION_BRANDS or \
+                  any(ff in t for ff in FAST_FASHION_BRANDS)
+
+    if is_ff_brand:
+        result["is_fake_vintage"]  = True
+        result["is_grail"]         = False
+        result["confidence"]       = confidence - 4.0
+        result["pattern_score"]    = max(pattern_score - 3, 0)
+        result["reason"]           = "fake_vintage_fast_fashion"
+        if result["confidence"] < 5.0:
+            result["reject"] = True
+        if DEBUG_ALERTS:
+            print(f"  [FAKE_VINTAGE] {result['reason']} "
+                  f"conf:{confidence:.1f}→{result['confidence']:.1f} | {title[:50]}")
+        return result
+
+    # ── Rule 2: band tee — require authenticity signal ────────────────
+    has_auth = any(a in t for a in AUTHENTICITY_SIGNALS)
+
+    if not has_auth:
+        # No authenticity signal → cap engine to CHAOS, cap confidence to 6.0
+        result["cap_engine"]      = "CHAOS"
+        result["cap_confidence"]  = 6.0
+        result["confidence"]      = min(confidence, 6.0)
+        result["reason"]          = "band_tee_no_auth_signal"
+        if DEBUG_ALERTS:
+            print(f"  [FAKE_VINTAGE] {result['reason']} "
+                  f"→ cap CHAOS/conf≤6.0 | {title[:50]}")
+        return result
+
+    # ── Rule 3: band + reprint signal → confidence penalty ───────────
+    has_reprint = any(r in t for r in REPRINT_SIGNALS)
+
+    if has_reprint:
+        result["is_grail"]   = False
+        result["confidence"] = confidence - 3.0
+        result["reason"]     = "band_tee_reprint_signal"
+        if DEBUG_ALERTS:
+            print(f"  [FAKE_VINTAGE] {result['reason']} "
+                  f"conf:{confidence:.1f}→{result['confidence']:.1f} | {title[:50]}")
+        return result
+
+    return result
+
 
 def detect_band(title: str) -> str | None:
     """
@@ -1826,6 +1939,48 @@ class Engine:
                 "profit": 0, "confidence": 0,
                 "item": item, "send_alert": False,
             }
+
+        # ── FAKE VINTAGE DETECTION (before final decision) ────────────────
+        try:
+            _fv_features = extract_item_features(item)
+        except Exception:
+            _fv_features = {}
+        band_detected = best.get("band") or _fv_features.get("band")
+        fake_result   = detect_fake_vintage(
+            title         = title,
+            brand         = brand_name,
+            band          = band_detected,
+            confidence    = confidence,
+            pattern_score = best.get("pattern_score", 0),
+            is_grail      = is_grail,
+        )
+
+        if fake_result["reject"]:
+            # confidence dropped below 5 after penalty → hard reject
+            return {
+                **_skip_base,
+                "reason":          fake_result["reason"],
+                "confidence":      fake_result["confidence"],
+                "is_fake_vintage": True,
+                "band":            band_detected,
+            }
+
+        # Apply adjustments from fake vintage check
+        if fake_result["is_fake_vintage"] or fake_result["reason"]:
+            confidence    = fake_result["confidence"]
+            is_grail      = fake_result["is_grail"]
+            best["confidence"]    = confidence
+            best["is_grail"]      = is_grail
+            best["pattern_score"] = fake_result["pattern_score"]
+            best["is_fake_vintage"] = fake_result["is_fake_vintage"]
+            best["fake_reason"]     = fake_result["reason"]
+
+            # Cap engine tier if required (band tee without auth signal)
+            if fake_result["cap_engine"] == "CHAOS":
+                best_name     = "CHAOS"
+                best["engine"] = "CHAOS"
+                confidence    = fake_result["cap_confidence"] or confidence
+                best["confidence"] = confidence
 
         # ── FINAL DECISION RULES (spec: single decision, strict hierarchy) ──
         pattern_score   = best.get("pattern_score", 0)
