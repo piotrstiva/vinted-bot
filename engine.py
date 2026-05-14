@@ -809,6 +809,102 @@ ENGINE_PRIORITY = {
     "CHAOS": 1,
 }
 
+DESIRABLE_OUTDOOR = [
+    "gore-tex", "goretex", "gtx", "summit series", "hyvent",
+    "dryvent", "nuptse", "mountain jacket", "shell jacket",
+    "beta ar", "alpha sv", "atom lt", "technical jacket",
+    "softshell", "hard shell", "windstopper", "polartec",
+    "xt-6", "xt6", "acs pro", "speedcross",
+]
+
+DESIRABLE_NIKE = [
+    "acg", "nike acg", "tn", "air max 95", "air max plus",
+    "shox", "vintage nike", "90s nike", "00s nike",
+    "center swoosh", "mini swoosh", "spellout", "nylon jacket",
+]
+
+DESIRABLE_ADIDAS = [
+    "spezial", "samba", "gazelle", "equipment", "eqt",
+    "adidas adventure", "adidas originals", "trefoil",
+    "football shirt", "track jacket", "vintage adidas", "90s adidas",
+]
+
+DESIRABLE_DENIM = [
+    "bootcut", "flare", "flared", "low rise", "baggy",
+    "selvedge", "raw denim", "made in usa", "big e",
+    "orange tab", "japanese denim", "jorts",
+]
+
+DESIRABLE_VINTAGE = [
+    "single stitch", "made in usa", "all over print", "aop",
+    "screen stars", "brockum", "giant tag", "liquid blue",
+    "fruit of the loom usa", "hanes beefy", "deadstock",
+    "tour", "back print", "cracked print", "paper thin",
+]
+
+DESIRABLE_HARLEY = [
+    "sturgis", "daytona", "bike week", "flame", "skull",
+    "eagle", "3d emblem", "waffle", "thermal", "longsleeve",
+    "single stitch", "made in usa", "faded", "distressed",
+]
+
+DESIRABLE_DESIGNER = [
+    "made in italy", "archive", "runway", "sample",
+    "mesh", "asymmetrical", "all over print", "aop",
+    "silk", "leather", "mohair", "wool", "cashmere",
+    "gaultier", "helmut lang", "jil sander", "margiela",
+    "cavalli", "dolce gabbana", "d&g", "yohji", "issey miyake",
+    "comme des garcons", "vivienne westwood",
+]
+
+GENERIC_LOW_DESIRABILITY = [
+    "basic", "plain", "simple", "casual", "regular fit",
+    "everyday", "soft girl", "clean girl", "coquette",
+    "aesthetic", "vintage style", "retro style",
+    "ordinary", "classic basic",
+]
+
+CONDITIONAL_STRONG_BRANDS = [
+    "nike", "adidas", "asics", "salomon",
+    "the north face", "tnf", "columbia",
+    "helly hansen", "puma", "reebok",
+]
+
+DESIRABLE_CARHARTT = [
+    "detroit", "detroit jacket", "active jacket", "active jac",
+    "michigan coat", "chore coat", "santa fe", "duck canvas",
+    "duck jacket", "duck vest", "workwear jacket", "double knee",
+    "double knees", "single knee", "aviation pant", "simple pant",
+    "master pant", "cargo pant", "cargo pants", "carpenter pant",
+    "carpenter pants", "painter pant", "painter pants", "work pant",
+    "work pants", "vest", "hoodie", "crewneck", "sweatshirt",
+    "zip hoodie", "half zip", "quarter zip",
+]
+
+CARHARTT_WEAK_ITEMS = [
+    "t-shirt", "tshirt", "tee", "koszulka",
+    "basic tee", "basic t-shirt", "basic tshirt",
+]
+
+CARHARTT_GOOD_WAIST_SIZES = [
+    "w30", "w31", "w32", "w33", "w34", "w36",
+    "30x30", "30x32", "31x30", "31x32",
+    "32x30", "32x32", "32x34",
+    "33x30", "33x32", "33x34",
+    "34x30", "34x32", "34x34",
+    "36x30", "36x32", "36x34",
+]
+
+CARHARTT_GOOD_ALPHA_SIZES = [
+    "m", "medium", "l", "large", "xl", "x-large", "extra large",
+]
+
+CARHARTT_BAD_SMALL_SIZES = [
+    "xs", "extra small", "s", "small",
+    "w24", "w25", "w26", "w27", "w28", "w29",
+    "24x", "25x", "26x", "27x", "28x", "29x",
+]
+
 
 def _clip_score(value: float, low: float = 0.0, high: float = 100.0) -> float:
     return max(low, min(high, value))
@@ -816,6 +912,28 @@ def _clip_score(value: float, low: float = 0.0, high: float = 100.0) -> float:
 
 def _keyword_hits_lower(title_l: str, keywords: list[str]) -> list[str]:
     return [k for k in keywords if k.lower() in title_l]
+
+
+def _token_or_phrase_hit(title_l: str, keyword: str) -> bool:
+    kw_l = keyword.lower()
+    if len(kw_l) <= 2 and kw_l.isalpha():
+        return re.search(rf"(?<![a-z0-9]){re.escape(kw_l)}(?![a-z0-9])", title_l) is not None
+    if kw_l.endswith("x"):
+        return re.search(rf"(?<![a-z0-9]){re.escape(kw_l)}\d*", title_l) is not None
+    return kw_l in title_l
+
+
+def _first_hit(title_l: str, keywords: list[str]) -> str | None:
+    for keyword in keywords:
+        if _token_or_phrase_hit(title_l, keyword):
+            return keyword
+    return None
+
+
+def _add_unique(target: list[str], values: list[str]):
+    for value in values:
+        if value not in target:
+            target.append(value)
 
 
 def _market_entry_for_signal(db: MarketDB, brand: str | None, category: str | None) -> dict | None:
@@ -1062,6 +1180,181 @@ def apply_signal_profile(result: dict, profile: dict) -> dict:
     return result
 
 
+def compute_desirability_score(item: dict, result: dict) -> dict:
+    item = item or {}
+    result = result or {}
+    title = str(item.get("title") or "")
+    title_l = title.lower()
+    features = extract_item_features(item)
+    brand = (result.get("brand") or result.get("brand_detected") or features.get("brand") or "")
+    brand_l = brand.lower()
+    category = result.get("category") or features.get("category") or ""
+    price = float(item.get("price") or 0)
+    pattern_score = int(result.get("pattern_score", 0) or 0)
+    signal_quality = float(result.get("signal_quality_score", 0) or 0)
+    auth_hits = result.get("authenticity_hits") or []
+    rarity_score = float(result.get("rarity_score", 0) or 0)
+
+    score = 10
+    desirable_signals: list[str] = []
+    generic_penalties: list[str] = []
+
+    def add_signal(name: str, points: int):
+        nonlocal score
+        score += points
+        if name not in desirable_signals:
+            desirable_signals.append(name)
+
+    def add_penalty(name: str, points: int):
+        nonlocal score
+        score -= points
+        if name not in generic_penalties:
+            generic_penalties.append(name)
+
+    outdoor_brands = {"salomon", "the north face", "tnf", "columbia", "helly hansen", "arc'teryx", "arcteryx", "arc teryx", "patagonia"}
+    denim_brands = {"levi's", "levis", "levi", "diesel", "wrangler", "carhartt", "carhartt wip", "true religion", "g-star", "g star"}
+    designer_brands = LUXURY_BRANDS | {"gaultier", "helmut lang", "jil sander", "margiela", "cavalli", "dolce gabbana", "d&g", "yohji", "issey miyake", "comme des garcons", "vivienne westwood"}
+
+    if brand_l in outdoor_brands:
+        hits = _keyword_hits_lower(title_l, DESIRABLE_OUTDOOR)
+        if hits:
+            add_signal(f"outdoor:{hits[0]}", 30)
+            add_signal("strong_brand_desirable_category", 10)
+    if brand_l == "nike":
+        hits = _keyword_hits_lower(title_l, DESIRABLE_NIKE)
+        if hits:
+            add_signal(f"nike:{hits[0]}", 30)
+            add_signal("real_model_line", 20)
+    if brand_l == "adidas":
+        hits = _keyword_hits_lower(title_l, DESIRABLE_ADIDAS)
+        if hits:
+            add_signal(f"adidas:{hits[0]}", 30)
+            add_signal("real_model_line", 20)
+    if brand_l in denim_brands or category in ("jeans", "cargo"):
+        hits = _keyword_hits_lower(title_l, DESIRABLE_DENIM)
+        if hits:
+            add_signal(f"denim:{hits[0]}", 30)
+    vintage_hits = _keyword_hits_lower(title_l, DESIRABLE_VINTAGE)
+    if vintage_hits or auth_hits:
+        add_signal(f"vintage:{(vintage_hits or auth_hits)[0]}", 20)
+    if "harley" in brand_l or "harley" in title_l:
+        hits = _keyword_hits_lower(title_l, DESIRABLE_HARLEY)
+        if hits:
+            add_signal(f"harley:{hits[0]}", 30)
+    if brand_l in designer_brands or any(d in title_l for d in DESIRABLE_DESIGNER):
+        hits = _keyword_hits_lower(title_l, DESIRABLE_DESIGNER)
+        if hits:
+            add_signal(f"designer:{hits[0]}", 30)
+            add_signal("designer_material_archive", 20)
+
+    if rarity_score >= 55 or _keyword_hits_lower(title_l, RARITY_KEYWORDS):
+        add_signal("rarity_signal", 15)
+
+    generic_hits = _keyword_hits_lower(title_l, GENERIC_LOW_DESIRABILITY)
+    for hit in generic_hits[:2]:
+        add_penalty(f"generic:{hit}", 30)
+
+    fast_fashion = bool(
+        (brand_l and brand_l in FAST_FASHION_BRANDS)
+        or any(ff in title_l for ff in FAST_FASHION_BRANDS)
+    )
+    if fast_fashion:
+        add_penalty("fast_fashion", 25)
+
+    # Carhartt-specific desirability.
+    is_carhartt = "carhartt" in brand_l or "carhartt" in title_l
+    carhartt_is_pants = bool(is_carhartt and (
+        category in ("jeans", "cargo")
+        or any(k in title_l for k in ["pant", "pants", "trouser", "trousers", "spodnie", "cargo", "jeans", "work pant", "carpenter"])
+    ))
+    carhartt_is_hoodie = bool(is_carhartt and any(k in title_l for k in [
+        "hoodie", "crewneck", "sweatshirt", "zip hoodie", "half zip", "quarter zip", "bluza",
+    ]))
+    carhartt_is_basic_tee = bool(is_carhartt and any(k in title_l for k in CARHARTT_WEAK_ITEMS))
+
+    if is_carhartt:
+        model_hit = _first_hit(title_l, DESIRABLE_CARHARTT)
+        if model_hit:
+            add_signal("carhartt_desirable_item", 25)
+
+        if carhartt_is_basic_tee and not model_hit:
+            add_penalty("carhartt_basic_tee", 25)
+
+        if carhartt_is_pants:
+            small_hit = _first_hit(title_l, CARHARTT_BAD_SMALL_SIZES)
+            waist_hit = _first_hit(title_l, CARHARTT_GOOD_WAIST_SIZES)
+            alpha_hit = _first_hit(title_l, CARHARTT_GOOD_ALPHA_SIZES)
+            if small_hit:
+                generic_penalties.append("carhartt_small_pants_size")
+                result["carhartt_size_skip"] = True
+                result["carhartt_size_hit"] = small_hit
+                if DEBUG_ALERTS:
+                    print(f"  [CARHARTT_SIZE_SKIP] size_hit={small_hit} reason=small_size title={title[:60]}")
+            elif waist_hit:
+                add_signal("carhartt_good_waist_size", 20)
+                result["carhartt_size_type"] = "waist"
+                result["carhartt_size_hit"] = waist_hit
+                if DEBUG_ALERTS:
+                    print(f"  [CARHARTT_SIZE_PASS] size_type=waist size_hit={waist_hit} boost=20 title={title[:60]}")
+            elif alpha_hit:
+                add_signal("carhartt_good_alpha_size", 18)
+                result["carhartt_size_type"] = "alpha"
+                result["carhartt_size_hit"] = alpha_hit
+                if DEBUG_ALERTS:
+                    print(f"  [CARHARTT_SIZE_PASS] size_type=alpha size_hit={alpha_hit} boost=18 title={title[:60]}")
+            elif DEBUG_ALERTS:
+                print(f"  [CARHARTT_SIZE_PASS] size_type=none size_hit=None boost=0 title={title[:60]}")
+
+        if carhartt_is_hoodie:
+            if price <= 140:
+                add_signal("carhartt_hoodie_good_price", 15)
+            elif price > 250:
+                add_penalty("carhartt_hoodie_price_too_high", 10)
+
+        if DEBUG_ALERTS:
+            print(f"  [CARHARTT_SCORE] desirability={_clip_score(score):.0f} "
+                  f"signals={desirable_signals} penalties={generic_penalties} title={title[:60]}")
+
+    if brand_l in STRONG_BRANDS and not desirable_signals:
+        add_penalty("strong_brand_no_desirable_signal", 20)
+
+    conditional_brand = brand_l in CONDITIONAL_STRONG_BRANDS
+    is_generic_strong_brand = bool(conditional_brand and not desirable_signals)
+    if is_generic_strong_brand:
+        add_penalty("conditional_strong_brand_no_desirable_signal", 20)
+        score = min(score, 45)
+    elif brand_l in STRONG_BRANDS and desirable_signals:
+        add_signal("strong_brand_desirable_category", 10)
+
+    score = round(_clip_score(score), 2)
+    if DEBUG_ALERTS:
+        print(f"  [DESIRABILITY] score={score:.0f} signals={desirable_signals} "
+              f"generic={generic_penalties} conditional_brand={conditional_brand} title={title[:60]}")
+
+    return {
+        "desirability_score": score,
+        "desirable_signals": desirable_signals,
+        "generic_penalties": generic_penalties,
+        "is_generic_strong_brand": is_generic_strong_brand,
+        "conditional_strong_brand": conditional_brand,
+        "carhartt_is_basic_tee": carhartt_is_basic_tee,
+        "carhartt_is_pants": carhartt_is_pants,
+        "carhartt_is_hoodie": carhartt_is_hoodie,
+        "carhartt_size_skip": bool(result.get("carhartt_size_skip")),
+        "carhartt_size_hit": result.get("carhartt_size_hit"),
+        "carhartt_size_type": result.get("carhartt_size_type"),
+    }
+
+
+def apply_desirability_profile(result: dict, profile: dict) -> dict:
+    result.update(profile)
+    if result.get("is_generic_strong_brand"):
+        result["confidence"] = min(float(result.get("confidence", 0) or 0), 6.0)
+        result["signal_quality_score"] = min(float(result.get("signal_quality_score", 0) or 0), 60.0)
+        result["desirability_score"] = min(float(result.get("desirability_score", 0) or 0), 45.0)
+    return result
+
+
 def enforce_signal_quality(result: dict) -> dict:
     """
     Final hard gate after Signal Await profile is applied.
@@ -1072,10 +1365,16 @@ def enforce_signal_quality(result: dict) -> dict:
     quality = float(result.get("signal_quality_score", 0) or 0)
     tier = result.get("tier") or result.get("signal_tier") or "TIER_C"
     profit = float(result.get("profit", 0) or result.get("estimated_profit", 0) or 0)
+    price = float(item.get("price") or 0)
     confidence = float(result.get("confidence", 0) or 0)
     engine = result.get("engine", "") or ""
     await_state = result.get("await_state", {}) or {}
     protection = result.get("protection_reasons", []) or []
+    desirability = float(result.get("desirability_score", 0) or 0)
+    desirable_signals = result.get("desirable_signals", []) or []
+    generic_penalties = result.get("generic_penalties", []) or []
+    pattern_score = int(result.get("pattern_score", 0) or 0)
+    brand = result.get("brand") or result.get("brand_detected") or ""
 
     result["tier"] = tier
     result["signal_tier"] = result.get("signal_tier") or tier
@@ -1091,6 +1390,41 @@ def enforce_signal_quality(result: dict) -> dict:
                   f"await={await_state.get('hold', False)} protection={protection} "
                   f"title={title}")
         return result
+
+    def _desirability_block(reason: str) -> dict:
+        if DEBUG_ALERTS:
+            print(f"  [DESIRABILITY_BLOCK] reason={reason} brand={brand or '-'} "
+                  f"score={desirability:.0f} signals={desirable_signals} title={title}")
+        return _block(reason)
+
+    if result.get("carhartt_size_skip"):
+        return _desirability_block("carhartt_pants_small_size_skip")
+
+    if result.get("carhartt_is_basic_tee"):
+        strong_auth = bool(
+            result.get("auth_state") == "strong"
+            or result.get("authenticity_hits")
+            or any(v in title.lower() for v in DESIRABLE_VINTAGE)
+        )
+        if not (pattern_score >= 5 or quality >= 80 or (price <= 40 and strong_auth)):
+            if DEBUG_ALERTS:
+                print(f"  [CARHARTT_BASIC_TEE_BLOCK] reason=basic_tee_no_strong_pattern title={title}")
+            return _desirability_block("carhartt_basic_tee_blocked")
+
+    if result.get("is_generic_strong_brand"):
+        if not (profit >= 100 and quality >= 75 and desirability >= 60):
+            return _desirability_block("generic_strong_brand_blocked")
+
+    if generic_penalties and not desirable_signals:
+        return _desirability_block("generic_item_no_desirable_signal")
+
+    if pattern_score == 0 and desirability < 60:
+        if not (engine == "GRAIL" and tier in ("TIER_S", "TIER_A")):
+            return _desirability_block("no_pattern_low_desirability")
+
+    if engine == "CHAOS":
+        if not (desirability >= 65 or pattern_score >= 5 or tier == "TIER_S"):
+            return _desirability_block("chaos_low_desirability")
 
     if tier == "TIER_C":
         return _block("tier_c_blocked")
@@ -1126,6 +1460,10 @@ def enforce_signal_quality(result: dict) -> dict:
         grail_exception = tier == "TIER_S" and profit >= 40
         if not (grail_allowed or grail_exception):
             return _block("grail_quality_floor")
+
+    if DEBUG_ALERTS and result.get("send_alert"):
+        print(f"  [DESIRABILITY_PASS] brand={brand or '-'} score={desirability:.0f} "
+              f"signals={desirable_signals} title={title}")
 
     return result
 
@@ -2440,6 +2778,8 @@ class Engine:
         for r in all_scored:
             profile = build_signal_profile(r, self.db)
             apply_signal_profile(r, profile)
+            desirability = compute_desirability_score(r.get("item", {}), r)
+            apply_desirability_profile(r, desirability)
             enforce_signal_quality(r)
 
         def _quality_pass(r: dict) -> tuple[bool, str]:
@@ -2536,13 +2876,15 @@ class Engine:
             conf = r.get("confidence", 0)
             signal = r.get("signal_quality_score", 0)
             rarity = r.get("rarity_score", r.get("grail_score", 0) * 10)
+            desirability = r.get("desirability_score", 0)
             tier = r.get("signal_tier", r.get("tier", "TIER_C"))
             tier_bonus = SIGNAL_TIER_BOOSTS.get(tier, -40)
             score = (
-                profit * 0.30
-                + (conf * 10) * 0.20
-                + signal * 0.35
+                profit * 0.25
+                + (conf * 10) * 0.15
+                + signal * 0.30
                 + rarity * 0.15
+                + desirability * 0.15
                 + tier_bonus
             )
             r["tier_bonus"] = tier_bonus
@@ -2566,6 +2908,7 @@ class Engine:
                 print(f"  [SIGNAL_PASS] engine={r.get('engine','?')} "
                       f"tier={r.get('tier') or r.get('signal_tier')} "
                       f"quality={r.get('signal_quality_score',0):.0f} "
+                      f"desirability={r.get('desirability_score',0):.0f} "
                       f"profit={profit_val:.0f} conf={r.get('confidence',0):.1f} "
                       f"final={r.get('final_score',0):.0f} title={title}")
 
@@ -2772,6 +3115,7 @@ class Engine:
                       f"engine={r.get('engine','?')} tier={r.get('tier') or r.get('signal_tier')} "
                       f"final={r.get('final_score',0):.0f} "
                       f"quality={r.get('signal_quality_score',0):.0f} "
+                      f"desirability={r.get('desirability_score',0):.0f} "
                       f"brand={r.get('brand_detected') or r.get('brand') or '-'} "
                       f"cluster={r.get('cluster_key','?')[:25]} title={title}")
                 if r.get("matched_patterns"):
