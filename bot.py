@@ -1619,6 +1619,14 @@ SEARCHES = [
 #  💾 PAMIĘĆ  (z automatycznym czyszczeniem)
 # ─────────────────────────────────────────
 SEEN_FILE      = "seen_items.json"
+DATA_DIR       = os.getenv("DATA_DIR", "/data/vinted_bot")
+try:
+    os.makedirs(DATA_DIR, exist_ok=True)
+except Exception as e:
+    print(f"[DEDUPE] data_dir_unavailable path={DATA_DIR} err={e}")
+SENT_ALERTS_FILE = os.path.join(DATA_DIR, "sent_alerts.json")
+SENT_ALERT_TTL_HOURS = int(os.getenv("SENT_ALERT_TTL_HOURS", "24"))
+_sent_alerts_dirty = False
 # FIX: 30 dni → 6h — oferty na Vinted są aktywne przez tygodnie,
 # seen musi wygasać żeby bot procesował je ponownie gdy cena spadnie
 SEEN_MAX_HOURS = 6
@@ -1665,6 +1673,186 @@ def save_seen(seen):
 # ─────────────────────────────────────────
 #  📤 TELEGRAM
 # ─────────────────────────────────────────
+def _normalize_dedupe_title(title: str) -> str:
+    title = str(title or "").lower()
+    title = re.sub(r"[^\w\s]", " ", title, flags=re.UNICODE)
+    title = re.sub(r"\s+", " ", title).strip()
+    return title
+
+
+def get_item_dedupe_key(item: dict) -> str:
+    item = item or {}
+    for field in ("id", "item_id", "vinted_id"):
+        val = item.get(field)
+        if val not in (None, ""):
+            return f"id:{val}"
+
+    url = str(item.get("url") or item.get("link") or "")
+    ids = re.findall(r"\d+", url)
+    if ids:
+        return f"url_id:{max(ids, key=len)}"
+
+    title = _normalize_dedupe_title(item.get("title", ""))
+    price = item.get("price", "")
+    try:
+        price = f"{float(price):.2f}"
+    except Exception:
+        price = str(price or "")
+    seller = item.get("seller_id") or item.get("seller_name") or item.get("user_id") or ""
+    return f"fallback:{title}|{price}|{seller}"
+
+
+def load_sent_alerts() -> dict:
+    if not os.path.exists(SENT_ALERTS_FILE):
+        print("[DEDUPE_LOAD] count=0")
+        return {}
+    try:
+        with open(SENT_ALERTS_FILE, "r") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            print("[DEDUPE_LOAD] malformed=start_empty")
+            return {}
+        print(f"[DEDUPE_LOAD] count={len(data)}")
+        return data
+    except Exception as e:
+        print(f"[DEDUPE_LOAD] error={e} start_empty")
+        return {}
+
+
+def save_sent_alerts(force=False):
+    global _sent_alerts_dirty
+    if not force and not _sent_alerts_dirty:
+        return
+    try:
+        tmp = SENT_ALERTS_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(SENT_ALERTS, f, indent=2)
+        os.replace(tmp, SENT_ALERTS_FILE)
+        _sent_alerts_dirty = False
+    except Exception as e:
+        print(f"[DEDUPE_SAVE] error={e}")
+
+
+def cleanup_sent_alerts(ttl_hours=SENT_ALERT_TTL_HOURS):
+    global _sent_alerts_dirty
+    now_ts = time.time()
+    cutoff = now_ts - (ttl_hours * 3600)
+    before = len(SENT_ALERTS)
+    expired = [
+        key for key, data in SENT_ALERTS.items()
+        if float(data.get("first_sent_ts") or data.get("last_seen_ts") or 0) < cutoff
+    ]
+    for key in expired:
+        SENT_ALERTS.pop(key, None)
+    removed = before - len(SENT_ALERTS)
+    if removed:
+        _sent_alerts_dirty = True
+    print(f"[DEDUPE_CLEANUP] removed={removed}")
+
+
+def already_sent(dedupe_key: str) -> bool:
+    global _sent_alerts_dirty
+    if not dedupe_key:
+        return False
+    data = SENT_ALERTS.get(dedupe_key)
+    if not data:
+        return False
+    cutoff = time.time() - (SENT_ALERT_TTL_HOURS * 3600)
+    first_sent = float(data.get("first_sent_ts") or data.get("last_seen_ts") or 0)
+    if first_sent < cutoff:
+        SENT_ALERTS.pop(dedupe_key, None)
+        _sent_alerts_dirty = True
+        return False
+    data["last_seen_ts"] = time.time()
+    _sent_alerts_dirty = True
+    return True
+
+
+def mark_sent(item: dict, result: dict, search_name: str | None = None):
+    global _sent_alerts_dirty
+    item = item or {}
+    result = result or {}
+    key = get_item_dedupe_key(item)
+    now_ts = time.time()
+    meta = item.get("_search_meta") or {}
+    search_name = search_name or meta.get("name") or "unknown"
+    existing = SENT_ALERTS.get(key, {})
+    source_searches = set(existing.get("source_searches") or [])
+    engines = set(existing.get("engines") or [])
+    if search_name:
+        source_searches.add(search_name)
+    for eng in (result.get("_merged_engines") or [result.get("engine")]):
+        if eng:
+            engines.add(eng)
+    SENT_ALERTS[key] = {
+        "title": item.get("title", ""),
+        "price": item.get("price"),
+        "brand": result.get("brand") or result.get("brand_detected"),
+        "category": result.get("category"),
+        "url": item.get("url") or item.get("link"),
+        "first_sent_ts": existing.get("first_sent_ts", now_ts),
+        "last_seen_ts": now_ts,
+        "count": int(existing.get("count", 0)) + 1,
+        "source_searches": sorted(source_searches),
+        "engines": sorted(engines),
+        "final_score": result.get("final_score"),
+        "signal_quality_score": result.get("signal_quality_score"),
+        "tier": result.get("tier") or result.get("signal_tier"),
+    }
+    _sent_alerts_dirty = True
+    print(f"[DEDUPE_MARK] sent key={key} engine={result.get('engine')} title={str(item.get('title',''))[:60]}")
+    save_sent_alerts()
+
+
+ENGINE_PRIORITY = {"GRAIL": 3, "BRAND": 2, "CHAOS": 1}
+
+
+def dedupe_results_by_item(results: list[dict]) -> list[dict]:
+    best_by_key: dict[str, dict] = {}
+    for result in results or []:
+        item = result.get("item", {}) or {}
+        key = get_item_dedupe_key(item)
+        current = best_by_key.get(key)
+        if not current:
+            best_by_key[key] = result
+            continue
+        cur_rank = (
+            ENGINE_PRIORITY.get(current.get("engine"), 0),
+            float(current.get("final_score", 0) or 0),
+        )
+        new_rank = (
+            ENGINE_PRIORITY.get(result.get("engine"), 0),
+            float(result.get("final_score", 0) or 0),
+        )
+        if new_rank > cur_rank:
+            kept, dropped = result, current
+            best_by_key[key] = result
+        else:
+            kept, dropped = current, result
+        kept["_merged_engines"] = sorted(set(
+            (kept.get("_merged_engines") or [kept.get("engine")])
+            + (dropped.get("_merged_engines") or [dropped.get("engine")])
+        ))
+        print(f"[RESULT_DEDUPE] key={key} kept={kept.get('engine')} dropped={dropped.get('engine')}")
+    return list(best_by_key.values())
+
+
+def filter_unsent_items(items: list[dict]) -> list[dict]:
+    filtered = []
+    batch_keys = set()
+    for item in items or []:
+        key = get_item_dedupe_key(item)
+        if key in batch_keys:
+            print(f"[DEDUPE_SKIP] duplicate_in_batch key={key} title={str(item.get('title',''))[:60]}")
+            continue
+        if already_sent(key):
+            print(f"[DEDUPE_SKIP] already_sent key={key} title={str(item.get('title',''))[:60]}")
+            continue
+        batch_keys.add(key)
+        filtered.append(item)
+    return filtered
+
+
 def get_vinted_thumb(item_url, item_id):
     return None
 
@@ -1693,12 +1881,15 @@ def send_message(text, photo_url=None, item_link=None):
 
     try:
         sent = False
+        last_response = None
 
         if photo_url:
             data = {"chat_id": CHAT_ID, "photo": photo_url, "caption": clean[:1024]}
             if reply_markup:
                 data["reply_markup"] = reply_markup
             r = requests.post(f"{tg_base}/sendPhoto", data=data, timeout=15)
+            last_response = r
+            print(f"[TELEGRAM] status={r.status_code} body={r.text[:200]}")
             if r.status_code == 200:
                 sent = True
             elif r.status_code == 429:
@@ -1713,14 +1904,20 @@ def send_message(text, photo_url=None, item_link=None):
             if reply_markup:
                 data["reply_markup"] = reply_markup
             r = requests.post(f"{tg_base}/sendMessage", data=data, timeout=10)
+            last_response = r
+            print(f"[TELEGRAM] status={r.status_code} body={r.text[:200]}")
             if r.status_code == 429:
                 time.sleep(5)
-                requests.post(f"{tg_base}/sendMessage", data=data, timeout=10)
+                r = requests.post(f"{tg_base}/sendMessage", data=data, timeout=10)
+                last_response = r
+                print(f"[TELEGRAM] status={r.status_code} body={r.text[:200]}")
 
         _last_tg_send = time.time()
+        return bool(last_response and last_response.status_code == 200)
 
     except Exception as e:
         print(f"Błąd wysyłania: {e}")
+        return False
 
 # ─────────────────────────────────────────
 #  💰 WYCIĄGANIE CENY
@@ -3375,6 +3572,10 @@ if _before != _after:
 else:
     print(f"💾 Seen załadowany: {_after} wpisów (TTL=6h)")
 
+SENT_ALERTS = load_sent_alerts()
+cleanup_sent_alerts()
+save_sent_alerts(force=True)
+
 market_prices = {}
 cycle         = 0
 
@@ -3517,6 +3718,12 @@ while True:
             # Req 6 — 10% chance: first page only (early stop within search)
             items_to_take = 1 if random.random() < 0.10 else MAX_ALERTS_PER_SEARCH
             for item in new_items[:items_to_take]:
+                item["_search_meta"] = {
+                    "football_mode":  search.get("football_mode"),
+                    "lego_sw_mode":   search.get("lego_sw_mode"),
+                    "carhartt_mode":  search.get("carhartt_mode"),
+                    "name":           search.get("name"),
+                }
                 if is_special:
                     special_items.append((search, item))
                 else:
@@ -3545,7 +3752,8 @@ while True:
             all_new_items.append(item)
 
         if engine and all_new_items:
-            engine_results = engine.run_cycle_strict(all_new_items, market_prices)
+            all_new_items = filter_unsent_items(all_new_items)
+            engine_results = dedupe_results_by_item(engine.run_cycle_strict(all_new_items, market_prices))
 
             for result in engine_results:
                 if sent_this_cycle >= MAX_PER_CYCLE:
@@ -3556,10 +3764,18 @@ while True:
                 profit = result.get("profit", 0)
                 conf   = result.get("confidence", 0)
                 reason = result.get("reason", "")
+                dedupe_key = get_item_dedupe_key(item)
+                if already_sent(dedupe_key):
+                    print(f"[DEDUPE_BLOCK] duplicate_before_send key={dedupe_key} title={str(item.get('title',''))[:60]}")
+                    continue
 
                 photo     = item.get("photo") or get_item_photo(item["id"], item.get("link", ""))
                 alert_msg = engine.format_alert(result)
-                send_message(alert_msg, photo_url=photo, item_link=item.get("link"))
+                sent_ok = send_message(alert_msg, photo_url=photo, item_link=item.get("link"))
+                if not sent_ok:
+                    print(f"[TELEGRAM] send_failed key={dedupe_key} title={str(item.get('title',''))[:60]}")
+                    continue
+                mark_sent(item, result, (item.get("_search_meta") or {}).get("name"))
                 seen[item["id"]] = now
                 sent_this_cycle += 1
 
@@ -3589,6 +3805,13 @@ while True:
                     continue
                 fb_search = dict(search, _fallback_mode=True)
                 fb_items, fb_ids = check_search(fb_search, seen, market_prices.get(search["name"]))
+                for fb_item in fb_items:
+                    fb_item["_search_meta"] = {
+                        "football_mode":  fb_search.get("football_mode"),
+                        "lego_sw_mode":   fb_search.get("lego_sw_mode"),
+                        "carhartt_mode":  fb_search.get("carhartt_mode"),
+                        "name":           fb_search.get("name"),
+                    }
                 for _id in fb_ids:
                     if _id not in seen:
                         seen[_id] = now
@@ -3598,16 +3821,25 @@ while True:
                 _thinking_pause(after=f"fallback:{search['name']}")
 
             if engine and fallback_items:
-                fb_results = engine.run_cycle_strict(fallback_items, market_prices)
+                fallback_items = filter_unsent_items(fallback_items)
+                fb_results = dedupe_results_by_item(engine.run_cycle_strict(fallback_items, market_prices))
                 for result in fb_results[:MAX_PER_CYCLE]:
                     item   = result["item"]
                     profit = result.get("profit", 0)
                     if profit < 10:
                         seen[item["id"]] = now
                         continue
+                    dedupe_key = get_item_dedupe_key(item)
+                    if already_sent(dedupe_key):
+                        print(f"[DEDUPE_BLOCK] duplicate_before_send key={dedupe_key} title={str(item.get('title',''))[:60]}")
+                        continue
                     photo     = item.get("photo") or get_item_photo(item["id"], item.get("link", ""))
                     alert_msg = engine.format_alert(result)
-                    send_message(alert_msg, photo_url=photo, item_link=item.get("link"))
+                    sent_ok = send_message(alert_msg, photo_url=photo, item_link=item.get("link"))
+                    if not sent_ok:
+                        print(f"[TELEGRAM] send_failed key={dedupe_key} title={str(item.get('title',''))[:60]}")
+                        continue
+                    mark_sent(item, result, (item.get("_search_meta") or {}).get("name"))
                     seen[item["id"]] = now
                     sent_this_cycle += 1
                     print(f"  🔁 FALLBACK [{result.get('engine','?')}] | {item['title'][:55]} | {item['price']:.0f} zł")
@@ -3615,6 +3847,7 @@ while True:
         print(f"  📊 Cykl #{cycle} zakończony — wysłano: {sent_this_cycle} alertów [CHAOS+BRAND+GRAIL]")
 
         save_seen(seen)
+        save_sent_alerts()
 
         if engine:
             engine.db.save()
