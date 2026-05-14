@@ -305,7 +305,8 @@ LOW_ROI_BRANDS = {
     "essentials", "fear of god essentials",
     "zara", "h&m", "shein",
     "bershka", "sinsay", "reserved", "primark",
-    "pull&bear", "stradivarius",
+    "pull&bear", "pull bear", "stradivarius",
+    "romwe", "cider", "boohoo", "temu",
 }
 GRAIL_ELIGIBLE_BRANDS = {
     # Vintage basics / print shops
@@ -650,7 +651,8 @@ FAST_FASHION_BRANDS = {
     "h&m", "hm", "bershka", "pull&bear", "pull bear",
     "zara", "primark", "cropp", "sinsay", "house",
     "c&a", "new yorker", "divided", "topshop",
-    "shein", "fashion nova", "urban outfitters basic",
+    "shein", "romwe", "cider", "boohoo", "temu",
+    "fashion nova", "urban outfitters basic",
 }
 
 # Signals that indicate a genuine vintage band tee
@@ -661,6 +663,8 @@ AUTHENTICITY_SIGNALS = [
     "hanes beefy", "all over print", "aop", "tour",
     "concert tee", "concert shirt", "original",
     "deadstock", "nos", "1st press", "first press",
+    "licensed", "winterland", "fruit of the loom vintage",
+    "tour dates", "cracked print", "paper thin", "2000", "2000s",
 ]
 
 # Reprint/fast-fashion signals that invalidate band tee authenticity
@@ -727,14 +731,17 @@ def detect_fake_vintage(
         return result
 
     # ── Rule 2: band tee — require authenticity signal ────────────────
-    has_auth = any(a in t for a in AUTHENTICITY_SIGNALS)
+    auth_hits = [a for a in AUTHENTICITY_SIGNALS if a in t]
+    has_auth = len(set(auth_hits)) >= 2
 
     if not has_auth:
         # No authenticity signal → cap engine to CHAOS, cap confidence to 6.0
         result["cap_engine"]      = "CHAOS"
         result["cap_confidence"]  = 6.0
         result["confidence"]      = min(confidence, 6.0)
-        result["reason"]          = "band_tee_no_auth_signal"
+        result["is_grail"]        = False
+        result["pattern_score"]   = max(pattern_score - 2, 0)
+        result["reason"]          = "band_tee_auth_signals_lt_2"
         if DEBUG_ALERTS:
             print(f"  [FAKE_VINTAGE] {result['reason']} "
                   f"→ cap CHAOS/conf≤6.0 | {title[:50]}")
@@ -770,6 +777,358 @@ def detect_band(title: str) -> str | None:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  🎯 PATTERN SCORING (spec — core system)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+AESTHETIC_SPAM_KEYWORDS = [
+    "aesthetic", "soft girl", "coquette", "grunge aesthetic",
+    "y2k aesthetic", "fairycore", "tiktok", "vintage style",
+    "retro style", "streetwear aesthetic",
+]
+
+AUTHENTICITY_PENALTY_PHRASES = [
+    "y2k aesthetic", "grunge aesthetic", "streetwear aesthetic",
+    "vintage style", "retro style",
+]
+
+SIGNAL_TIER_BOOSTS = {
+    "TIER_S": 35,
+    "TIER_A": 15,
+    "TIER_B": 0,
+    "TIER_C": -40,
+}
+
+TIER_PRIORITY = {
+    "TIER_S": 4,
+    "TIER_A": 3,
+    "TIER_B": 2,
+    "TIER_C": 1,
+}
+
+ENGINE_PRIORITY = {
+    "GRAIL": 3,
+    "BRAND": 2,
+    "CHAOS": 1,
+}
+
+
+def _clip_score(value: float, low: float = 0.0, high: float = 100.0) -> float:
+    return max(low, min(high, value))
+
+
+def _keyword_hits_lower(title_l: str, keywords: list[str]) -> list[str]:
+    return [k for k in keywords if k.lower() in title_l]
+
+
+def _market_entry_for_signal(db: MarketDB, brand: str | None, category: str | None) -> dict | None:
+    candidates = []
+    if brand and category:
+        candidates.append(f"{brand}_{category}")
+    if category:
+        candidates.extend([f"chaos_{category}", f"vintage_{category}", f"{category}_unknown"])
+    for key in candidates:
+        entry = db.lookup(key)
+        if entry and entry.get("count", 0) >= 2:
+            return entry
+    if brand:
+        return db.lookup_brand_category(brand, category)
+    return None
+
+
+def build_signal_profile(result: dict, db: MarketDB) -> dict:
+    item = result.get("item", {}) or {}
+    title = str(item.get("title") or "")
+    title_l = title.lower()
+    features = extract_item_features(item)
+
+    brand = result.get("brand") or result.get("brand_detected") or features.get("brand")
+    category = result.get("category") or features.get("category")
+    band = result.get("band") or features.get("band") or detect_band(title)
+    profit = float(result.get("profit", 0) or result.get("estimated_profit", 0) or 0)
+    confidence = float(result.get("confidence", 0) or 0)
+    pattern_score = int(result.get("pattern_score", 0) or 0)
+    estimated_value = float(
+        result.get("estimated_value")
+        or result.get("market_price")
+        or result.get("median_price")
+        or 0
+    )
+    price = float(item.get("price") or 0)
+    market_entry = _market_entry_for_signal(db, brand, category)
+    market_count = int((market_entry or {}).get("count", 0) or 0)
+    deal_tag = result.get("deal_tag") or (market_entry or {}).get("last_deal") or "NO_DATA"
+
+    auth_hits = _keyword_hits_lower(title_l, AUTHENTICITY_SIGNALS)
+    rarity_hits = _keyword_hits_lower(title_l, RARITY_KEYWORDS + VINTAGE_SIGNALS + [
+        "archive", "tour", "single stitch", "made in usa", "faded",
+        "embroidered", "all over print", "licensed", "season",
+    ])
+    aesthetic_hits = _keyword_hits_lower(title_l, AESTHETIC_SPAM_KEYWORDS)
+    penalty_phrase_hits = _keyword_hits_lower(title_l, AUTHENTICITY_PENALTY_PHRASES)
+    fast_fashion = bool(
+        (brand and brand.lower() in FAST_FASHION_BRANDS)
+        or any(ff in title_l for ff in FAST_FASHION_BRANDS)
+    )
+    strong_brand = bool(brand and brand in STRONG_BRANDS)
+    grail_brand = bool(brand and brand in GRAIL_ELIGIBLE_BRANDS)
+    is_band = bool(band)
+
+    if market_count >= 12:
+        market_strength = 88
+    elif market_count >= 6:
+        market_strength = 74
+    elif market_count >= 3:
+        market_strength = 60
+    elif estimated_value > 0 and (strong_brand or grail_brand or is_band):
+        market_strength = 52
+    else:
+        market_strength = 30
+    if deal_tag == "STRONG":
+        market_strength += 8
+    elif deal_tag == "GOOD":
+        market_strength += 4
+    if market_entry and market_entry.get("p25") and market_entry.get("p75"):
+        p25 = float(market_entry.get("p25") or 0)
+        p75 = float(market_entry.get("p75") or 0)
+        if p25 > 0 and p75 / p25 <= 2.2:
+            market_strength += 6
+    market_strength = _clip_score(market_strength)
+
+    rarity_strength = 10 + len(set(rarity_hits)) * 11 + max(0, pattern_score) * 5
+    if grail_brand:
+        rarity_strength += 12
+    if is_band:
+        rarity_strength += 8
+    rarity_strength = _clip_score(rarity_strength)
+
+    vintage_authenticity = 18 + len(set(auth_hits)) * 22
+    if features.get("is_vintage"):
+        vintage_authenticity += 14
+    if fast_fashion:
+        vintage_authenticity -= 55
+    if penalty_phrase_hits:
+        vintage_authenticity -= 25
+    vintage_authenticity = _clip_score(vintage_authenticity)
+
+    visual_uniqueness = 25 + max(0, pattern_score) * 9
+    if any(k in title_l for k in ["all over print", "aop", "embroidered", "faded", "cracked print"]):
+        visual_uniqueness += 24
+    if aesthetic_hits and not strong_brand:
+        visual_uniqueness -= 20
+    visual_uniqueness = _clip_score(visual_uniqueness)
+
+    if strong_brand:
+        brand_strength_score = 82
+    elif grail_brand or is_band:
+        brand_strength_score = 72
+    elif brand:
+        brand_strength_score = 48
+    else:
+        brand_strength_score = 22
+    if fast_fashion:
+        brand_strength_score = min(brand_strength_score, 18)
+
+    if estimated_value > 0 and price > 0:
+        discount_ratio = max(0.0, 1.0 - (price / estimated_value))
+        price_advantage = _clip_score(discount_ratio * 140)
+    elif profit > 0 and price > 0:
+        price_advantage = _clip_score((profit / price) * 65)
+    else:
+        price_advantage = 0
+
+    signal_quality = (
+        market_strength * 0.25
+        + rarity_strength * 0.20
+        + vintage_authenticity * 0.20
+        + visual_uniqueness * 0.15
+        + brand_strength_score * 0.10
+        + price_advantage * 0.10
+    )
+
+    cap_confidence = None
+    cap_signal_quality = None
+    max_tier = None
+    protection_reasons = []
+
+    if fast_fashion:
+        cap_confidence = 5.5
+        cap_signal_quality = 40
+        max_tier = "TIER_C"
+        protection_reasons.append("fast_fashion_auth_penalty")
+
+    if penalty_phrase_hits:
+        cap_signal_quality = min(cap_signal_quality or 100, 55)
+        protection_reasons.append("style_phrase_auth_penalty")
+
+    if is_band and len(set(auth_hits)) < 2:
+        cap_confidence = min(cap_confidence or 10.0, 6.0)
+        cap_signal_quality = min(cap_signal_quality or 100, 45)
+        max_tier = "TIER_C"
+        rarity_strength = min(rarity_strength, 45)
+        protection_reasons.append("band_tee_auth_signals_lt_2")
+
+    if aesthetic_hits and not strong_brand:
+        max_tier = "TIER_B" if max_tier is None else max_tier
+        cap_signal_quality = min(cap_signal_quality or 100, 69)
+        protection_reasons.append("low_quality_aesthetic_cap")
+
+    if cap_signal_quality is not None:
+        signal_quality = min(signal_quality, cap_signal_quality)
+
+    signal_quality = round(_clip_score(signal_quality), 2)
+
+    if signal_quality >= 85:
+        tier = "TIER_S"
+    elif signal_quality >= 70:
+        tier = "TIER_A"
+    elif signal_quality >= 55:
+        tier = "TIER_B"
+    else:
+        tier = "TIER_C"
+
+    if max_tier == "TIER_B" and tier == "TIER_S":
+        tier = "TIER_A"
+    if max_tier == "TIER_B" and tier == "TIER_A" and signal_quality < 70:
+        tier = "TIER_B"
+    if max_tier == "TIER_C":
+        tier = "TIER_C"
+
+    market_validated = bool(
+        market_count >= 3
+        or deal_tag in ("GOOD", "STRONG")
+        or (estimated_value > 0 and (strong_brand or grail_brand) and profit > 0)
+    )
+    auth_state = "strong" if len(set(auth_hits)) >= 2 else ("weak" if auth_hits else "missing")
+    market_state = "validated" if market_validated else ("thin" if estimated_value > 0 else "missing")
+
+    await_reasons = []
+    if 45 <= signal_quality < 60:
+        await_reasons.append("signal_quality_45_60")
+    if confidence < 5.5 and signal_quality < 70:
+        await_reasons.append("weak_confidence")
+    if not market_validated and signal_quality < 70:
+        await_reasons.append("market_unvalidated")
+    if is_band and len(set(auth_hits)) < 2:
+        await_reasons.append("band_auth_unconfirmed")
+    await_state = {
+        "hold": bool(await_reasons),
+        "reasons": await_reasons,
+        "needs": [
+            "sold_comps" if not market_validated else None,
+            "authenticity_signals" if is_band and len(set(auth_hits)) < 2 else None,
+            "rarity_confirmation" if signal_quality < 60 else None,
+        ],
+    }
+    await_state["needs"] = [n for n in await_state["needs"] if n]
+
+    return {
+        "signal_quality_score": signal_quality,
+        "signal_tier": tier,
+        "signal_subscores": {
+            "market_strength": round(market_strength, 2),
+            "rarity_strength": round(rarity_strength, 2),
+            "vintage_authenticity": round(vintage_authenticity, 2),
+            "visual_uniqueness": round(visual_uniqueness, 2),
+            "brand_strength": round(brand_strength_score, 2),
+            "price_advantage": round(price_advantage, 2),
+        },
+        "await_state": await_state,
+        "auth_state": auth_state,
+        "authenticity_hits": sorted(set(auth_hits)),
+        "market_state": market_state,
+        "market_evidence": {
+            "validated": market_validated,
+            "count": market_count,
+            "deal_tag": deal_tag,
+            "historical_matches": market_count >= 3,
+        },
+        "cap_confidence": cap_confidence,
+        "remove_grail_status": bool(is_band and len(set(auth_hits)) < 2),
+        "protection_reasons": protection_reasons,
+        "rarity_score": round(rarity_strength, 2),
+        "is_low_quality_aesthetic": bool(aesthetic_hits and not strong_brand),
+    }
+
+
+def apply_signal_profile(result: dict, profile: dict) -> dict:
+    result.update(profile)
+    if profile.get("cap_confidence") is not None:
+        result["confidence"] = min(float(result.get("confidence", 0) or 0), profile["cap_confidence"])
+    if profile.get("remove_grail_status"):
+        result["is_grail"] = False
+        result["grail_score"] = min(int(result.get("grail_score", 0) or 0), 2)
+    result["tier"] = profile.get("signal_tier", result.get("tier"))
+    result.setdefault("ranking_penalty", 0)
+    result.setdefault("cluster_penalty", 0)
+    result.setdefault("tier_bonus", SIGNAL_TIER_BOOSTS.get(result.get("tier"), 0))
+    return result
+
+
+def enforce_signal_quality(result: dict) -> dict:
+    """
+    Final hard gate after Signal Await profile is applied.
+    Can only block/downgrade; it never promotes a non-send result.
+    """
+    item = result.get("item", {}) or {}
+    title = str(item.get("title") or "")[:60]
+    quality = float(result.get("signal_quality_score", 0) or 0)
+    tier = result.get("tier") or result.get("signal_tier") or "TIER_C"
+    profit = float(result.get("profit", 0) or result.get("estimated_profit", 0) or 0)
+    confidence = float(result.get("confidence", 0) or 0)
+    engine = result.get("engine", "") or ""
+    await_state = result.get("await_state", {}) or {}
+    protection = result.get("protection_reasons", []) or []
+
+    result["tier"] = tier
+    result["signal_tier"] = result.get("signal_tier") or tier
+
+    def _block(reason: str) -> dict:
+        result["send"] = False
+        result["send_alert"] = False
+        result["quality_pass"] = False
+        result["_quality_block_reason"] = reason
+        if DEBUG_ALERTS:
+            print(f"  [SIGNAL_BLOCK] reason={reason} engine={engine} tier={tier} "
+                  f"quality={quality:.0f} profit={profit:.0f} conf={confidence:.1f} "
+                  f"await={await_state.get('hold', False)} protection={protection} "
+                  f"title={title}")
+        return result
+
+    if tier == "TIER_C":
+        return _block("tier_c_blocked")
+
+    if result.get("is_low_quality_aesthetic"):
+        return _block("low_quality_aesthetic_blocked")
+
+    if engine == "CHAOS" and any("low_effort" in p for p in result.get("matched_patterns", [])):
+        return _block("chaos_low_effort_blocked")
+
+    protected = any(p in protection for p in (
+        "fast_fashion_auth_penalty",
+        "band_tee_auth_signals_lt_2",
+    ))
+    if protected:
+        result["is_grail"] = False
+        result["grail_score"] = min(int(result.get("grail_score", 0) or 0), 2)
+        if not (engine == "CHAOS" and quality >= 65 and profit >= 50):
+            return _block("protected_signal_blocked")
+
+    if await_state.get("hold"):
+        if not (tier in ("TIER_S", "TIER_A") and quality >= 70 and profit >= 50):
+            return _block("await_hold_blocked")
+
+    if engine == "CHAOS":
+        if quality < 60 or profit < 40 or confidence < 6.0:
+            return _block("chaos_quality_floor")
+    elif engine == "BRAND":
+        if quality < 55 or profit < 25:
+            return _block("brand_quality_floor")
+    elif engine == "GRAIL":
+        grail_allowed = quality >= 65 and profit >= 50
+        grail_exception = tier == "TIER_S" and profit >= 40
+        if not (grail_allowed or grail_exception):
+            return _block("grail_quality_floor")
+
+    return result
+
 
 _TEE_TYPES    = ["tee", "t-shirt", "tshirt", "shirt", "koszulka"]
 _DENIM_TYPES  = ["jeans", "denim", "dżinsy", "pants", "trousers", "spodnie"]
@@ -1051,10 +1410,7 @@ class ChaosEngine:
         is_band             = bool(features.get("band"))
         is_strong_band_feat = features.get("is_strong_band", False)
 
-        if DEBUG_ALERTS:
-            send = profit >= 15 and confidence >= 4.0
-        else:
-            send = (
+        send = (
                 # Spec: CHAOS profit >= 40 AND conf >= 6
                 (profit >= 40 and confidence >= 6.0)
                 # Pattern shortcut: high pattern score unlocks lower profit threshold
@@ -1282,10 +1638,7 @@ class BrandEngine:
         conf = round(min(max(conf, 0.0), 10.0), 2)
 
         # Send rule aligned with final decision (CASE 1: profit>=40, CASE 3b: profit>=25)
-        if DEBUG_ALERTS:
-            send = profit >= 15
-        else:
-            send = (
+        send = (
                 (is_strong_brand and profit >= 25)    # strong brand: lower bar
                 or (profit >= 25 and conf >= 5.5)
                 or (profit >= 15 and anomaly_score >= 2 and is_strong_brand)
@@ -1551,10 +1904,7 @@ class GrailEngine:
         conf = round(min(max(conf, 0.0), 10.0), 2)
 
         # Spec threshold: GRAIL profit >= 50 AND pattern_score >= 5
-        if DEBUG_ALERTS:
-            send = profit >= 10 and is_grail
-        else:
-            send = (
+        send = (
                 # Spec: GRAIL profit >= 50 AND pattern_score >= 5
                 (is_grail and profit >= 50 and pattern_score >= 5)
                 # OR: grail + high profit even without full pattern
@@ -1732,6 +2082,10 @@ class Engine:
         Uruchamia wszystkie 3 silniki i zwraca deduplikowane wyniki.
         Part 3: auto-save DB po każdym cyklu.
         """
+        return self.run_cycle_strict(items, market_prices)
+
+    def run_cycle_legacy(self, items: list[dict], market_prices: dict | None = None) -> list[dict]:
+        """Old direct-engine cycle kept for compatibility/debugging."""
         chaos_r = self.chaos.run(items)
         brand_r = self.brand.run(items, market_prices)
         grail_r = self.grail.run(items)
@@ -1988,53 +2342,27 @@ class Engine:
         send   = False
         reason = "below_threshold"
 
-        if DEBUG_ALERTS:
-            # Debug mode: lower thresholds to see what flows
-            if is_grail and profit >= 10:
-                send   = True
-                ps     = best.get("grail_score", 0)
-                reason = f"grail_debug(score={ps},pattern={pattern_score})"
-            elif is_strong and profit >= 20:
-                send   = True
-                reason = f"brand_strong_debug(profit={profit:.0f})"
-            elif profit >= 20 and confidence >= 5.0:
-                send   = True
-                reason = f"flip_debug(profit={profit:.0f},conf={confidence:.1f},pattern={pattern_score})"
-            elif confidence > 0:
-                reason = f"fallback_candidate(conf={confidence:.1f},profit={profit:.0f})"
-        else:
-            # GRAIL priority (spec: profit>=50 AND pattern_score>=5)
-            if is_grail and profit >= 50 and pattern_score >= 5:
-                send   = True
-                reason = f"grail(score={best.get('grail_score',0)},pattern={pattern_score},profit={profit:.0f})"
-
-            # GRAIL fallback: anomaly shortcut
-            elif is_grail and profit >= 30 and best.get("anomaly_score", 0) >= 2:
-                send   = True
-                reason = f"grail_anomaly(profit={profit:.0f},anomaly={best.get('anomaly_score',0)})"
-
-            # BRAND strong (spec: profit>=40)
-            elif is_strong and profit >= 40:
-                send   = True
-                reason = f"brand_strong(profit={profit:.0f},conf={confidence:.1f})"
-
-            # BRAND normal (spec: profit>=25 AND conf>=5.5)
-            elif best_name == "BRAND" and not is_strong and profit >= 25 and confidence >= 5.5:
-                send   = True
-                reason = f"brand_deal(profit={profit:.0f},conf={confidence:.1f})"
-
-            # CHAOS (spec: profit>=40 AND conf>=6)
-            elif best_name == "CHAOS" and profit >= 40 and confidence >= 6.0:
-                send   = True
-                reason = f"chaos_flip(profit={profit:.0f},conf={confidence:.1f})"
-
-            # Pattern shortcut: high pattern score lowers CHAOS bar
-            elif best_name == "CHAOS" and pattern_score >= 5 and profit >= 30 and confidence >= 5.5:
-                send   = True
-                reason = f"chaos_pattern(pattern={pattern_score},profit={profit:.0f})"
-
-            elif confidence > 0:
-                reason = f"fallback_candidate(conf={confidence:.1f},profit={profit:.0f},pattern={pattern_score})"
+        # Production thresholds always; DEBUG_ALERTS only controls logging.
+        if is_grail and profit >= 50 and pattern_score >= 5:
+            send   = True
+            reason = f"grail(score={best.get('grail_score',0)},pattern={pattern_score},profit={profit:.0f})"
+        elif is_grail and profit >= 30 and best.get("anomaly_score", 0) >= 2:
+            send   = True
+            reason = f"grail_anomaly(profit={profit:.0f},anomaly={best.get('anomaly_score',0)})"
+        elif is_strong and profit >= 40:
+            send   = True
+            reason = f"brand_strong(profit={profit:.0f},conf={confidence:.1f})"
+        elif best_name == "BRAND" and not is_strong and profit >= 25 and confidence >= 5.5:
+            send   = True
+            reason = f"brand_deal(profit={profit:.0f},conf={confidence:.1f})"
+        elif best_name == "CHAOS" and profit >= 40 and confidence >= 6.0:
+            send   = True
+            reason = f"chaos_flip(profit={profit:.0f},conf={confidence:.1f})"
+        elif best_name == "CHAOS" and pattern_score >= 5 and profit >= 30 and confidence >= 5.5:
+            send   = True
+            reason = f"chaos_pattern(pattern={pattern_score},profit={profit:.0f})"
+        elif confidence > 0:
+            reason = f"fallback_candidate(conf={confidence:.1f},profit={profit:.0f},pattern={pattern_score})"
 
         # Task 6 — Debug log with pattern_score + matched_patterns
         if DEBUG_ALERTS:
@@ -2109,6 +2437,11 @@ class Engine:
 
         # ── Step 2: STRICT QUALITY GATE (Task 2) ────────────────────────
         # Reject before ranking if ANY condition fails
+        for r in all_scored:
+            profile = build_signal_profile(r, self.db)
+            apply_signal_profile(r, profile)
+            enforce_signal_quality(r)
+
         def _quality_pass(r: dict) -> tuple[bool, str]:
             """Returns (passes, reject_reason). Task 2 spec."""
             eng    = r.get("engine", "CHAOS")
@@ -2116,18 +2449,35 @@ class Engine:
             conf   = r.get("confidence", 0)
             ps     = r.get("pattern_score", 0)
             brand  = r.get("brand") or r.get("brand_detected")
+            sq     = float(r.get("signal_quality_score", 0) or 0)
+            tier   = r.get("signal_tier", "TIER_C")
+            await_state = r.get("await_state", {}) or {}
 
-            if profit < 40:
-                return False, f"profit<40({profit:.0f})"
-            if conf < 6.5:
-                return False, f"conf<6.5({conf:.1f})"
+            if r.get("_quality_block_reason"):
+                return False, r.get("_quality_block_reason")
+            if tier == "TIER_C" or sq < 45:
+                return False, f"signal_quality_low({sq:.0f})"
+            if profit < 20 and tier == "TIER_S":
+                return False, f"tier_s_profit<20({profit:.0f})"
+            if profit < 30 and tier == "TIER_A":
+                return False, f"tier_a_profit<30({profit:.0f})"
+            if profit < 40 and tier == "TIER_B":
+                return False, f"tier_b_profit<40({profit:.0f})"
+            if conf < 5.5 and tier in ("TIER_S", "TIER_A"):
+                return False, f"conf<5.5({conf:.1f})"
+            if conf < 6.0 and tier == "TIER_B":
+                return False, f"conf<6.0({conf:.1f})"
             if eng == "CHAOS" and ps == 0 and not brand:
                 return False, "chaos_no_pattern_no_brand"
-            # CHAOS additional restriction (Task 2)
             if eng == "CHAOS":
                 is_strong = brand in STRONG_BRANDS if brand else False
-                if profit < 60 and not is_strong:
-                    return False, f"chaos_profit<60_not_strong({profit:.0f})"
+                market_ok = (r.get("market_evidence") or {}).get("validated", False)
+                if sq < 60:
+                    return False, f"chaos_signal<60({sq:.0f})"
+                if profit < 50 and not is_strong:
+                    return False, f"chaos_profit<50_not_strong({profit:.0f})"
+                if not market_ok and not is_strong and tier != "TIER_S":
+                    return False, "chaos_market_unvalidated"
             return True, "ok"
 
         candidate_pool = []
@@ -2136,28 +2486,28 @@ class Engine:
             passes, reject_reason = _quality_pass(r)
             r["quality_pass"]    = passes
             r["quality_reason"]  = reject_reason
-            if passes:
+            if r.get("send_alert") and passes:
                 candidate_pool.append(r)
             elif r.get("confidence", 0) > 0:
                 fallback_pool.append(r)
+                if DEBUG_ALERTS:
+                    reason = r.get("_quality_block_reason") or reject_reason or r.get("reason", "not_sendable")
+                    title = str(r.get("item", {}).get("title", ""))[:60]
+                    print(f"  [FALLBACK_BLOCK] reason={reason} "
+                          f"quality={r.get('signal_quality_score',0):.0f} "
+                          f"tier={r.get('tier') or r.get('signal_tier')} title={title}")
 
         print(f"  📋 Quality gate: {len(candidate_pool)} pass | "
               f"{len(fallback_pool)} fallback | "
               f"{len(all_scored)-len(candidate_pool)-len(fallback_pool)} rejected")
 
         # Fallback: zero candidates → top-1 relaxed
-        if not candidate_pool and fallback_pool:
-            fallback_pool.sort(key=lambda r: -(r.get("confidence", 0) + r.get("profit", 0)))
-            top1 = dict(fallback_pool[0])
-            top1["send"] = top1["send_alert"] = True
-            top1["reason"] = f"top1_fallback(conf={top1.get('confidence',0):.1f})"
-            top1["quality_pass"] = False
-            top1["fast_snipe"]   = False
-            top1["final_score"]  = top1.get("profit", 0) + top1.get("confidence", 0) * 3
-            top1["cluster_key"]  = "fallback__generic__none"
-            print(f"  ⚠️ FALLBACK TOP1: {top1.get('item',{}).get('title','?')[:50]}")
+        if not candidate_pool:
+            held = sum(1 for r in fallback_pool if (r.get("await_state") or {}).get("hold"))
+            print(f"  [AWAIT] no sendable candidates | held={held} fallback={len(fallback_pool)}")
             self.db.save(force=True)
-            return [top1]
+            return []
+
 
         # ── Step 3: FINAL_SCORE with multipliers (Task 3) ───────────────
         def _final_score(r: dict) -> float:
@@ -2181,6 +2531,24 @@ class Engine:
 
             return round(base, 2)
 
+        def _final_score_v2(r: dict) -> float:
+            profit = r.get("profit", 0) or r.get("estimated_profit", 0)
+            conf = r.get("confidence", 0)
+            signal = r.get("signal_quality_score", 0)
+            rarity = r.get("rarity_score", r.get("grail_score", 0) * 10)
+            tier = r.get("signal_tier", r.get("tier", "TIER_C"))
+            tier_bonus = SIGNAL_TIER_BOOSTS.get(tier, -40)
+            score = (
+                profit * 0.30
+                + (conf * 10) * 0.20
+                + signal * 0.35
+                + rarity * 0.15
+                + tier_bonus
+            )
+            r["tier_bonus"] = tier_bonus
+            r["anomaly_bonus"] = 0
+            return round(score, 2)
+
         for r in candidate_pool:
             # Task 4 — SNIPER MODE: age <=10 AND profit >= 70
             age         = r.get("age_min", 999)
@@ -2188,10 +2556,18 @@ class Engine:
             fast_snipe  = (age <= 10 and profit_val >= 70)
             r["fast_snipe"] = fast_snipe
 
-            score = _final_score(r)
+            score = _final_score_v2(r)
             if fast_snipe:
                 score *= 1.3       # Task 4 multiplier
             r["final_score"] = round(score, 2)
+
+            if DEBUG_ALERTS:
+                title = str(r.get("item", {}).get("title", ""))[:60]
+                print(f"  [SIGNAL_PASS] engine={r.get('engine','?')} "
+                      f"tier={r.get('tier') or r.get('signal_tier')} "
+                      f"quality={r.get('signal_quality_score',0):.0f} "
+                      f"profit={profit_val:.0f} conf={r.get('confidence',0):.1f} "
+                      f"final={r.get('final_score',0):.0f} title={title}")
 
             if fast_snipe and DEBUG_ALERTS:
                 print(f"  ⚡ SNIPER: age={age}m profit={profit_val:.0f} "
@@ -2248,7 +2624,36 @@ class Engine:
         cluster_counts: dict[str, int] = {}
         clustered: list[dict] = []
 
-        candidate_pool.sort(key=lambda r: -r.get("final_score", 0))
+        for r in candidate_pool:
+            _cluster_key(r)
+        cluster_total_counts: dict[str, int] = {}
+        for r in candidate_pool:
+            ck = r.get("cluster_key", "unknown__other__generic")
+            cluster_total_counts[ck] = cluster_total_counts.get(ck, 0) + 1
+        for r in candidate_pool:
+            ck = r.get("cluster_key", "unknown__other__generic")
+            penalty = cluster_total_counts.get(ck, 0) * 8 if cluster_total_counts.get(ck, 0) > 2 else 0
+            r["cluster_penalty"] = penalty
+            r["final_score"] = round(r.get("final_score", 0) - penalty, 2)
+
+        diversity_seen: dict[str, int] = {}
+        for r in sorted(candidate_pool, key=lambda x: -x.get("final_score", 0)):
+            brand_key = (r.get("brand") or r.get("brand_detected") or "").lower()
+            penalty = 0
+            if brand_key:
+                if diversity_seen.get(brand_key, 0) >= 2:
+                    penalty = 25
+                diversity_seen[brand_key] = diversity_seen.get(brand_key, 0) + 1
+            r["ranking_penalty"] = penalty
+            r["diversity_penalty"] = penalty
+            if penalty:
+                r["final_score"] = round(r.get("final_score", 0) - penalty, 2)
+
+        candidate_pool.sort(key=lambda r: (
+            TIER_PRIORITY.get(r.get("tier") or r.get("signal_tier"), 0),
+            ENGINE_PRIORITY.get(r.get("engine"), 0),
+            r.get("final_score", 0),
+        ), reverse=True)
 
         for r in candidate_pool:
             ck      = _cluster_key(r)
@@ -2261,16 +2666,28 @@ class Engine:
         print(f"  🔗 After clustering: {len(clustered)} (from {len(candidate_pool)})")
 
         # ── Step 7: sort — GRAIL > BRAND > CHAOS, then final_score DESC ─
-        _ENGINE_PRIO = {"GRAIL": 0, "BRAND": 1, "CHAOS": 2}
         clustered.sort(key=lambda r: (
-            _ENGINE_PRIO.get(r.get("engine", "CHAOS"), 2),
-            -r.get("final_score", 0),
-        ))
+            TIER_PRIORITY.get(r.get("tier") or r.get("signal_tier"), 0),
+            ENGINE_PRIORITY.get(r.get("engine"), 0),
+            r.get("final_score", 0),
+        ), reverse=True)
 
         # ── Step 8: TOP-5 HARD LIMIT (Task 6) ───────────────────────────
         # NEVER exceed 5 items per cycle
         MAX_OUTPUT = 5
-        selected   = clustered[:MAX_OUTPUT]
+        selected: list[dict] = []
+        top_brand_counts: dict[str, int] = {}
+        for r in clustered:
+            brand_key = (r.get("brand") or r.get("brand_detected") or "").lower()
+            if brand_key and top_brand_counts.get(brand_key, 0) >= 2:
+                r["ranking_penalty"] = max(r.get("ranking_penalty", 0), 25)
+                r["diversity_penalty"] = r["ranking_penalty"]
+                continue
+            selected.append(r)
+            if brand_key:
+                top_brand_counts[brand_key] = top_brand_counts.get(brand_key, 0) + 1
+            if len(selected) >= MAX_OUTPUT:
+                break
         print(f"  🎯 TOP-{MAX_OUTPUT} selection: {len(selected)} items")
 
         # ── Step 9: assign ranking_position + session dedup ─────────────
@@ -2340,6 +2757,23 @@ class Engine:
                       f"brand={r.get('brand_detected') or '—'} "
                       f"cluster={r.get('cluster_key','?')[:25]}")
                 print(f"         {title}")
+                await_state = r.get("await_state", {}) or {}
+                market_ev = r.get("market_evidence", {}) or {}
+                print(f"         [SIGNAL] quality={r.get('signal_quality_score',0):.0f} "
+                      f"tier={r.get('signal_tier','?')} await={await_state.get('hold', False)} "
+                      f"auth={r.get('auth_state','?')} market={r.get('market_state','?')} "
+                      f"diversity_penalty={r.get('diversity_penalty',0)} "
+                      f"cluster_penalty={r.get('cluster_penalty',0)}")
+                print(f"         [RANK] final={r.get('final_score',0):.0f} "
+                      f"tier_bonus={r.get('tier_bonus',0)} "
+                      f"anomaly_bonus={r.get('anomaly_bonus',0)} "
+                      f"market_count={market_ev.get('count',0)}")
+                print(f"         [RANK] #{r.get('ranking_position')} "
+                      f"engine={r.get('engine','?')} tier={r.get('tier') or r.get('signal_tier')} "
+                      f"final={r.get('final_score',0):.0f} "
+                      f"quality={r.get('signal_quality_score',0):.0f} "
+                      f"brand={r.get('brand_detected') or r.get('brand') or '-'} "
+                      f"cluster={r.get('cluster_key','?')[:25]} title={title}")
                 if r.get("matched_patterns"):
                     print(f"         patterns={r['matched_patterns'][:2]}")
             print(f"  {'═'*60}\n")
