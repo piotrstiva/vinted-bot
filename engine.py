@@ -982,6 +982,16 @@ RRL_DOUBLE_RL_SIGNALS = [
     "ralph lauren rrl", "polo rrl", "rrl ralph lauren",
 ]
 
+RRL_DOUBLE_RL_PATTERNS = [
+    r"\brrl\b",
+    r"\bdouble\s+rl\b",
+    r"\bdouble\s+r\s*l\b",
+    r"\bdouble\s+ralph\s+lauren\b",
+    r"\bralph\s+lauren\s+rrl\b",
+    r"\bpolo\s+rrl\b",
+    r"\brrl\s+ralph\s+lauren\b",
+]
+
 RRL_STYLE_SIGNALS = [
     "western", "cowboy", "denim western", "workwear", "americana",
     "flannel", "native", "aztec", "southwestern", "indigo",
@@ -995,11 +1005,14 @@ LEE_DESIRABLE_SIGNALS = [
     "work jacket", "denim jacket", "vintage lee", "made in usa",
 ]
 
-WORKWEAR_COMPANY_SIGNALS = [
-    "company", "freight", "line", "old dominion", "embroidered",
-    "embroidery", "worker", "workwear", "uniform", "duck canvas",
+WORKWEAR_COMPANY_STRONG_SIGNALS = [
+    "old dominion", "freight line", "company jacket",
+    "work jacket", "worker jacket", "uniform jacket",
+    "embroidered logo", "embroidered name", "duck canvas",
     "made in usa",
 ]
+
+WORKWEAR_COMPANY_SIGNALS = WORKWEAR_COMPANY_STRONG_SIGNALS
 
 TASTE_POP_CULTURE_SIGNALS = [
     "warner bros", "warner brothers", "taz", "tasmanian devil",
@@ -1042,14 +1055,40 @@ def _clip_score(value: float, low: float = 0.0, high: float = 100.0) -> float:
 def _keyword_hits_lower(title_l: str, keywords: list[str]) -> list[str]:
     return [k for k in keywords if k.lower() in title_l]
 
+def normalize_text(text: str) -> str:
+    text_l = str(text or "").lower()
+    text_l = re.sub(r"[^a-z0-9]+", " ", text_l)
+    return re.sub(r"\s+", " ", text_l).strip()
+
+
+def contains_exact_token(text: str, token: str) -> bool:
+    normalized = normalize_text(text)
+    token_n = normalize_text(token)
+    if not token_n:
+        return False
+    return re.search(rf"(?<![a-z0-9]){re.escape(token_n)}(?![a-z0-9])", normalized) is not None
+
+
+def contains_phrase(text: str, phrase: str) -> bool:
+    normalized = normalize_text(text)
+    phrase_n = normalize_text(phrase)
+    if not phrase_n:
+        return False
+    pattern = r"(?<![a-z0-9])" + r"\s+".join(re.escape(part) for part in phrase_n.split()) + r"(?![a-z0-9])"
+    return re.search(pattern, normalized) is not None
+
+
+def contains_any_phrase(text: str, phrases: list[str]) -> bool:
+    return any(contains_phrase(text, phrase) for phrase in phrases)
+
 
 def _token_or_phrase_hit(title_l: str, keyword: str) -> bool:
     kw_l = keyword.lower()
     if len(kw_l) <= 2 and kw_l.isalpha():
-        return re.search(rf"(?<![a-z0-9]){re.escape(kw_l)}(?![a-z0-9])", title_l) is not None
+        return contains_exact_token(title_l, kw_l)
     if kw_l.endswith("x"):
         return re.search(rf"(?<![a-z0-9]){re.escape(kw_l)}\d*", title_l) is not None
-    return kw_l in title_l
+    return contains_phrase(title_l, kw_l)
 
 
 def _first_hit(title_l: str, keywords: list[str]) -> str | None:
@@ -1103,6 +1142,48 @@ def _taste_size_bucket(item: dict, title_l: str) -> str:
 
 def _taste_fast_fashion(text_l: str, brand_l: str) -> bool:
     return bool((brand_l and brand_l in FAST_FASHION_BRANDS) or _first_hit(text_l, list(FAST_FASHION_BRANDS)))
+
+
+def _first_rrl_match(text_l: str) -> str | None:
+    normalized = normalize_text(text_l)
+    for pattern in RRL_DOUBLE_RL_PATTERNS:
+        if re.search(pattern, normalized):
+            return pattern
+    return None
+
+
+def _lee_taste_hit(text_l: str, brand_l: str) -> str | None:
+    if normalize_text(brand_l) == "lee":
+        return "brand:lee"
+    lee_patterns = [
+        "lee riders", "lee storm rider", "storm rider",
+        "vintage lee", "lee jacket", "lee denim",
+        "lee chore", "lee trucker",
+    ]
+    return _first_hit(text_l, lee_patterns)
+
+
+def _sports_taste_hit(text_l: str) -> str | None:
+    strong_sports = [
+        "world series", "super bowl", "final four", "march madness",
+        "rose bowl", "nba finals", "stanley cup", "mlb", "nfl",
+        "nba", "nhl", "ncaa", "college", "university", "varsity",
+        "rebels", "yankees", "raiders", "bulls", "dodgers",
+        "red sox", "vikings", "minnesota vikings",
+        "los angeles dodgers", "athletics vs reds",
+    ]
+    hit = _first_hit(text_l, strong_sports + COLLEGE_SIGNALS)
+    if hit:
+        return hit
+    if contains_exact_token(text_l, "athletics"):
+        context = bool(
+            _first_hit(text_l, ["mlb", "nba", "nfl", "nhl", "ncaa", "world series", "super bowl", "final four", "rose bowl"])
+            or _first_hit(text_l, ["yankees", "raiders", "bulls", "dodgers", "red sox", "vikings", "reds", "eric davis"])
+            or _first_hit(text_l, TASTE_ERA_SIGNALS)
+        )
+        if context:
+            return "athletics"
+    return None
 
 
 def _market_entry_for_signal(db: MarketDB, brand: str | None, category: str | None) -> dict | None:
@@ -1730,17 +1811,17 @@ def compute_manual_taste_profile(item: dict, result: dict) -> dict:
     era_hit = _first_hit(text_l, TASTE_ERA_SIGNALS)
     old_blank_hit = _first_hit(text_l, VINTAGE_BLANK_TAGS)
     visual_hit = _first_hit(text_l, TASTE_VISUAL_SIGNALS)
-    sports_hit = _first_hit(text_l, VINTAGE_SPORTS_SIGNALS + COLLEGE_SIGNALS)
+    sports_hit = _sports_taste_hit(text_l)
     pop_hit = _first_hit(text_l, TASTE_POP_CULTURE_SIGNALS)
     biker_hit = _first_hit(text_l, TASTE_BIKER_EVENT_SIGNALS)
     metal_hit = _first_hit(text_l, TASTE_METAL_FANTASY_BAND_SIGNALS)
     street_hit = _first_hit(text_l, TASTE_STREETWEAR_CHEAP_SIGNALS)
     harley_dealer_hit = _first_hit(text_l, HARLEY_DEALER_LOCATION_SIGNALS)
     ralph_hit = _first_hit(text_l, RALPH_LAUREN_DESIRABLE_SIGNALS)
-    rrl_hit = _first_hit(text_l, RRL_DOUBLE_RL_SIGNALS)
+    rrl_hit = _first_rrl_match(text_l)
     rrl_style_hit = _first_hit(text_l, RRL_STYLE_SIGNALS)
-    lee_hit = _first_hit(text_l, LEE_DESIRABLE_SIGNALS)
-    workwear_hit = _first_hit(text_l, WORKWEAR_COMPANY_SIGNALS)
+    lee_hit = _lee_taste_hit(text_l, brand_l)
+    workwear_hit = _first_hit(text_l, WORKWEAR_COMPANY_STRONG_SIGNALS)
 
     if sports_hit and item_type_ok:
         add_signal("vintage_sports_college_signal", 25, "sports")
@@ -1794,15 +1875,16 @@ def compute_manual_taste_profile(item: dict, result: dict) -> dict:
         if price <= 150:
             add_signal("rrl_very_good_price", 15, "heritage")
 
-    if ("lee" in brand_l or "lee" in text_l) and is_jacket and lee_hit:
+    if lee_hit and is_jacket:
         add_signal("lee_vintage_workwear_jacket", 25, "workwear")
         if price <= 130:
             add_signal("lee_jacket_good_price", 10, "workwear")
 
-    workwear_brand = any(k in brand_l or k in text_l for k in ["carhartt", "lee", "dickies", "red kap"])
-    if (is_jacket or "workwear" in text_l or workwear_brand) and workwear_hit:
+    workwear_brand = bool(_first_hit(f"{brand_l} {text_l}", ["carhartt", "dickies", "red kap"]) or _lee_taste_hit(text_l, brand_l))
+    workwear_category = bool(is_jacket or category in ("jacket", "coat", "vest") or "workwear" in text_l)
+    if (workwear_category or workwear_brand) and workwear_hit:
         add_signal("workwear_company_jacket_signal", 15, "workwear")
-        if "carhartt" in brand_l or "carhartt" in text_l or "lee" in brand_l:
+        if "carhartt" in brand_l or "carhartt" in text_l or normalize_text(brand_l) == "lee":
             add_signal("workwear_heritage_brand_signal", 10, "workwear")
             quality_floor = max(quality_floor, 60.0)
 
@@ -1846,6 +1928,7 @@ def compute_manual_taste_profile(item: dict, result: dict) -> dict:
         "manual_taste_quality_floor": quality_floor,
         "manual_taste_pattern_floor": pattern_floor,
         "manual_taste_price": price,
+        "manual_taste_rrl_pattern": rrl_hit,
     }
 
 
@@ -1872,7 +1955,8 @@ def apply_manual_taste_profile(result: dict, profile: dict) -> dict:
                 result["grail_score"] = max(int(result.get("grail_score", 0) or 0), 3)
         if DEBUG_ALERTS:
             title = str((result.get("item") or {}).get("title") or "")[:60]
-            print(f"  [RRL_BOOST] signals={[s for s in signals if s.startswith('rrl_')]} "
+            print(f"  [RRL_BOOST] matched_pattern={profile.get('manual_taste_rrl_pattern')} "
+                  f"signals={[s for s in signals if s.startswith('rrl_')]} "
                   f"desirability={result.get('desirability_score', 0):.0f} "
                   f"quality={result.get('signal_quality_score', 0):.0f} "
                   f"pattern={result.get('pattern_score', 0)} "
@@ -1917,11 +2001,11 @@ def compute_taste_watch_score(item: dict, result: dict) -> dict:
     visual_hit = _first_hit(text_l, TASTE_VISUAL_SIGNALS)
     era_hit = _first_hit(text_l, TASTE_ERA_SIGNALS)
     street_hit = _first_hit(text_l, TASTE_STREETWEAR_CHEAP_SIGNALS)
-    if _first_hit(text_l, VINTAGE_SPORTS_SIGNALS + COLLEGE_SIGNALS):
+    if _sports_taste_hit(text_l):
         add("taste_vintage_sports", 30, "sports")
     if _first_hit(text_l, VINTAGE_BLANK_TAGS):
         add("taste_old_blank_tag", 30, "old_blank")
-    rrl_taste_hit = _first_hit(text_l, RRL_DOUBLE_RL_SIGNALS)
+    rrl_taste_hit = _first_rrl_match(text_l)
     if rrl_taste_hit:
         add("taste_rrl_double_rl", 30, "heritage")
         if _first_hit(text_l, RRL_STYLE_SIGNALS):
@@ -1934,8 +2018,15 @@ def compute_taste_watch_score(item: dict, result: dict) -> dict:
         add("taste_harley_dealer_graphic", 20, "biker")
     if _first_hit(text_l, TASTE_METAL_FANTASY_BAND_SIGNALS):
         add("taste_metal_fantasy_band", 25, "metal")
-    lee_taste_hit = _first_hit(text_l, LEE_DESIRABLE_SIGNALS)
-    if lee_taste_hit or _first_hit(text_l, WORKWEAR_COMPANY_SIGNALS):
+    lee_taste_hit = _lee_taste_hit(text_l, brand_l)
+    workwear_taste_hit = _first_hit(text_l, WORKWEAR_COMPANY_STRONG_SIGNALS)
+    workwear_taste_ok = bool(
+        category in ("jacket", "coat", "vest")
+        or any(k in text_l for k in ["jacket", "coat", "vest", "workwear", "duck canvas"])
+        or any(k in brand_l for k in ["carhartt", "dickies", "red kap"])
+        or lee_taste_hit
+    )
+    if lee_taste_hit or (workwear_taste_hit and workwear_taste_ok):
         add("taste_workwear_heritage", 25, "workwear")
         if lee_taste_hit and price <= 130:
             add("taste_lee_good_price", 15, "workwear")
@@ -1993,6 +2084,16 @@ def compute_taste_watch_score(item: dict, result: dict) -> dict:
         hard_reason = "generic_conditional_brand_shirt_block"
     elif result.get("is_low_quality_aesthetic"):
         hard_reason = "low_quality_aesthetic_hard_block"
+
+    if taste_signals and not hard_reason:
+        old_score = score
+        if len(taste_signals) >= 2:
+            score = max(score, 50)
+        else:
+            score = max(score, 30)
+        if DEBUG_ALERTS and score != old_score:
+            print(f"  [TASTE_SCORE_FLOOR] old={old_score:.0f} new={score:.0f} "
+                  f"signals={taste_signals} title={title[:60]}")
 
     streetwear_size_ok = bool(street_hit and price <= 30 and size_bucket in ("medium", "large") and not fast_fashion)
     candidate = bool(
@@ -3162,10 +3263,18 @@ def format_alert(result: dict) -> str:
     else:
         header = f"{snipe_prefix}{rank_str}⚪ DEAL  · pattern={pattern_score}"
 
-    if result.get("watch_candidate") and not result.get("taste_watch_candidate"):
+    style_watch_alert = bool(
+        result.get("style_watch_sent")
+        or (
+            result.get("taste_watch_candidate")
+            and result.get("_quality_block_reason") == "watch_only_candidate"
+        )
+    )
+
+    if result.get("watch_candidate") and not style_watch_alert:
         header = f"👀 WATCH  Â· {header}"
 
-    if result.get("taste_watch_candidate"):
+    if style_watch_alert:
         header = f"\U0001F440 STYLE WATCH  - {header}"
 
     age_str = f"{age_min}min" if age_min and age_min < 360 else "?"
@@ -3746,6 +3855,27 @@ class Engine:
                   f"avg_quality_passed={avg_q_pass:.1f} avg_quality_blocked={avg_q_block:.1f} "
                   f"avg_desirability_passed={avg_d_pass:.1f} avg_desirability_blocked={avg_d_block:.1f}")
 
+        def _print_style_watch_preview() -> None:
+            preview = sorted(
+                [rr for rr in all_scored if rr.get("taste_watch_candidate")],
+                key=lambda rr: (
+                    rr.get("taste_watch_score", 0),
+                    rr.get("desirability_score", 0),
+                    rr.get("signal_quality_score", 0),
+                ),
+                reverse=True,
+            )[:3]
+            if not preview:
+                return
+            for idx, rr in enumerate(preview, start=1):
+                item = rr.get("item") or {}
+                print(f"  [STYLE_WATCH_PREVIEW] #{idx} "
+                      f"score={rr.get('taste_watch_score',0):.0f} "
+                      f"bucket={rr.get('taste_bucket','none')} "
+                      f"price={float(item.get('price') or 0):.0f} "
+                      f"signals={(rr.get('taste_signals') or [])[:5]} "
+                      f"title={str(item.get('title') or '')[:60]}")
+
         if not candidate_pool and not (
             (WATCH_ALERTS_ENABLED and any(r.get("watch_candidate") for r in fallback_pool))
             or (TASTE_WATCH_SEND_ENABLED and any(r.get("taste_watch_candidate") for r in fallback_pool))
@@ -3753,6 +3883,7 @@ class Engine:
             held = sum(1 for r in fallback_pool if (r.get("await_state") or {}).get("hold"))
             print(f"  [AWAIT] no sendable candidates | held={held} fallback={len(fallback_pool)}")
             _print_quality_summary(sent_count=0)
+            _print_style_watch_preview()
             self.db.save(force=True)
             return []
 
@@ -3955,6 +4086,7 @@ class Engine:
                 r["final_score"] = _final_score_v2(r)
                 r["send_alert"] = True
                 r["send"] = True
+                r["style_watch_sent"] = True
                 key = str((r.get("item") or {}).get("id") or (r.get("item") or {}).get("url") or "")
                 if key:
                     added_watch_ids.add(key)
@@ -4076,6 +4208,7 @@ class Engine:
             self._alerted_ids = set(list(self._alerted_ids)[-5_000:])
 
         _print_quality_summary(sent_count=len(final))
+        _print_style_watch_preview()
 
         self.db.save(force=True)
         print(f"  💾 MarketDB saved: {len(self.db.db)} grup → {DB_FILE}")
