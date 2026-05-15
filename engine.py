@@ -614,7 +614,7 @@ BAND_KEYWORDS = [
     "soundgarden", "alice in chains", "sex pistols",
     "rage against", "system of a down", "korn",
     "rammstein", "deftones", "tool", "pantera", "megadeth",
-    "the clash", "biggie", "eminem",
+    "the clash", "biggie", "eminem", "the strokes",
 ]
 
 HARLEY_KEYWORDS = [
@@ -856,6 +856,20 @@ HARLEY_STRONG_ITEM_SIGNALS = [
     "flame", "skull", "eagle", "3d emblem",
     "single stitch", "made in usa",
     "faded", "distressed", "back print",
+    "embroidered", "embroidery",
+]
+
+HARLEY_WEAK_GENERIC_TYPES = [
+    "women", "women's", "womens", "damska", "damski",
+    "top", "tank", "v neck", "button up", "button-up",
+    "shirt", "tee", "t-shirt", "koszulka",
+]
+
+CARHARTT_HIGH_VALUE_MODELS = [
+    "detroit", "active jacket", "active jac", "michigan coat",
+    "chore coat", "santa fe", "duck jacket", "duck canvas",
+    "double knee", "aviation pant", "simple pant", "master pant",
+    "cargo pant", "carpenter pant", "work pant",
 ]
 
 DESIRABLE_DESIGNER = [
@@ -1324,12 +1338,14 @@ def compute_desirability_score(item: dict, result: dict) -> dict:
                     print(f"  [CARHARTT_SIZE_SKIP] size_hit={small_hit} reason=small_size title={title[:60]}")
             elif waist_hit:
                 add_signal("carhartt_good_waist_size", 20)
+                add_signal("carhartt_good_pants_size", 0)
                 result["carhartt_size_type"] = "waist"
                 result["carhartt_size_hit"] = waist_hit
                 if DEBUG_ALERTS:
                     print(f"  [CARHARTT_SIZE_PASS] size_type=waist size_hit={waist_hit} boost=20 title={title[:60]}")
             elif alpha_hit:
                 add_signal("carhartt_good_alpha_size", 18)
+                add_signal("carhartt_good_pants_size", 0)
                 result["carhartt_size_type"] = "alpha"
                 result["carhartt_size_hit"] = alpha_hit
                 if DEBUG_ALERTS:
@@ -1403,11 +1419,120 @@ def apply_desirability_profile(result: dict, profile: dict) -> dict:
     result.update(profile)
     item = result.get("item", {}) or {}
     title = str(item.get("title") or "")
+    title_l = title.lower()
     category = result.get("category") or ""
+    brand = (result.get("brand") or result.get("brand_detected") or "").lower()
+    signals = result.get("desirable_signals", []) or []
+    signal_text = " ".join(str(s).lower() for s in signals)
     is_shirt_category = bool(
         category in ("tshirt", "shirt", "top")
-        or any(k in title.lower() for k in ["t-shirt", "tshirt", "tee", "koszulka", "top"])
+        or any(k in title_l for k in ["t-shirt", "tshirt", "tee", "koszulka", "top"])
     )
+
+    def _raise_desirability_floor(floor: float, reason: str) -> None:
+        old = float(result.get("desirability_score", 0) or 0)
+        if old < floor:
+            result["desirability_score"] = floor
+            if DEBUG_ALERTS:
+                print(f"  [POSITIVE_SIGNAL_FLOOR] old={old:.0f} new={floor:.0f} "
+                      f"signals={signals} reason={reason} title={title[:60]}")
+
+    strong_signal_hits = []
+    strong_signal_needles = [
+        "carhartt_desirable_item",
+        "carhartt_good_pants_size",
+        "harley_strong_item_signal",
+        "harley_waffle_thermal_longsleeve",
+        "vintage:single stitch",
+        "vintage:made in usa",
+        "vintage:made in the usa",
+        "denim:bootcut",
+        "denim:flare",
+        "denim:flared",
+        "denim:made in usa",
+        "designer:archive",
+        "designer:made in italy",
+        "nike:acg",
+        "outdoor:goretex",
+        "outdoor:gore-tex",
+        "outdoor:acg",
+        "outdoor:summit",
+        "outdoor:xt-6",
+        "outdoor:xt6",
+    ]
+    for needle in strong_signal_needles:
+        if needle in signal_text:
+            strong_signal_hits.append(needle)
+    if strong_signal_hits:
+        _raise_desirability_floor(70 if len(set(strong_signal_hits)) >= 2 else 60, "strong_desirable_signal")
+
+    if ("carhartt" in brand or "carhartt" in title_l) and "carhartt_desirable_item" in signals:
+        old_des = float(result.get("desirability_score", 0) or 0)
+        old_quality = float(result.get("signal_quality_score", 0) or 0)
+        model_hit = _first_hit(title_l, CARHARTT_HIGH_VALUE_MODELS)
+        result["desirability_score"] = max(old_des, 65.0)
+        result["signal_quality_score"] = max(old_quality, 58.0)
+        if model_hit:
+            result["desirability_score"] = max(float(result.get("desirability_score", 0) or 0), 70.0)
+            result["signal_quality_score"] = max(float(result.get("signal_quality_score", 0) or 0), 60.0)
+            result["pattern_score"] = max(int(result.get("pattern_score", 0) or 0), 3)
+        if result.get("carhartt_is_hoodie") and float(item.get("price") or 0) <= 140:
+            result["desirability_score"] = max(float(result.get("desirability_score", 0) or 0), 60.0)
+        if DEBUG_ALERTS:
+            print(f"  [CARHARTT_POSITIVE_FLOOR] model={model_hit or 'desirable_item'} "
+                  f"old_desirability={old_des:.0f} new_desirability={float(result.get('desirability_score', 0) or 0):.0f} "
+                  f"old_quality={old_quality:.0f} new_quality={float(result.get('signal_quality_score', 0) or 0):.0f} "
+                  f"title={title[:60]}")
+
+    is_harley = bool("harley davidson" in title_l or "harley-davidson" in title_l or "harley" in title_l or "harley" in brand)
+    if is_harley:
+        harley_hits = _keyword_hits_lower(title_l, HARLEY_STRONG_ITEM_SIGNALS)
+        old_des = float(result.get("desirability_score", 0) or 0)
+        old_quality = float(result.get("signal_quality_score", 0) or 0)
+        old_pattern = int(result.get("pattern_score", 0) or 0)
+        boosted = False
+        if len(set(harley_hits)) >= 2:
+            result["desirability_score"] = max(old_des, 70.0)
+            result["signal_quality_score"] = max(old_quality, 62.0)
+            result["pattern_score"] = max(old_pattern, 4)
+            if "harley_strong_item_signal" not in signals:
+                signals.append("harley_strong_item_signal")
+            boosted = True
+        if (
+            ("waffle" in title_l or "thermal" in title_l)
+            and ("longsleeve" in title_l or "long sleeve" in title_l)
+        ):
+            result["desirability_score"] = max(float(result.get("desirability_score", 0) or 0), 75.0)
+            result["signal_quality_score"] = max(float(result.get("signal_quality_score", 0) or 0), 65.0)
+            result["pattern_score"] = max(int(result.get("pattern_score", 0) or 0), 5)
+            if "harley_waffle_thermal_longsleeve" not in signals:
+                signals.append("harley_waffle_thermal_longsleeve")
+            boosted = True
+        result["desirable_signals"] = signals
+        if boosted and DEBUG_ALERTS:
+            print(f"  [HARLEY_SIGNAL_BOOST] signals={harley_hits} "
+                  f"desirability={float(result.get('desirability_score', 0) or 0):.0f} "
+                  f"quality={float(result.get('signal_quality_score', 0) or 0):.0f} "
+                  f"pattern={int(result.get('pattern_score', 0) or 0)} title={title[:60]}")
+
+    band = result.get("band") or detect_band(title)
+    band_signal_hits = _keyword_hits_lower(title_l, [
+        "made in usa", "made in the usa", "single stitch", "90s", "80s",
+        "tour", "rare", "deadstock", "giant tag", "brockum",
+        "screen stars", "fruit of the loom usa",
+    ])
+    if band and len(set(band_signal_hits)) >= 2:
+        result["desirability_score"] = max(float(result.get("desirability_score", 0) or 0), 65.0)
+        result["signal_quality_score"] = max(float(result.get("signal_quality_score", 0) or 0), 60.0)
+        if "band_authenticity_combo" not in signals:
+            signals.append("band_authenticity_combo")
+            result["desirable_signals"] = signals
+        if DEBUG_ALERTS:
+            print(f"  [BAND_AUTH_BOOST] band={band} signals={band_signal_hits} "
+                  f"desirability={float(result.get('desirability_score', 0) or 0):.0f} "
+                  f"quality={float(result.get('signal_quality_score', 0) or 0):.0f} "
+                  f"title={title[:60]}")
+
     if result.get("is_generic_strong_brand"):
         old_conf = float(result.get("confidence", 0) or 0)
         cap = 5.5 if is_shirt_category else 6.0
@@ -1436,7 +1561,8 @@ def enforce_signal_quality(result: dict) -> dict:
     Can only block/downgrade; it never promotes a non-send result.
     """
     item = result.get("item", {}) or {}
-    title = str(item.get("title") or "")[:60]
+    full_title = str(item.get("title") or "")
+    title = full_title[:60]
     quality = float(result.get("signal_quality_score", 0) or 0)
     tier = result.get("tier") or result.get("signal_tier") or "TIER_C"
     profit = float(result.get("profit", 0) or result.get("estimated_profit", 0) or 0)
@@ -1450,7 +1576,7 @@ def enforce_signal_quality(result: dict) -> dict:
     generic_penalties = result.get("generic_penalties", []) or []
     pattern_score = int(result.get("pattern_score", 0) or 0)
     brand = result.get("brand") or result.get("brand_detected") or ""
-    title_l = title.lower()
+    title_l = full_title.lower()
     brand_l = str(brand or "").lower()
 
     result["tier"] = tier
@@ -1468,14 +1594,22 @@ def enforce_signal_quality(result: dict) -> dict:
             reason in hard_watch_blockers
             or result.get("carhartt_size_skip")
             or result.get("is_low_quality_aesthetic")
-            or any(p in protection for p in ("fast_fashion_auth_penalty", "fast_fashion", "foreign_title_block"))
+            or any(p in protection for p in ("fast_fashion_auth_penalty", "fast_fashion", "foreign_title_block", "foreign_low_value"))
             or any("fast_fashion" in str(p) for p in generic_penalties)
+            or any(token in str(result.get("reason", "")) for token in ("foreign_low_value", "foreign_language", "fake_vintage_fast_fashion"))
+            or any(token in str(result.get("_skip_reason", "")) for token in ("foreign_language", "low_value_item"))
         )
+        watch_signal = (
+            (quality >= 50 and desirability >= 40 and profit >= 50)
+            or (tier == "TIER_B" and profit >= 40)
+            or (pattern_score >= 3 and profit >= 35)
+            or (bool(desirable_signals) and profit >= 35)
+        )
+        if reason == "weak_harley_generic_top":
+            watch_signal = profit >= 60 and quality >= 50
         return bool(
             not hard_penalty
-            and quality >= 55
-            and desirability >= 45
-            and profit >= 50
+            and watch_signal
         )
 
     def _block(reason: str) -> dict:
@@ -1490,7 +1624,8 @@ def enforce_signal_quality(result: dict) -> dict:
             if DEBUG_ALERTS:
                 print(f"  [WATCH_CANDIDATE] engine={engine} quality={quality:.0f} "
                       f"desirability={desirability:.0f} profit={profit:.0f} "
-                      f"reason={reason} title={title}")
+                      f"pattern={pattern_score} signals={desirable_signals} "
+                      f"block_reason={reason} title={title}")
         if DEBUG_ALERTS:
             print(f"  [SIGNAL_BLOCK] reason={result.get('_quality_block_reason', reason)} "
                   f"engine={engine} tier={tier} "
@@ -1510,6 +1645,33 @@ def enforce_signal_quality(result: dict) -> dict:
 
     if result.get("generic_conditional_brand_shirt"):
         return _desirability_block("generic_conditional_brand_shirt_block")
+
+    is_harley = bool("harley davidson" in title_l or "harley-davidson" in title_l or "harley" in title_l or "harley" in brand_l)
+    if is_harley:
+        harley_hits = _keyword_hits_lower(title_l, HARLEY_STRONG_ITEM_SIGNALS)
+        harley_auth_hits = _keyword_hits_lower(title_l, [
+            "single stitch", "made in usa", "made in the usa", "90s",
+            "80s", "3d emblem", "sturgis", "daytona",
+        ])
+        weak_type_hit = _first_hit(title_l, HARLEY_WEAK_GENERIC_TYPES)
+        weak_harley_top = bool(
+            (tier == "TIER_C" or engine == "GRAIL" or result.get("is_grail"))
+            and (result.get("category") in ("tshirt", "shirt", "top") or weak_type_hit)
+            and len(set(harley_hits)) < 2
+            and pattern_score < 4
+            and not harley_auth_hits
+        )
+        if weak_harley_top:
+            result["is_grail"] = False
+            result["grail_score"] = min(int(result.get("grail_score", 0) or 0), 2)
+            result["confidence"] = min(float(result.get("confidence", 0) or 0), 6.5)
+            result["signal_quality_score"] = min(float(result.get("signal_quality_score", 0) or 0), 58.0)
+            confidence = float(result.get("confidence", 0) or 0)
+            quality = float(result.get("signal_quality_score", 0) or 0)
+            if DEBUG_ALERTS:
+                print(f"  [WEAK_HARLEY_DOWNGRADE] reason=generic_top_no_strong_signal title={title}")
+            if engine != "CHAOS":
+                return _block("weak_harley_generic_top")
 
     if result.get("carhartt_is_basic_tee"):
         strong_auth = bool(
@@ -3015,12 +3177,19 @@ class Engine:
         # Fallback: zero candidates → top-1 relaxed
         def _print_quality_summary(sent_count: int = 0) -> None:
             blocked_by_reason: dict[str, int] = {}
+            watch_by_reason: dict[str, int] = {}
             watch_count = 0
             passed_count = 0
             blocked_count = 0
+            passed_quality: list[float] = []
+            blocked_quality: list[float] = []
+            passed_desirability: list[float] = []
+            blocked_desirability: list[float] = []
             for rr in all_scored:
                 if rr.get("quality_pass") and rr.get("send_alert") and not rr.get("watch_candidate"):
                     passed_count += 1
+                    passed_quality.append(float(rr.get("signal_quality_score", 0) or 0))
+                    passed_desirability.append(float(rr.get("desirability_score", 0) or 0))
                     continue
                 reason = (
                     rr.get("_watch_original_reason")
@@ -3031,12 +3200,30 @@ class Engine:
                 )
                 if rr.get("watch_candidate"):
                     watch_count += 1
+                    watch_reason = rr.get("_quality_block_reason") or "watch_only_candidate"
+                    watch_by_reason[watch_reason] = watch_by_reason.get(watch_reason, 0) + 1
+                    original = rr.get("_watch_original_reason")
+                    if original:
+                        watch_by_reason[original] = watch_by_reason.get(original, 0) + 1
+                    if int(rr.get("pattern_score", 0) or 0) >= 3:
+                        watch_by_reason["borderline_pattern"] = watch_by_reason.get("borderline_pattern", 0) + 1
+                    if rr.get("desirable_signals"):
+                        watch_by_reason["desirable_but_low_quality"] = watch_by_reason.get("desirable_but_low_quality", 0) + 1
                 if reason != "ok":
                     blocked_count += 1
+                    blocked_quality.append(float(rr.get("signal_quality_score", 0) or 0))
+                    blocked_desirability.append(float(rr.get("desirability_score", 0) or 0))
                     blocked_by_reason[reason] = blocked_by_reason.get(reason, 0) + 1
+            avg_q_pass = (sum(passed_quality) / len(passed_quality)) if passed_quality else 0
+            avg_q_block = (sum(blocked_quality) / len(blocked_quality)) if blocked_quality else 0
+            avg_d_pass = (sum(passed_desirability) / len(passed_desirability)) if passed_desirability else 0
+            avg_d_block = (sum(blocked_desirability) / len(blocked_desirability)) if blocked_desirability else 0
             print(f"  [QUALITY_SUMMARY] scored={len(all_scored)} passed={passed_count} "
                   f"blocked={blocked_count} watch={watch_count} sent={sent_count} "
-                  f"blocked_by_reason={blocked_by_reason}")
+                  f"blocked_by_reason={blocked_by_reason} "
+                  f"watch_by_reason={watch_by_reason} "
+                  f"avg_quality_passed={avg_q_pass:.1f} avg_quality_blocked={avg_q_block:.1f} "
+                  f"avg_desirability_passed={avg_d_pass:.1f} avg_desirability_blocked={avg_d_block:.1f}")
 
         if not candidate_pool and not (WATCH_ALERTS_ENABLED and any(r.get("watch_candidate") for r in fallback_pool)):
             held = sum(1 for r in fallback_pool if (r.get("await_state") or {}).get("hold"))
