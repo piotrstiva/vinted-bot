@@ -45,7 +45,7 @@ DEBUG_ALERTS    = True
 WATCH_ALERTS_ENABLED = os.getenv("WATCH_ALERTS_ENABLED", "0") == "1"
 WATCH_MAX_PER_CYCLE = int(os.getenv("WATCH_MAX_PER_CYCLE", "2"))
 TASTE_WATCH_ENABLED = os.getenv("TASTE_WATCH_ENABLED", "1") == "1"
-TASTE_WATCH_SEND_ENABLED = os.getenv("TASTE_WATCH_SEND_ENABLED", "0") == "1"
+TASTE_WATCH_SEND_ENABLED = os.getenv("TASTE_WATCH_SEND_ENABLED", "1") == "1"
 TASTE_WATCH_MAX_PER_CYCLE = int(os.getenv("TASTE_WATCH_MAX_PER_CYCLE", "2"))
 DEBUG_PIPELINE  = os.getenv("DEBUG_PIPELINE", "0") == "1"   # Part 7 — verbose pipeline log
 
@@ -1047,6 +1047,19 @@ TASTE_ERA_SIGNALS = [
     "1998", "1999", "2000", "2001", "2002", "2004", "2007",
 ]
 
+TASTE_META_SIGNALS = {
+    "taste_price_<=30",
+    "taste_price_<=50",
+    "taste_price_<=80",
+    "taste_good_resale_size",
+    "taste_ok_resale_size",
+    "taste_fresh_low_price_style",
+}
+
+
+def _has_real_taste_signal(signals) -> bool:
+    return any(str(sig) not in TASTE_META_SIGNALS for sig in (signals or []))
+
 
 def _clip_score(value: float, low: float = 0.0, high: float = 100.0) -> float:
     return max(low, min(high, value))
@@ -1978,7 +1991,9 @@ def compute_taste_watch_score(item: dict, result: dict) -> dict:
     brand_l = str(result.get("brand") or result.get("brand_detected") or item.get("brand") or "").lower()
     category = result.get("category") or detect_category(title) or ""
     price = float(item.get("price") or 0)
+    age = item_age_minutes(item)
     size_bucket = _taste_size_bucket(item, text_l)
+    clothing_ok = _taste_item_type(text_l, category)
     taste_signals: list[str] = []
     taste_penalties: list[str] = []
     buckets: set[str] = set()
@@ -2063,7 +2078,7 @@ def compute_taste_watch_score(item: dict, result: dict) -> dict:
         penalty("fake_inspired_unofficial", 30)
     if any(k in text_l for k in ["very poor", "destroyed", "holes", "stained", "plamy", "dziury"]):
         penalty("very_poor_condition", 25)
-    has_context = bool(taste_signals)
+    has_context = _has_real_taste_signal(taste_signals)
     if any(k in text_l for k in ["blank", "plain", "basic"]) and not visual_hit and not has_context:
         penalty("generic_blank_no_context", 30)
     if brand_l in CONDITIONAL_STRONG_BRANDS and not visual_hit and not has_context:
@@ -2084,6 +2099,22 @@ def compute_taste_watch_score(item: dict, result: dict) -> dict:
         hard_reason = "generic_conditional_brand_shirt_block"
     elif result.get("is_low_quality_aesthetic"):
         hard_reason = "low_quality_aesthetic_hard_block"
+    elif not clothing_ok:
+        hard_reason = "non_clothing_style_watch_block"
+
+    real_taste_signal = _has_real_taste_signal(taste_signals)
+    if age <= 30 and score >= 55 and price <= 50 and real_taste_signal and not hard_reason:
+        old_score = score
+        score = min(100, score + 10)
+        signals = result.get("desirable_signals", []) or []
+        if "fresh_low_price_style" not in signals:
+            signals.append("fresh_low_price_style")
+        result["desirable_signals"] = signals
+        if "taste_fresh_low_price_style" not in taste_signals:
+            taste_signals.append("taste_fresh_low_price_style")
+        if DEBUG_ALERTS:
+            print(f"  [TASTE_FRESH_BOOST] old={old_score:.0f} new={score:.0f} "
+                  f"price={price:.0f} age={age} title={title[:60]}")
 
     if taste_signals and not hard_reason:
         old_score = score
@@ -2100,7 +2131,7 @@ def compute_taste_watch_score(item: dict, result: dict) -> dict:
         TASTE_WATCH_ENABLED
         and not hard_reason
         and (
-            (score >= 60 and price <= 160)
+            (score >= 60 and price <= 160 and real_taste_signal)
             or (score >= 50 and price <= 50 and len(taste_signals) >= 2)
             or streetwear_size_ok
         )
@@ -3279,6 +3310,23 @@ def format_alert(result: dict) -> str:
 
     age_str = f"{age_min}min" if age_min and age_min < 360 else "?"
 
+    if style_watch_alert:
+        taste_signals = (result.get("taste_signals") or [])[:6]
+        link = item.get("url") or item.get("link") or ""
+        lines = [
+            "\U0001F440 STYLE WATCH",
+            f"score={result.get('taste_watch_score', 0):.0f}",
+            f"bucket={result.get('taste_bucket', 'none')}",
+            f"price={price:.0f} PLN",
+            f"age={age_str}",
+            f"signals={', '.join(taste_signals) if taste_signals else '-'}",
+            "",
+            clean[:120],
+        ]
+        if link:
+            lines.extend(["", "Open link:", str(link)])
+        return "\n".join(lines)
+
     lines = [
         "━" * 32,
         f"{header}  · conf={conf:.1f}/10",
@@ -4075,14 +4123,47 @@ class Engine:
         # ── Step 9: assign ranking_position + session dedup ─────────────
         added_watch_ids: set[str] = set()
         if TASTE_WATCH_SEND_ENABLED:
-            taste_pool = [r for r in fallback_pool if r.get("taste_watch_candidate")]
+            style_hard_reasons = {
+                "fake_or_fast_fashion",
+                "small_carhartt_pants",
+                "carhartt_pants_small_size_skip",
+                "generic_conditional_brand_shirt_block",
+                "low_quality_aesthetic_hard_block",
+                "low_quality_aesthetic_blocked",
+                "non_clothing_style_watch_block",
+            }
+
+            def _style_watch_sendable(r: dict) -> bool:
+                item = r.get("item") or {}
+                text_l = _item_search_text(item, r)
+                brand_l = str(r.get("brand") or r.get("brand_detected") or item.get("brand") or "").lower()
+                category = r.get("category") or detect_category(str(item.get("title") or "")) or ""
+                reason = r.get("_quality_block_reason") or r.get("_watch_original_reason") or ""
+                if not r.get("taste_watch_candidate"):
+                    return False
+                if reason in style_hard_reasons:
+                    return False
+                if float(r.get("taste_watch_score", 0) or 0) < 60:
+                    return False
+                if not _has_real_taste_signal(r.get("taste_signals") or []):
+                    return False
+                if not _taste_item_type(text_l, category):
+                    return False
+                if _taste_fast_fashion(text_l, brand_l):
+                    return False
+                if r.get("carhartt_size_skip") or r.get("generic_conditional_brand_shirt") or r.get("is_low_quality_aesthetic"):
+                    return False
+                return True
+
+            taste_pool = [r for r in fallback_pool if _style_watch_sendable(r)]
             taste_pool.sort(key=lambda r: (
                 r.get("taste_watch_score", 0),
-                r.get("signal_quality_score", 0),
-                r.get("desirability_score", 0),
+                -float((r.get("item") or {}).get("price") or 0),
+                -int(r.get("age_min", item_age_minutes(r.get("item") or {})) or 999),
+                len(r.get("taste_signals") or []),
             ), reverse=True)
             added_taste = taste_pool[:max(TASTE_WATCH_MAX_PER_CYCLE, 0)]
-            for r in added_taste:
+            for taste_rank, r in enumerate(added_taste, start=1):
                 r["final_score"] = _final_score_v2(r)
                 r["send_alert"] = True
                 r["send"] = True
@@ -4090,8 +4171,12 @@ class Engine:
                 key = str((r.get("item") or {}).get("id") or (r.get("item") or {}).get("url") or "")
                 if key:
                     added_watch_ids.add(key)
-                print(f"  [TASTE_WATCH_SEND] score={r.get('taste_watch_score',0):.0f} "
+                print(f"  [STYLE_WATCH_SEND] rank={taste_rank} "
+                      f"score={r.get('taste_watch_score',0):.0f} "
                       f"bucket={r.get('taste_bucket','none')} "
+                      f"price={float((r.get('item') or {}).get('price') or 0):.0f} "
+                      f"age={r.get('age_min', item_age_minutes(r.get('item') or {}))} "
+                      f"signals={(r.get('taste_signals') or [])[:5]} "
                       f"title={str((r.get('item') or {}).get('title') or '')[:60]}")
             selected.extend(added_taste)
 
