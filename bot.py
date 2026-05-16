@@ -56,6 +56,10 @@ RAW_STYLE_SNIPER_MAX_PER_CYCLE = int(os.getenv("RAW_STYLE_SNIPER_MAX_PER_CYCLE",
 RAW_STYLE_SNIPER_MAX_AGE_MIN = int(os.getenv("RAW_STYLE_SNIPER_MAX_AGE_MIN", "90"))
 RAW_STYLE_SNIPER_MAX_PRICE = float(os.getenv("RAW_STYLE_SNIPER_MAX_PRICE", "160"))
 NEGOTIATION_BUFFER_PLN = float(os.getenv("NEGOTIATION_BUFFER_PLN", "15"))
+STARTUP_IMAGE_ENABLED = os.getenv("STARTUP_IMAGE_ENABLED", "1") == "1"
+STARTUP_IMAGE_PATH = os.getenv("STARTUP_IMAGE_PATH", "assets/hidden_gem_logo.png")
+STARTUP_IMAGE_URL = os.getenv("STARTUP_IMAGE_URL", "")
+STARTUP_MESSAGE_COMPACT = os.getenv("STARTUP_MESSAGE_COMPACT", "1") == "1"
 
 # ─────────────────────────────────────────
 #  ⚡ SNIPER MODE
@@ -2293,6 +2297,7 @@ def collect_raw_style_candidate(item: dict, search: dict | None = None):
 
 
 def format_raw_style_alert(result: dict) -> str:
+    return format_telegram_alert(result.get("item") or {}, result, "RAW_STYLE")
     item = result.get("item") or {}
     signals = ", ".join((result.get("raw_style_signals") or [])[:6]) or "-"
     price = float(item.get("price") or 0)
@@ -2344,7 +2349,7 @@ def send_raw_style_candidates(max_cycle_slots: int, sent_this_cycle: int) -> int
             print(f"[RAW_STYLE_DEDUPE_BLOCK] key={key} title={str(item.get('title') or '')[:60]}")
             continue
         photo = item.get("photo") or get_item_photo(item.get("id"), item.get("link") or item.get("url") or "")
-        sent_ok = send_message(format_raw_style_alert(result), photo_url=photo, item_link=item.get("link") or item.get("url"))
+        sent_ok = send_message(format_telegram_alert(item, result, "RAW_STYLE"), photo_url=photo, item_link=item.get("link") or item.get("url"))
         if not sent_ok:
             print(f"[TELEGRAM] raw_style_send_failed key={key} title={str(item.get('title') or '')[:60]}")
             continue
@@ -2453,6 +2458,325 @@ def send_message(text, photo_url=None, item_link=None):
 # ─────────────────────────────────────────
 #  💰 WYCIĄGANIE CENY
 # ─────────────────────────────────────────
+TITLE_NOISE_WORDS = [
+    "swag", "drip", "opium", "archive", "avantgarde", "rare unique",
+    "hidden gem", "japanstyle", "y2k", "rap",
+]
+
+SIGNAL_LABELS = {
+    "taste_old_blank_tag": "old blank tag",
+    "taste_year_era": "rocznik / era vintage",
+    "taste_good_resale_size": "dobry rozmiar",
+    "taste_ok_resale_size": "sensowny rozmiar",
+    "taste_price_<=30": "bardzo dobra cena",
+    "taste_price_<=50": "dobra cena",
+    "taste_price_<=80": "sensowna cena",
+    "taste_visual_graphic": "mocny grafik",
+    "vintage_blank_tag_signal": "old blank tag",
+    "vintage_blank_graphic_combo": "blank tag + grafik",
+    "pop_culture_graphic_signal": "pop culture graphic",
+    "pop_culture_good_price": "dobra cena pop culture",
+    "harley_dealer_location_graphic": "Harley dealer/location print",
+    "harley_style_watch": "Harley graphic / biker vibe",
+    "biker_event_graphic_signal": "biker/event graphic",
+    "vintage_sports_college_signal": "vintage sports / college",
+    "ralph_lauren_graphic_spellout": "Ralph Lauren graphic/spellout",
+    "rrl_double_rl_mega_signal": "RRL / Double RL",
+    "rrl_western_heritage_signal": "RRL western / heritage",
+    "lee_vintage_workwear_jacket": "Lee vintage workwear",
+    "carhartt_desirable_item": "Carhartt desirable model",
+    "carhartt_good_pants_size": "dobry rozmiar Carhartt pants",
+    "single_stitch": "single stitch",
+    "made_in_usa": "Made in USA",
+    "screen_stars": "Screen Stars tag",
+    "nutmeg": "Nutmeg tag",
+    "fruit_of_the_loom": "Fruit of the Loom tag",
+    "raw_style_old_blank": "old blank / vintage tag",
+    "raw_style_pop_culture": "pop culture",
+    "raw_style_biker": "biker / Harley vibe",
+    "raw_style_sports": "vintage sports",
+    "raw_style_streetwear": "streetwear",
+    "raw_style_workwear": "workwear / heritage",
+    "raw_style_metal": "metal / band graphic",
+    "fresh_low_price_style": "swiezy listing + dobra cena",
+}
+
+
+def clean_title(title: str) -> str:
+    text = str(title or "")
+    text = re.sub(r",?\s*(marka|stan|rozmiar):.*", "", text, flags=re.IGNORECASE)
+    for word in TITLE_NOISE_WORDS:
+        text = re.sub(rf"(?i)\b{re.escape(word)}\b", " ", text)
+    text = re.sub(r"\s+", " ", text).strip(" -_,")
+    return (text[:87] + "...") if len(text) > 90 else (text or "Item")
+
+
+def humanize_signal(signal: str) -> str:
+    raw = str(signal or "").strip()
+    if not raw:
+        return ""
+    if ":" in raw:
+        prefix, value = raw.split(":", 1)
+        prefix_map = {
+            "old_blank": "old blank / vintage tag",
+            "pop": "pop culture",
+            "biker": "biker / Harley vibe",
+            "sports": "vintage sports",
+            "streetwear": "streetwear",
+            "workwear": "workwear / heritage",
+            "metal": "metal / band graphic",
+            "visual": "mocny grafik",
+            "era": "rocznik / era vintage",
+            "size": "dobry rozmiar",
+            "price": "dobra cena",
+            "fresh": "swiezy listing",
+        }
+        if prefix in prefix_map:
+            if prefix in {"old_blank", "pop", "biker", "sports", "streetwear", "workwear", "metal"} and value:
+                return f"{prefix_map[prefix]}: {value.replace('_', ' ')}"
+            return prefix_map[prefix]
+    if raw in SIGNAL_LABELS:
+        return SIGNAL_LABELS[raw]
+    cleaned = raw
+    for prefix in ("taste_", "raw_style_", "signal_"):
+        if cleaned.startswith(prefix):
+            cleaned = cleaned[len(prefix):]
+    return cleaned.replace("_", " ")[:42]
+
+
+def _alert_type(result: dict, fallback: str | None = None) -> str:
+    if fallback:
+        return fallback
+    if result.get("engine") == "RAW_STYLE":
+        return "RAW_STYLE"
+    if result.get("style_watch_sent"):
+        return "STYLE_WATCH"
+    engine_name = result.get("engine")
+    if engine_name == "GRAIL" or result.get("is_grail"):
+        return "GRAIL"
+    if engine_name == "BRAND":
+        return "BRAND"
+    if engine_name == "CHAOS":
+        return "FLIP"
+    if result.get("taste_watch_candidate"):
+        return "STYLE_WATCH"
+    return "ITEM"
+
+
+def _alert_meta(alert_type: str) -> dict:
+    return {
+        "GRAIL": ("💎 GRAIL FIND", "Grail score", "Mocny kandydat - sprawdz szybko"),
+        "RAW_STYLE": ("⚡ RAW STYLE SNIPE", "Style score", "Swieze + w Twoim stylu - kliknij szybko"),
+        "STYLE_WATCH": ("👀 STYLE WATCH", "Taste score", "Warto zobaczyc, niekoniecznie instant buy"),
+        "FLIP": ("🔥 FLIP ALERT", "Flip score", "Potencjalny flip - sprawdz stan i cene"),
+        "BRAND": ("🔵 BRAND FIND", "Brand score", "Marka/model do sprawdzenia"),
+        "ITEM": ("📌 ITEM ALERT", "Score", "Warto sprawdzic"),
+    }.get(alert_type, ("📌 ITEM ALERT", "Score", "Warto sprawdzic"))
+
+
+def _item_age_label(item: dict, result: dict) -> str:
+    age = result.get("age_min") or item.get("age_min")
+    if age is None:
+        age = parse_item_age_minutes(item)
+    try:
+        age_int = int(age)
+        return f"{age_int} min" if age_int < 360 else "?"
+    except Exception:
+        return "?"
+
+
+def _score_for_alert(result: dict, alert_type: str):
+    if alert_type == "RAW_STYLE":
+        score = result.get("raw_style_score") or result.get("taste_watch_score") or result.get("final_score")
+    elif alert_type == "STYLE_WATCH":
+        score = result.get("taste_watch_score") or result.get("raw_style_score") or result.get("final_score")
+    elif alert_type == "GRAIL":
+        score = result.get("final_score") or result.get("signal_quality_score") or result.get("grail_score")
+    else:
+        score = result.get("final_score") or result.get("signal_quality_score")
+    try:
+        return min(100, max(0, round(float(score))))
+    except Exception:
+        return None
+
+
+def _telegram_reasons(item: dict, result: dict, alert_type: str) -> list[str]:
+    signals = []
+    for key in ("desirable_signals", "taste_signals", "raw_style_signals"):
+        val = result.get(key) or []
+        if isinstance(val, str):
+            val = [val]
+        signals.extend(val)
+    labels = []
+    for sig in signals:
+        label = humanize_signal(sig)
+        if label and label not in labels and not label.startswith("_"):
+            labels.append(label)
+    title_l = str(item.get("title") or "").lower()
+    if "screen stars" in title_l and "Screen Stars tag" not in labels:
+        labels.append("Screen Stars tag")
+    if "single stitch" in title_l and "single stitch" not in labels:
+        labels.append("single stitch")
+    if "made in usa" in title_l and "Made in USA" not in labels:
+        labels.append("Made in USA")
+    if (result.get("effective_price") or 0) and "negocjacyjna cena" not in labels:
+        labels.append("negocjacyjna cena")
+    if _item_age_label(item, result) != "?" and "swiezy listing" not in labels:
+        labels.append("swiezy listing")
+    priority = {
+        "rrl": 0, "carhartt": 0, "harley": 0, "lee": 0, "ralph": 0,
+        "screen": 1, "single": 1, "made": 1, "old blank": 1, "vintage": 1,
+        "graphic": 2, "grafik": 2, "pop culture": 2, "biker": 2,
+        "rozmiar": 3, "cena": 4, "swiezy": 4,
+    }
+    labels.sort(key=lambda x: min((v for k, v in priority.items() if k in x.lower()), default=9))
+    return labels[:5] or ["ciekawy sygnal", "warto sprawdzic"]
+
+
+def _type_label(result: dict, alert_type: str) -> str:
+    label = (
+        result.get("raw_style_bucket")
+        or result.get("taste_bucket")
+        or result.get("category")
+        or result.get("tier")
+        or alert_type.lower()
+    )
+    return str(label).replace("_", " ").lower()
+
+
+def format_telegram_alert(item: dict, result: dict, alert_type: str | None = None) -> str:
+    item = item or {}
+    result = result or {}
+    alert_type = _alert_type(result, alert_type)
+    header, score_label, decision = _alert_meta(alert_type)
+    title = clean_title(item.get("title", ""))
+    price = item.get("price")
+    link = item.get("link") or item.get("url") or ""
+    size = item.get("size") or result.get("size")
+    age = _item_age_label(item, result)
+    score = _score_for_alert(result, alert_type)
+    effective_price = result.get("effective_price")
+    estimated_value = result.get("estimated_value") or result.get("market_price") or item.get("market_price") or result.get("resale_value")
+    profit = result.get("profit") or result.get("estimated_profit")
+
+    lines = [header, "━━━━━━━━━━━━━━", f"📦 {title}", ""]
+    try:
+        if price:
+            lines.append(f"💰 Cena: {float(price):.0f} zł")
+    except Exception:
+        lines.append(f"💰 Cena: {price}")
+    try:
+        if effective_price is not None and price and float(effective_price) < float(price):
+            lines.append(f"🤝 Po negocjacji: ~{float(effective_price):.0f} zł")
+    except Exception:
+        pass
+    if alert_type == "FLIP":
+        try:
+            if estimated_value:
+                lines.append(f"📈 Wycena: ~{float(estimated_value):.0f} zł")
+            if profit:
+                lines.append(f"🟢 Potencjał: +{float(profit):.0f} zł")
+        except Exception:
+            pass
+    if size:
+        lines.append(f"📏 Rozmiar: {size}")
+    if age != "?":
+        lines.append(f"⏱️ Dodane: {age}")
+    if score is not None:
+        lines.append(f"🎯 {score_label}: {score}/100")
+    reasons = _telegram_reasons(item, result, alert_type)
+    lines.extend(["", "✅ Dlaczego warto:"])
+    lines.extend([f"• {reason}" for reason in reasons])
+    lines.extend(["", f"🏷️ Typ: {_type_label(result, alert_type)}", f"🧠 Decyzja: {decision}"])
+    if link:
+        lines.extend(["", "🔗 Otwórz na Vinted:", str(link)])
+    return "\n".join(lines)
+
+
+def send_telegram_photo(chat_id, photo_path_or_url, caption) -> bool:
+    tg_base = f"https://api.telegram.org/bot{TOKEN}"
+    try:
+        data = {"chat_id": chat_id, "caption": caption[:1024]}
+        if str(photo_path_or_url).startswith(("http://", "https://")):
+            data["photo"] = photo_path_or_url
+            r = requests.post(f"{tg_base}/sendPhoto", data=data, timeout=15)
+        else:
+            with open(photo_path_or_url, "rb") as fh:
+                r = requests.post(f"{tg_base}/sendPhoto", data=data, files={"photo": fh}, timeout=20)
+        print(f"[TELEGRAM] status={r.status_code} body={r.text[:200]}")
+        if r.status_code == 200:
+            print("[STARTUP_IMAGE_SENT]")
+            return True
+        print(f"[STARTUP_IMAGE_ERROR] error=status_{r.status_code}")
+        return False
+    except Exception as e:
+        print(f"[STARTUP_IMAGE_ERROR] error={e}")
+        return False
+
+
+def build_startup_message() -> str:
+    raw_status = "ON" if RAW_STYLE_SNIPER_ENABLED else "OFF"
+    watch_enabled = os.getenv("TASTE_WATCH_ENABLED", "1") == "1" or os.getenv("TASTE_WATCH_SEND_ENABLED", "1") == "1"
+    watch_status = "ON" if watch_enabled else "OFF"
+    grail_status = "ON"
+    flip_status = "ON"
+    if STARTUP_MESSAGE_COMPACT:
+        return (
+            "💎 HIDDEN GEM — RADAR ACTIVE\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "👁️ Skanuję Vinted\n"
+            f"🔍 Wyszukiwań: {len(SEARCHES)}\n"
+            f"⚡ RAW Style: {raw_status}\n"
+            f"💎 Grail: {grail_status}\n"
+            f"👀 Watch: {watch_status}\n\n"
+            "🎯 Vintage / archive / pop culture / workwear\n\n"
+            "━━━━━━━━━━━━━━━━━━━━"
+        )
+    return (
+        "💎 HIDDEN GEM RADAR — ONLINE\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "👁️ Skanuję Vinted w tle\n"
+        f"🔍 Wyszukiwań: {len(SEARCHES)}\n"
+        f"⚡ RAW Style Sniper: {raw_status}\n"
+        f"👀 Style Watch: {watch_status}\n"
+        f"💎 Grail Engine: {grail_status}\n"
+        f"🔥 Flip Engine: {flip_status}\n\n"
+        "📦 Kategorie:\n"
+        "• Vintage tees / old blanks\n"
+        "• Harley / biker graphics\n"
+        "• Pop culture / Star Wars / Warner Bros\n"
+        "• Workwear / Carhartt / Lee\n"
+        "• Sports / college / MLB / NFL\n"
+        "• RRL / Ralph heritage\n\n"
+        "🎯 Cel:\n"
+        "Świeże, tanie i stylowe rzeczy zanim znikną.\n\n"
+        "━━━━━━━━━━━━━━━━━━━━"
+    )
+
+
+def send_startup_message():
+    caption = build_startup_message()
+    if STARTUP_IMAGE_ENABLED:
+        photo_ref = ""
+        if STARTUP_IMAGE_PATH:
+            candidates = [STARTUP_IMAGE_PATH]
+            if not os.path.isabs(STARTUP_IMAGE_PATH):
+                candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), STARTUP_IMAGE_PATH))
+            for candidate in candidates:
+                if os.path.exists(candidate):
+                    photo_ref = candidate
+                    break
+            if not photo_ref and not STARTUP_IMAGE_URL:
+                print("[STARTUP_IMAGE_FALLBACK] reason=missing_file")
+        if not photo_ref and STARTUP_IMAGE_URL:
+            photo_ref = STARTUP_IMAGE_URL
+        if photo_ref:
+            if send_telegram_photo(CHAT_ID, photo_ref, caption):
+                return
+            print("[STARTUP_IMAGE_FALLBACK] reason=send_error")
+    send_message(caption)
+
+
 def extract_price(text):
     """
     Wyciąga cenę z tekstu.
@@ -4078,7 +4402,7 @@ print("✅ BOT HIDDEN GEM FINDER URUCHOMIONY")
 load_bricklink_cache()
 refresh_session()
 
-send_message(
+if False: send_message(
     "━━━━━━━━━━━━━━━━━━━━━━━\n"
     "🤖  VINTED BOT  •  ONLINE\n"
     "━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -4096,6 +4420,8 @@ send_message(
     "\n"
     "━━━━━━━━━━━━━━━━━━━━━━━"
 )
+
+send_startup_message()
 
 seen          = load_seen()
 # FIX: usuń stale seen jeśli mają stary format (30-dniowy) — jednorazowe czyszczenie
@@ -4323,7 +4649,7 @@ while True:
                     continue
 
                 photo     = item.get("photo") or get_item_photo(item["id"], item.get("link", ""))
-                alert_msg = engine.format_alert(result)
+                alert_msg = format_telegram_alert(item, result)
                 sent_ok = send_message(alert_msg, photo_url=photo, item_link=item.get("link"))
                 if not sent_ok:
                     print(f"[TELEGRAM] send_failed key={dedupe_key} title={str(item.get('title',''))[:60]}")
@@ -4390,7 +4716,7 @@ while True:
                         print(f"[DEDUPE_BLOCK] duplicate_before_send key={dedupe_key} title={str(item.get('title',''))[:60]}")
                         continue
                     photo     = item.get("photo") or get_item_photo(item["id"], item.get("link", ""))
-                    alert_msg = engine.format_alert(result)
+                    alert_msg = format_telegram_alert(item, result)
                     sent_ok = send_message(alert_msg, photo_url=photo, item_link=item.get("link"))
                     if not sent_ok:
                         print(f"[TELEGRAM] send_failed key={dedupe_key} title={str(item.get('title',''))[:60]}")
