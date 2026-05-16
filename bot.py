@@ -5,6 +5,7 @@ import json
 import re
 import base64
 import random
+from urllib.parse import quote_plus
 from statistics import median
 from bs4 import BeautifulSoup
 
@@ -48,6 +49,8 @@ MIN_SAVING_PLN   = 6       # minimalna oszczędność w zł (odrzuć 1-5 zł ró
 MAX_ALERTS_PER_SEARCH = 20  # więcej itemów do engine — silniki same filtrują jakość
 DEBUG_ALERTS          = True  # FIX: loguj decyzje engine (conf, profit, grail)
 DEBUG_PIPELINE        = os.getenv("DEBUG_PIPELINE", "0") == "1"  # verbose pipeline log
+TASTE_DISCOVERY_ENABLED = os.getenv("TASTE_DISCOVERY_ENABLED", "1") == "1"
+TASTE_DISCOVERY_MAX_QUERIES_PER_CYCLE = int(os.getenv("TASTE_DISCOVERY_MAX_QUERIES_PER_CYCLE", "3"))
 
 # ─────────────────────────────────────────
 #  ⚡ SNIPER MODE
@@ -1618,6 +1621,61 @@ SEARCHES = [
 # ─────────────────────────────────────────
 #  💾 PAMIĘĆ  (z automatycznym czyszczeniem)
 # ─────────────────────────────────────────
+TASTE_DISCOVERY_QUERIES = [
+    "screen stars",
+    "single stitch",
+    "made in usa t shirt",
+    "fruit of the loom usa",
+    "hanes heavyweight",
+    "hanes beefy",
+    "jerzees vintage",
+    "galt sand",
+    "nutmeg vintage",
+    "russell athletic vintage",
+    "vintage college sweatshirt",
+    "university sweatshirt vintage",
+    "mlb vintage",
+    "world series vintage",
+    "warner bros vintage",
+    "taz vintage",
+    "looney tunes vintage",
+    "lego star wars shirt",
+    "star wars vintage shirt",
+    "daytona biker",
+    "bikerfest",
+    "motorcycle vintage",
+    "realtree vintage",
+    "stussy",
+    "stussy vintage",
+    "polo ralph lauren eagle",
+    "ralph lauren spellout",
+    "polo sport vintage",
+    "rrl",
+    "double rl",
+    "lee vintage jacket",
+    "lee storm rider",
+    "carhartt active jacket",
+    "carhartt detroit",
+    "carhartt michigan coat",
+]
+
+
+def make_taste_discovery_search(query: str) -> dict:
+    encoded = quote_plus(query)
+    return {
+        "name": f"Taste Discovery: {query}",
+        "url": f"https://www.vinted.pl/catalog?search_text={encoded}&catalog[]=4&order=newest_first&currency=PLN&price_to=300",
+        "category": "clothing",
+        "keywords": query.split(),
+        "exclude_keywords": ["dziec", "kids", "baby", "junior"],
+        "min_price": 1,
+        "layer": "taste_discovery",
+        "hidden_gem_mode": True,
+        "taste_discovery": True,
+        "no_median": True,
+    }
+
+
 SEEN_FILE      = "seen_items.json"
 DATA_DIR       = os.getenv("DATA_DIR", "/data/vinted_bot")
 try:
@@ -3676,6 +3734,20 @@ while True:
         if random.random() < 0.10:
             print(f"  [CYCLE] early_exit=True (noise injection)")
             this_cycle_searches = this_cycle_searches[:1]
+
+        if TASTE_DISCOVERY_ENABLED and TASTE_DISCOVERY_QUERIES:
+            taste_limit = max(0, int(TASTE_DISCOVERY_MAX_QUERIES_PER_CYCLE or 0))
+            taste_count = min(taste_limit, len(TASTE_DISCOVERY_QUERIES))
+            if taste_count:
+                chosen_taste_queries = random.sample(TASTE_DISCOVERY_QUERIES, taste_count)
+                existing_search_names = {s.get("name") for s in this_cycle_searches}
+                for taste_query in chosen_taste_queries:
+                    taste_search = make_taste_discovery_search(taste_query)
+                    if taste_search["name"] in existing_search_names:
+                        continue
+                    this_cycle_searches.append(taste_search)
+                    existing_search_names.add(taste_search["name"])
+                    print(f"  [TASTE_DISCOVERY_QUERY] query={taste_query} reason=manual_taste_pool")
 
         print(f"  [CYCLE] search_count={len(this_cycle_searches)} "
               f"(target={n_searches})")
