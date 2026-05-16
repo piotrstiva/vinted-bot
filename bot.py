@@ -60,6 +60,11 @@ STARTUP_IMAGE_ENABLED = os.getenv("STARTUP_IMAGE_ENABLED", "1") == "1"
 STARTUP_IMAGE_PATH = os.getenv("STARTUP_IMAGE_PATH", "assets/hidden_gem_logo.png")
 STARTUP_IMAGE_URL = os.getenv("STARTUP_IMAGE_URL", "")
 STARTUP_MESSAGE_COMPACT = os.getenv("STARTUP_MESSAGE_COMPACT", "1") == "1"
+CANDIDATE_AUDIT_ENABLED = os.getenv("CANDIDATE_AUDIT_ENABLED", "1") == "1"
+CANDIDATE_AUDIT_PATH = os.getenv("CANDIDATE_AUDIT_PATH", "/data/vinted_bot/candidate_audit.jsonl")
+CANDIDATE_AUDIT_MAX_LINES_PER_CYCLE = int(os.getenv("CANDIDATE_AUDIT_MAX_LINES_PER_CYCLE", "300"))
+CANDIDATE_AUDIT_TELEGRAM_SUMMARY = os.getenv("CANDIDATE_AUDIT_TELEGRAM_SUMMARY", "0") == "1"
+AUDIT_WATCH_TITLES = os.getenv("AUDIT_WATCH_TITLES", "")
 
 # ─────────────────────────────────────────
 #  ⚡ SNIPER MODE
@@ -1911,9 +1916,11 @@ def filter_unsent_items(items: list[dict]) -> list[dict]:
         key = get_item_dedupe_key(item)
         if key in batch_keys:
             print(f"[DEDUPE_SKIP] duplicate_in_batch key={key} title={str(item.get('title',''))[:60]}")
+            audit_candidate("dedupe_skip", item, block_reason="duplicate_in_batch")
             continue
         if already_sent(key):
             print(f"[DEDUPE_SKIP] already_sent key={key} title={str(item.get('title',''))[:60]}")
+            audit_candidate("dedupe_skip", item, block_reason="already_sent_before_engine")
             continue
         batch_keys.add(key)
         filtered.append(item)
@@ -2002,6 +2009,25 @@ RAW_STYLE_STATS = {
     "dedupe_skipped": 0,
 }
 
+AUDIT_CURRENT_CYCLE = 0
+AUDIT_LINES_THIS_CYCLE = 0
+AUDIT_WRITE_ERROR_LOGGED = False
+AUDIT_WATCH_NEEDLES = [x.strip().lower() for x in AUDIT_WATCH_TITLES.split(",") if x.strip()]
+AUDIT_STATS = {
+    "seen": 0,
+    "raw_checked": 0,
+    "raw_candidates": 0,
+    "raw_sent": 0,
+    "main_candidates": 0,
+    "main_sent": 0,
+    "blocked": 0,
+    "dedupe_skipped": 0,
+    "top_block_reasons": {},
+    "top_queries": {},
+}
+AUDIT_TOP_BLOCKED: list[dict] = []
+AUDIT_TOP_NOT_SENT: list[dict] = []
+
 
 def raw_normalize_text(text: str) -> str:
     text_l = str(text or "").lower()
@@ -2060,6 +2086,145 @@ def _raw_size_bucket(text: str, item: dict) -> str:
 
 def _raw_real_signal_count(signals: list[str]) -> int:
     return sum(1 for sig in signals if str(sig).startswith(RAW_STYLE_STRONG_SIGNAL_PREFIXES))
+
+
+def reset_candidate_audit_cycle(cycle_number: int):
+    global AUDIT_CURRENT_CYCLE, AUDIT_LINES_THIS_CYCLE
+    AUDIT_CURRENT_CYCLE = cycle_number
+    AUDIT_LINES_THIS_CYCLE = 0
+    AUDIT_STATS.update({
+        "seen": 0,
+        "raw_checked": 0,
+        "raw_candidates": 0,
+        "raw_sent": 0,
+        "main_candidates": 0,
+        "main_sent": 0,
+        "blocked": 0,
+        "dedupe_skipped": 0,
+        "top_block_reasons": {},
+        "top_queries": {},
+    })
+    AUDIT_TOP_BLOCKED.clear()
+    AUDIT_TOP_NOT_SENT.clear()
+
+
+def _audit_bump(stage: str, event: dict):
+    query = event.get("query") or "unknown"
+    AUDIT_STATS["top_queries"][query] = AUDIT_STATS["top_queries"].get(query, 0) + 1
+    if stage == "seen":
+        AUDIT_STATS["seen"] += 1
+    elif stage == "raw_style_check":
+        AUDIT_STATS["raw_checked"] += 1
+    elif stage == "candidate":
+        if event.get("alert_type") == "RAW_STYLE" or event.get("bucket"):
+            AUDIT_STATS["raw_candidates"] += 1
+        else:
+            AUDIT_STATS["main_candidates"] += 1
+    elif stage == "main_engine_score":
+        AUDIT_STATS["main_candidates"] += 1
+    elif stage == "sent":
+        if event.get("alert_type") == "RAW_STYLE":
+            AUDIT_STATS["raw_sent"] += 1
+        else:
+            AUDIT_STATS["main_sent"] += 1
+    elif stage in ("blocked", "quality_block", "dedupe_skip"):
+        if stage == "dedupe_skip":
+            AUDIT_STATS["dedupe_skipped"] += 1
+        else:
+            AUDIT_STATS["blocked"] += 1
+        reason = event.get("block_reason") or stage
+        reasons = AUDIT_STATS["top_block_reasons"]
+        reasons[reason] = reasons.get(reason, 0) + 1
+
+
+def _audit_track_interesting(event: dict):
+    stage = event.get("stage")
+    score = float(event.get("score") or 0)
+    if stage in ("blocked", "quality_block"):
+        AUDIT_TOP_BLOCKED.append(event)
+        AUDIT_TOP_BLOCKED.sort(key=lambda e: float(e.get("score") or 0), reverse=True)
+        del AUDIT_TOP_BLOCKED[10:]
+    elif stage in ("rank_not_selected", "final_skip", "dedupe_skip"):
+        AUDIT_TOP_NOT_SENT.append(event)
+        AUDIT_TOP_NOT_SENT.sort(key=lambda e: float(e.get("score") or 0), reverse=True)
+        del AUDIT_TOP_NOT_SENT[10:]
+
+
+def write_candidate_audit(event: dict):
+    global AUDIT_LINES_THIS_CYCLE, AUDIT_WRITE_ERROR_LOGGED
+    if not CANDIDATE_AUDIT_ENABLED:
+        return
+    event = dict(event or {})
+    event.setdefault("ts", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+    event.setdefault("cycle", AUDIT_CURRENT_CYCLE)
+    _audit_bump(event.get("stage", ""), event)
+    _audit_track_interesting(event)
+    if AUDIT_LINES_THIS_CYCLE >= CANDIDATE_AUDIT_MAX_LINES_PER_CYCLE:
+        return
+    try:
+        folder = os.path.dirname(CANDIDATE_AUDIT_PATH)
+        if folder:
+            os.makedirs(folder, exist_ok=True)
+        with open(CANDIDATE_AUDIT_PATH, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
+        AUDIT_LINES_THIS_CYCLE += 1
+        title_n = raw_normalize_text(event.get("title") or "")
+        for needle in AUDIT_WATCH_NEEDLES:
+            needle_n = raw_normalize_text(needle)
+            if needle_n and needle_n in title_n:
+                print(f"[AUDIT_WATCH_MATCH] needle={needle} query={event.get('query')} "
+                      f"title={str(event.get('title') or '')[:60]} stage={event.get('stage')} "
+                      f"score={event.get('score')} block_reason={event.get('block_reason')} sent={event.get('sent')}")
+    except Exception as e:
+        if not AUDIT_WRITE_ERROR_LOGGED:
+            print(f"[AUDIT_WRITE_ERROR] error={e}")
+            AUDIT_WRITE_ERROR_LOGGED = True
+
+
+def audit_candidate(stage: str, item: dict, search: dict | None = None, result: dict | None = None,
+                    block_reason: str | None = None, sent: bool = False,
+                    alert_type: str | None = None, score=None, bucket=None, signals=None):
+    item = item or {}
+    result = result or {}
+    meta = item.get("_search_meta") or {}
+    search = search or {}
+    age = result.get("age_min") or item.get("age_min")
+    if age is None:
+        age = parse_item_age_minutes(item)
+    age_source = "created_at_ts" if item.get("created_at_ts") else ("age_min" if item.get("age_min") is not None else "parsed")
+    dedupe_key = ""
+    try:
+        dedupe_key = get_item_dedupe_key(item)
+    except Exception:
+        pass
+    event = {
+        "stage": stage,
+        "query": search.get("name") or meta.get("name") or "unknown",
+        "title": item.get("title"),
+        "url": item.get("url") or item.get("link"),
+        "brand": result.get("brand") or result.get("brand_detected") or item.get("brand"),
+        "price": item.get("price"),
+        "effective_price": result.get("effective_price"),
+        "age": age,
+        "age_source": age_source,
+        "size": item.get("size") or result.get("size"),
+        "category": result.get("category") or item.get("category"),
+        "bucket": bucket or result.get("raw_style_bucket") or result.get("taste_bucket") or result.get("tier"),
+        "score": score if score is not None else (
+            result.get("raw_style_score") or result.get("final_score") or result.get("signal_quality_score")
+        ),
+        "quality_score": result.get("signal_quality_score"),
+        "tier": result.get("tier") or result.get("signal_tier"),
+        "engine": result.get("engine"),
+        "signals": signals if signals is not None else (
+            result.get("raw_style_signals") or result.get("taste_signals") or result.get("desirable_signals") or []
+        ),
+        "block_reason": block_reason or result.get("_quality_block_reason") or result.get("raw_style_block_reason"),
+        "sent": bool(sent),
+        "alert_type": alert_type,
+        "dedupe_key": dedupe_key,
+    }
+    write_candidate_audit(event)
 
 
 def compute_raw_style_score(item: dict) -> dict:
@@ -2245,16 +2410,36 @@ def collect_raw_style_candidate(item: dict, search: dict | None = None):
           f"real_signal={profile['raw_style_real_signal']} price={float(item.get('price') or 0):.0f} "
           f"effective_price={profile['effective_price']:.0f} age={profile['age_min']} "
           f"title={str(item.get('title') or '')[:60]}")
+    audit_candidate(
+        "raw_style_check", item, search, profile,
+        score=profile.get("raw_style_score"),
+        bucket=profile.get("raw_style_bucket"),
+        signals=profile.get("raw_style_signals"),
+    )
     if not profile["eligible"]:
         RAW_STYLE_STATS["blocked"] += 1
         print(f"[RAW_STYLE_BLOCK] reason={profile['raw_style_block_reason']} "
               f"score={profile['raw_style_score']:.0f} signals={profile['raw_style_signals'][:5]} "
               f"title={str(item.get('title') or '')[:60]}")
+        audit_candidate(
+            "blocked", item, search, profile,
+            block_reason=profile.get("raw_style_block_reason"),
+            score=profile.get("raw_style_score"),
+            bucket=profile.get("raw_style_bucket"),
+            signals=profile.get("raw_style_signals"),
+        )
         return
     key = get_item_dedupe_key(item)
     if already_sent(key):
         RAW_STYLE_STATS["dedupe_skipped"] += 1
         print(f"[RAW_STYLE_DEDUPE_SKIP] key={key} title={str(item.get('title') or '')[:60]}")
+        audit_candidate(
+            "dedupe_skip", item, search, profile,
+            block_reason="already_sent",
+            score=profile.get("raw_style_score"),
+            bucket=profile.get("raw_style_bucket"),
+            signals=profile.get("raw_style_signals"),
+        )
         return
     result = {
         "engine": "RAW_STYLE",
@@ -2294,6 +2479,13 @@ def collect_raw_style_candidate(item: dict, search: dict | None = None):
           f"bucket={result['raw_style_bucket']} signals={result['raw_style_signals'][:5]} "
           f"price={float(item.get('price') or 0):.0f} effective_price={result['effective_price']:.0f} "
           f"age={result['age_min']} title={str(item.get('title') or '')[:60]}")
+    audit_candidate(
+        "candidate", item, search, result,
+        alert_type="RAW_STYLE",
+        score=result.get("raw_style_score"),
+        bucket=result.get("raw_style_bucket"),
+        signals=result.get("raw_style_signals"),
+    )
 
 
 def format_raw_style_alert(result: dict) -> str:
@@ -2347,6 +2539,9 @@ def send_raw_style_candidates(max_cycle_slots: int, sent_this_cycle: int) -> int
             if engines.intersection({"GRAIL", "BRAND", "CHAOS"}):
                 print(f"[RAW_STYLE_MERGE_WITH_MAIN_ENGINE] key={key} engines={sorted(engines)} title={str(item.get('title') or '')[:60]}")
             print(f"[RAW_STYLE_DEDUPE_BLOCK] key={key} title={str(item.get('title') or '')[:60]}")
+            audit_candidate("dedupe_skip", item, result=result, block_reason="duplicate_before_send",
+                            alert_type="RAW_STYLE", score=result.get("raw_style_score"),
+                            bucket=result.get("raw_style_bucket"), signals=result.get("raw_style_signals"))
             continue
         photo = item.get("photo") or get_item_photo(item.get("id"), item.get("link") or item.get("url") or "")
         sent_ok = send_message(format_telegram_alert(item, result, "RAW_STYLE"), photo_url=photo, item_link=item.get("link") or item.get("url"))
@@ -2363,6 +2558,9 @@ def send_raw_style_candidates(max_cycle_slots: int, sent_this_cycle: int) -> int
               f"price={float(item.get('price') or 0):.0f} "
               f"effective_price={float(result.get('effective_price') or 0):.0f} "
               f"age={result.get('age_min')} title={str(item.get('title') or '')[:60]}")
+        audit_candidate("sent", item, result=result, sent=True, alert_type="RAW_STYLE",
+                        score=result.get("raw_style_score"), bucket=result.get("raw_style_bucket"),
+                        signals=result.get("raw_style_signals"))
     return sent
 
 
@@ -2387,6 +2585,61 @@ def print_raw_style_summary():
           f"candidates={RAW_STYLE_STATS['candidates']} sent={RAW_STYLE_STATS['sent']} "
           f"blocked={RAW_STYLE_STATS['blocked']} dedupe_skipped={RAW_STYLE_STATS['dedupe_skipped']} "
           f"top_candidates={preview}")
+
+
+def print_candidate_audit_summary():
+    if not CANDIDATE_AUDIT_ENABLED:
+        return
+    summary = (f"[AUDIT_SUMMARY] cycle={AUDIT_CURRENT_CYCLE} "
+               f"seen={AUDIT_STATS['seen']} raw_checked={AUDIT_STATS['raw_checked']} "
+               f"raw_candidates={AUDIT_STATS['raw_candidates']} raw_sent={AUDIT_STATS['raw_sent']} "
+               f"main_candidates={AUDIT_STATS['main_candidates']} main_sent={AUDIT_STATS['main_sent']} "
+               f"blocked={AUDIT_STATS['blocked']} top_block_reasons={AUDIT_STATS['top_block_reasons']} "
+               f"top_queries={AUDIT_STATS['top_queries']}")
+    print(summary)
+    for event in AUDIT_TOP_BLOCKED[:10]:
+        print(f"[AUDIT_TOP_BLOCKED] score={event.get('score')} bucket={event.get('bucket')} "
+              f"reason={event.get('block_reason')} query={event.get('query')} "
+              f"title={str(event.get('title') or '')[:70]}")
+    for event in AUDIT_TOP_NOT_SENT[:10]:
+        print(f"[AUDIT_TOP_NOT_SENT] score={event.get('score')} bucket={event.get('bucket')} "
+              f"reason={event.get('block_reason') or event.get('stage')} query={event.get('query')} "
+              f"title={str(event.get('title') or '')[:70]}")
+    if CANDIDATE_AUDIT_TELEGRAM_SUMMARY:
+        send_message(
+            "🧾 AUDIT SUMMARY\n"
+            f"cycle={AUDIT_CURRENT_CYCLE}\n"
+            f"seen={AUDIT_STATS['seen']} raw_checked={AUDIT_STATS['raw_checked']}\n"
+            f"raw_candidates={AUDIT_STATS['raw_candidates']} raw_sent={AUDIT_STATS['raw_sent']}\n"
+            f"main_candidates={AUDIT_STATS['main_candidates']} main_sent={AUDIT_STATS['main_sent']}\n"
+            f"blocked={AUDIT_STATS['blocked']}"
+        )
+
+
+def find_audit_matches(search_text: str, limit=20):
+    needle = raw_normalize_text(search_text)
+    if not needle:
+        print("[AUDIT_LOOKUP] empty_search")
+        return []
+    matches = []
+    try:
+        with open(CANDIDATE_AUDIT_PATH, "r", encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    event = json.loads(line)
+                except Exception:
+                    continue
+                if needle in raw_normalize_text(event.get("title") or ""):
+                    matches.append(event)
+    except Exception as e:
+        print(f"[AUDIT_LOOKUP_ERROR] error={e}")
+        return []
+    for event in matches[-limit:]:
+        print(f"[AUDIT_LOOKUP] seen={bool(event)} query={event.get('query')} "
+              f"stage={event.get('stage')} score={event.get('score')} "
+              f"block_reason={event.get('block_reason')} sent={event.get('sent')} "
+              f"title={str(event.get('title') or '')[:80]}")
+    return matches[-limit:]
 
 
 def get_vinted_thumb(item_url, item_id):
@@ -3895,40 +4148,55 @@ def check_search(search, seen, market_price):
                 if age_min is not None and DEBUG_ALERTS:
                     print(f"  📤 NEW ITEM: {title[:60]} | age={age_min}min | {price} zł")
 
+                seen_audit_item = dict(item)
+                seen_audit_item["link"] = href
+                seen_audit_item["url"] = href
+                seen_audit_item["age_min"] = age_min
+                seen_audit_item["_search_meta"] = {"name": search.get("name")}
+                audit_candidate("seen", seen_audit_item, search)
+                print(f"[AUDIT_SEEN] query={search.get('name')} title={title[:60]}")
+
                 if not item_id or not href:
+                    audit_candidate("blocked", seen_audit_item, search, block_reason="missing_id_or_url")
                     item_micro_delay(title)
                     continue
 
                 _seen_ts = seen.get(item_id)
                 if _seen_ts and (time.time() - _seen_ts) < 6 * 3600:
                     cnt_seen += 1
+                    audit_candidate("dedupe_skip", seen_audit_item, search, block_reason="seen_ttl")
                     item_micro_delay(title)
                     continue
 
                 all_ids.append(item_id)
 
                 if not title or not href:
+                    audit_candidate("blocked", seen_audit_item, search, block_reason="missing_title_or_url")
                     item_micro_delay(title)
                     continue
 
                 _dedup_key = f"{title.lower().strip()}_{int(price or 0)}"
                 if _dedup_key in _seen_title_price:
                     cnt_seen += 1
+                    audit_candidate("dedupe_skip", seen_audit_item, search, block_reason="duplicate_title_price_in_search")
                     item_micro_delay(title)
                     continue
                 _seen_title_price.add(_dedup_key)
 
                 title_lower = title.lower()
                 if any(ex in title_lower for ex in GLOBAL_EXCLUDE):
+                    audit_candidate("blocked", seen_audit_item, search, block_reason="global_exclude")
                     item_micro_delay(title)
                     continue
 
                 if any(b in title_lower for b in BLOCKED_BRANDS):
+                    audit_candidate("blocked", seen_audit_item, search, block_reason="blocked_brand")
                     item_micro_delay(title)
                     continue
 
                 exclude_kw = search.get("exclude_keywords", [])
                 if exclude_kw and any(ek in title_lower for ek in exclude_kw):
+                    audit_candidate("blocked", seen_audit_item, search, block_reason="search_exclude_keyword")
                     item_micro_delay(title)
                     continue
 
@@ -3941,17 +4209,20 @@ def check_search(search, seen, market_price):
 
                 if not price or price < search.get("min_price", 1):
                     cnt_price += 1
+                    audit_candidate("blocked", seen_audit_item, search, block_reason="price_below_search_min")
                     item_micro_delay(title)
                     continue
 
                 if price < 18:
                     cnt_price += 1
+                    audit_candidate("blocked", seen_audit_item, search, block_reason="price_below_global_min")
                     item_micro_delay(title)
                     continue
 
                 _non_latin = sum(1 for c in title if ord(c) > 591)
                 if _non_latin > len(title) * 0.3:
                     cnt_rejected += 1
+                    audit_candidate("blocked", seen_audit_item, search, block_reason="non_latin_title")
                     item_micro_delay(title)
                     continue
 
@@ -3965,6 +4236,7 @@ def check_search(search, seen, market_price):
                         cnt_profile_rej += 1
                         for reason in _reject_log:
                             reject_reasons[reason] = reject_reasons.get(reason, 0) + 1
+                        audit_candidate("blocked", seen_audit_item, search, block_reason="profile_filter:" + ",".join(_reject_log[:3]))
                         item_micro_delay(title)
                         continue
 
@@ -3972,6 +4244,7 @@ def check_search(search, seen, market_price):
                 if human_vibe_skip(title, pct=0.12):
                     cnt_vibe_skip += 1
                     reject_reasons["vibe_skip"] = reject_reasons.get("vibe_skip", 0) + 1
+                    audit_candidate("blocked", seen_audit_item, search, block_reason="vibe_skip")
                     item_micro_delay(title)
                     continue
 
@@ -4001,6 +4274,7 @@ def check_search(search, seen, market_price):
                     if any(x in title_lower for x in TRASH_KEYWORDS_ITEM):
                         cnt_rejected += 1
                         reject_reasons["trash_keyword"] = reject_reasons.get("trash_keyword", 0) + 1
+                        audit_candidate("blocked", seen_audit_item, search, block_reason="trash_keyword")
                         item_micro_delay(title)
                         continue
 
@@ -4027,6 +4301,7 @@ def check_search(search, seen, market_price):
                         min_score = 2
                     if item_score < min_score:
                         cnt_kw += 1
+                        audit_candidate("blocked", seen_audit_item, search, block_reason=f"item_score_below_min:{item_score}<{min_score}", score=item_score)
                         item_micro_delay(title)
                         continue
 
@@ -4039,6 +4314,7 @@ def check_search(search, seen, market_price):
                     and price < 40
                 ):
                     cnt_rejected += 1
+                    audit_candidate("blocked", seen_audit_item, search, block_reason="cheap_unbranded_not_vintage")
                     item_micro_delay(title)
                     continue
 
@@ -4102,6 +4378,7 @@ def check_search(search, seen, market_price):
                     )
                 if not qualifies:
                     cnt_rejected += 1
+                    audit_candidate("blocked", seen_audit_item, search, block_reason="normal_qualifier_false", score=_item_score_val)
                     item_micro_delay(title)
                     continue
 
@@ -4135,6 +4412,12 @@ def check_search(search, seen, market_price):
                     "age_min": age_min,
                     "_features": features,
                 })
+                audit_candidate("candidate", seen_audit_item, search, {
+                    "engine": "PRE_ENGINE",
+                    "final_score": _item_score_val,
+                    "category": features.get("category"),
+                    "brand": features.get("brand"),
+                }, alert_type="PRE_ENGINE", score=_item_score_val)
 
                 processed_items += 1
 
@@ -4487,6 +4770,7 @@ while True:
 
         print(f"\n🔄 Cykl #{cycle}")
         reset_raw_style_cycle()
+        reset_candidate_audit_cycle(cycle)
 
         # Req 8 — session refresh (only when needed, not every cycle)
         _maybe_refresh_session()
@@ -4633,9 +4917,23 @@ while True:
         if engine and all_new_items:
             all_new_items = filter_unsent_items(all_new_items)
             engine_results = dedupe_results_by_item(engine.run_cycle_strict(all_new_items, market_prices))
+            for audit_result in engine_results:
+                audit_candidate(
+                    "main_engine_score",
+                    audit_result.get("item", {}),
+                    result=audit_result,
+                    alert_type=_alert_type(audit_result),
+                    score=audit_result.get("final_score"),
+                    bucket=audit_result.get("raw_style_bucket") or audit_result.get("taste_bucket") or audit_result.get("tier"),
+                    signals=audit_result.get("desirable_signals") or audit_result.get("taste_signals") or [],
+                )
 
-            for result in engine_results:
+            for idx, result in enumerate(engine_results):
                 if sent_this_cycle >= MAX_PER_CYCLE:
+                    for skipped_result in engine_results[idx:]:
+                        audit_candidate("rank_not_selected", skipped_result.get("item", {}), result=skipped_result,
+                                        block_reason="max_per_cycle_limit", alert_type=_alert_type(skipped_result),
+                                        score=skipped_result.get("final_score"))
                     break
 
                 item   = result["item"]
@@ -4646,6 +4944,8 @@ while True:
                 dedupe_key = get_item_dedupe_key(item)
                 if already_sent(dedupe_key):
                     print(f"[DEDUPE_BLOCK] duplicate_before_send key={dedupe_key} title={str(item.get('title',''))[:60]}")
+                    audit_candidate("dedupe_skip", item, result=result, block_reason="duplicate_before_send",
+                                    alert_type=_alert_type(result), score=result.get("final_score"))
                     continue
 
                 photo     = item.get("photo") or get_item_photo(item["id"], item.get("link", ""))
@@ -4655,6 +4955,8 @@ while True:
                     print(f"[TELEGRAM] send_failed key={dedupe_key} title={str(item.get('title',''))[:60]}")
                     continue
                 mark_sent(item, result, (item.get("_search_meta") or {}).get("name"))
+                audit_candidate("sent", item, result=result, sent=True, alert_type=_alert_type(result),
+                                score=result.get("final_score"))
                 seen[item["id"]] = now
                 sent_this_cycle += 1
 
@@ -4705,15 +5007,26 @@ while True:
             if engine and fallback_items:
                 fallback_items = filter_unsent_items(fallback_items)
                 fb_results = dedupe_results_by_item(engine.run_cycle_strict(fallback_items, market_prices))
+                for audit_result in fb_results:
+                    audit_candidate("main_engine_score", audit_result.get("item", {}), result=audit_result,
+                                    alert_type=_alert_type(audit_result), score=audit_result.get("final_score"))
+                for skipped_result in fb_results[MAX_PER_CYCLE:]:
+                    audit_candidate("rank_not_selected", skipped_result.get("item", {}), result=skipped_result,
+                                    block_reason="fallback_max_per_cycle_slice", alert_type=_alert_type(skipped_result),
+                                    score=skipped_result.get("final_score"))
                 for result in fb_results[:MAX_PER_CYCLE]:
                     item   = result["item"]
                     profit = result.get("profit", 0)
                     if profit < 10:
+                        audit_candidate("final_skip", item, result=result, block_reason="fallback_profit_below_10",
+                                        alert_type=_alert_type(result), score=result.get("final_score"))
                         seen[item["id"]] = now
                         continue
                     dedupe_key = get_item_dedupe_key(item)
                     if already_sent(dedupe_key):
                         print(f"[DEDUPE_BLOCK] duplicate_before_send key={dedupe_key} title={str(item.get('title',''))[:60]}")
+                        audit_candidate("dedupe_skip", item, result=result, block_reason="duplicate_before_send",
+                                        alert_type=_alert_type(result), score=result.get("final_score"))
                         continue
                     photo     = item.get("photo") or get_item_photo(item["id"], item.get("link", ""))
                     alert_msg = format_telegram_alert(item, result)
@@ -4722,14 +5035,23 @@ while True:
                         print(f"[TELEGRAM] send_failed key={dedupe_key} title={str(item.get('title',''))[:60]}")
                         continue
                     mark_sent(item, result, (item.get("_search_meta") or {}).get("name"))
+                    audit_candidate("sent", item, result=result, sent=True, alert_type=_alert_type(result),
+                                    score=result.get("final_score"))
                     seen[item["id"]] = now
                     sent_this_cycle += 1
                     print(f"  🔁 FALLBACK [{result.get('engine','?')}] | {item['title'][:55]} | {item['price']:.0f} zł")
 
         extra_raw_style_sent = send_raw_style_candidates(MAX_PER_CYCLE, sent_this_cycle)
         sent_this_cycle += extra_raw_style_sent
+        for remaining_raw in list(RAW_STYLE_CYCLE_CANDIDATES.values()):
+            audit_candidate("final_skip", remaining_raw.get("item", {}), result=remaining_raw,
+                            block_reason="raw_style_not_selected_limit_or_priority",
+                            alert_type="RAW_STYLE", score=remaining_raw.get("raw_style_score"),
+                            bucket=remaining_raw.get("raw_style_bucket"),
+                            signals=remaining_raw.get("raw_style_signals"))
 
         print_raw_style_summary()
+        print_candidate_audit_summary()
         print(f"  📊 Cykl #{cycle} zakończony — wysłano: {sent_this_cycle} alertów [CHAOS+BRAND+GRAIL+RAW_STYLE]")
 
         save_seen(seen)
