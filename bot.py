@@ -51,6 +51,11 @@ DEBUG_ALERTS          = True  # FIX: loguj decyzje engine (conf, profit, grail)
 DEBUG_PIPELINE        = os.getenv("DEBUG_PIPELINE", "0") == "1"  # verbose pipeline log
 TASTE_DISCOVERY_ENABLED = os.getenv("TASTE_DISCOVERY_ENABLED", "1") == "1"
 TASTE_DISCOVERY_MAX_QUERIES_PER_CYCLE = int(os.getenv("TASTE_DISCOVERY_MAX_QUERIES_PER_CYCLE", "3"))
+RAW_STYLE_SNIPER_ENABLED = os.getenv("RAW_STYLE_SNIPER_ENABLED", "1") == "1"
+RAW_STYLE_SNIPER_MAX_PER_CYCLE = int(os.getenv("RAW_STYLE_SNIPER_MAX_PER_CYCLE", "3"))
+RAW_STYLE_SNIPER_MAX_AGE_MIN = int(os.getenv("RAW_STYLE_SNIPER_MAX_AGE_MIN", "90"))
+RAW_STYLE_SNIPER_MAX_PRICE = float(os.getenv("RAW_STYLE_SNIPER_MAX_PRICE", "160"))
+NEGOTIATION_BUFFER_PLN = float(os.getenv("NEGOTIATION_BUFFER_PLN", "15"))
 
 # ─────────────────────────────────────────
 #  ⚡ SNIPER MODE
@@ -1911,6 +1916,474 @@ def filter_unsent_items(items: list[dict]) -> list[dict]:
     return filtered
 
 
+RAW_STYLE_OLD_BLANK = [
+    "screen stars", "single stitch", "made in usa", "made in u.s.a",
+    "made in america", "fruit of the loom", "fruit of the loom usa",
+    "hanes heavyweight", "hanes heavy weight", "hanes beefy", "jerzees",
+    "velva sheen", "galt sand", "nutmeg", "russell athletic", "tultex",
+    "oneita", "anvil",
+]
+RAW_STYLE_POP_CULTURE = [
+    "warner bros", "warner brothers", "looney tunes", "taz",
+    "tasmanian devil", "bugs bunny", "star wars", "boba fett",
+    "lego star wars", "darth vader", "yoda", "marvel", "batman",
+    "spiderman", "south park", "simpsons", "pokemon", "nintendo",
+]
+RAW_STYLE_BIKER = [
+    "harley", "harley davidson", "harley-davidson", "daytona",
+    "bikerfest", "biker fest", "bike week", "sturgis", "motorcycle",
+    "motorcycles", "motor cycles", "devil cycles", "flame", "flames",
+    "skull", "eagle", "panther", "chopper", "rally", "dealer", "garage",
+]
+RAW_STYLE_SPORTS_COLLEGE = [
+    "mlb", "nba", "nfl", "nhl", "ncaa", "world series", "super bowl",
+    "dodgers", "raiders", "bulls", "vikings", "minnesota vikings",
+    "unlv", "college", "university", "nutmeg", "athletics vs reds",
+]
+RAW_STYLE_STREETWEAR = [
+    "stussy", "stüssy", "supreme", "palace", "bape", "xlarge", "fuct",
+    "obey", "realtree", "mossy oak",
+]
+RAW_STYLE_RALPH_WORKWEAR = [
+    "rrl", "double rl", "double ralph lauren", "polo sport", "polo jeans",
+    "ralph lauren eagle", "ralph lauren spellout", "lee storm rider",
+    "lee riders", "carhartt detroit", "carhartt active",
+    "carhartt michigan", "duck canvas", "blanket lined", "cord collar",
+    "corduroy collar",
+]
+RAW_STYLE_METAL = [
+    "manowar", "slayer", "megadeth", "iron maiden", "pantera",
+    "black sabbath", "ozzy", "judas priest", "motorhead", "motörhead",
+    "sepultura",
+]
+RAW_STYLE_VISUAL = [
+    "big print", "large print", "front print", "back print", "sleeve print",
+    "graphic", "all over print", "aop", "flame sleeves", "embroidered",
+    "embroidery", "spellout", "spell out",
+]
+RAW_STYLE_ERA_SIGNALS = [
+    "70s", "80s", "90s", "00s", "1988", "1989", "1990", "1991", "1992",
+    "1993", "1994", "1995", "1996", "1997", "1998", "1999", "2000",
+    "2001", "2002", "2003", "2004", "2005", "2006", "2007",
+]
+RAW_STYLE_FAST_FASHION = {
+    "zara", "h&m", "hm", "bershka", "pull&bear", "pull and bear",
+    "shein", "romwe", "cider", "temu", "primark", "stradivarius",
+}
+RAW_STYLE_GENERIC_SPORTS = {"adidas", "nike", "puma", "reebok", "under armour"}
+RAW_STYLE_NON_CLOTHING = [
+    "figurka", "figura", "figure", "toy", "zabawka", "klocki",
+    "lego set", "minifigure", "minifigures", "bundle of figures",
+]
+RAW_STYLE_CLOTHING_TERMS = [
+    "t-shirt", "tshirt", "tee", "koszulka", "longsleeve", "long sleeve",
+    "hoodie", "sweatshirt", "crewneck", "jacket", "kurtka", "shirt",
+    "bluza", "zip hoodie", "sweater", "vest", "coat",
+]
+RAW_STYLE_SMALL_CARHARTT_SIZES = [
+    "xs", "extra small", "small", "w24", "w25", "w26", "w27", "w28",
+    "w29", "24x", "25x", "26x", "27x", "28x", "29x",
+]
+RAW_STYLE_STRONG_SIGNAL_PREFIXES = (
+    "old_blank:", "pop:", "biker:", "sports:", "streetwear:",
+    "workwear:", "metal:", "visual:",
+)
+
+RAW_STYLE_CYCLE_CANDIDATES: dict[str, dict] = {}
+RAW_STYLE_STATS = {
+    "checked": 0,
+    "candidates": 0,
+    "sent": 0,
+    "blocked": 0,
+    "dedupe_skipped": 0,
+}
+
+
+def raw_normalize_text(text: str) -> str:
+    text_l = str(text or "").lower()
+    text_l = text_l.replace("ü", "u").replace("ó", "o").replace("ł", "l")
+    text_l = text_l.replace("&", " and ")
+    text_l = re.sub(r"[^a-z0-9]+", " ", text_l)
+    return re.sub(r"\s+", " ", text_l).strip()
+
+
+def raw_contains_phrase(text: str, phrase: str) -> bool:
+    text_n = raw_normalize_text(text)
+    phrase_n = raw_normalize_text(phrase)
+    if not text_n or not phrase_n:
+        return False
+    return re.search(rf"(?<![a-z0-9]){re.escape(phrase_n)}(?![a-z0-9])", text_n) is not None
+
+
+def raw_contains_any_phrase(text: str, phrases: list[str]) -> bool:
+    return any(raw_contains_phrase(text, phrase) for phrase in phrases)
+
+
+def raw_contains_exact_token(text: str, token: str) -> bool:
+    return raw_contains_phrase(text, token)
+
+
+def _raw_hits(text: str, phrases: list[str]) -> list[str]:
+    return [phrase for phrase in phrases if raw_contains_phrase(text, phrase)]
+
+
+def _raw_item_age(item: dict) -> int:
+    age = item.get("age_min")
+    if age is None:
+        age = parse_item_age_minutes(item)
+    try:
+        return int(age)
+    except Exception:
+        return 9999
+
+
+def _raw_is_clothing(text: str, item: dict) -> bool:
+    category = str(item.get("category") or "").lower()
+    return bool(
+        category in {"clothing", "tshirt", "shirt", "hoodie", "jacket", "coat"}
+        or raw_contains_any_phrase(text, RAW_STYLE_CLOTHING_TERMS)
+    )
+
+
+def _raw_size_bucket(text: str, item: dict) -> str:
+    full = f"{text} {item.get('size') or ''}"
+    if re.search(r"(?<![a-z0-9])(xxl|2xl|xl|x large|extra large|large|l)(?![a-z0-9])", raw_normalize_text(full)):
+        return "large"
+    if re.search(r"(?<![a-z0-9])(m|medium)(?![a-z0-9])", raw_normalize_text(full)):
+        return "medium"
+    return ""
+
+
+def _raw_real_signal_count(signals: list[str]) -> int:
+    return sum(1 for sig in signals if str(sig).startswith(RAW_STYLE_STRONG_SIGNAL_PREFIXES))
+
+
+def compute_raw_style_score(item: dict) -> dict:
+    item = item or {}
+    title = str(item.get("title") or "")
+    text = " ".join(str(item.get(k) or "") for k in ("title", "brand", "description", "category"))
+    text_n = raw_normalize_text(text)
+    price = float(item.get("price") or 0)
+    effective_price = max(0.0, price - NEGOTIATION_BUFFER_PLN)
+    age = _raw_item_age(item)
+    signals: list[str] = []
+    buckets: set[str] = set()
+    score = 0
+    block_reason = None
+
+    def add(prefix: str, hit: str, points: int, bucket: str):
+        nonlocal score
+        score += points
+        sig = f"{prefix}:{hit}"
+        if sig not in signals:
+            signals.append(sig)
+        buckets.add(bucket)
+
+    for hit in _raw_hits(text, RAW_STYLE_OLD_BLANK):
+        add("old_blank", hit, 35, "old_blank")
+        break
+    for hit in _raw_hits(text, RAW_STYLE_POP_CULTURE):
+        add("pop", hit, 30, "pop_culture")
+        break
+    for hit in _raw_hits(text, RAW_STYLE_BIKER):
+        add("biker", hit, 30, "biker")
+        break
+    for hit in _raw_hits(text, RAW_STYLE_SPORTS_COLLEGE):
+        add("sports", hit, 30, "sports")
+        break
+    for hit in _raw_hits(text, RAW_STYLE_STREETWEAR):
+        add("streetwear", hit, 25, "streetwear")
+        break
+    for hit in _raw_hits(text, RAW_STYLE_RALPH_WORKWEAR):
+        add("workwear", hit, 25, "workwear")
+        break
+    for hit in _raw_hits(text, RAW_STYLE_METAL):
+        add("metal", hit, 25, "metal")
+        break
+
+    visual_hits = _raw_hits(text, RAW_STYLE_VISUAL)
+    if visual_hits:
+        add("visual", visual_hits[0], 15, "visual")
+    era_hits = _raw_hits(text, RAW_STYLE_ERA_SIGNALS)
+    if era_hits:
+        score += 15
+        signals.append(f"era:{era_hits[0]}")
+
+    size_bucket = _raw_size_bucket(text, item)
+    if size_bucket == "large":
+        score += 10
+        signals.append("size:L_XL_XXL")
+    elif size_bucket == "medium":
+        score += 5
+        signals.append("size:M")
+
+    if effective_price <= 30:
+        score += 25
+        signals.append("price:effective_<=30")
+    elif effective_price <= 50:
+        score += 20
+        signals.append("price:effective_<=50")
+    elif effective_price <= 80:
+        score += 10
+        signals.append("price:effective_<=80")
+    elif effective_price <= 100:
+        score += 5
+        signals.append("price:effective_<=100")
+
+    if age <= 10:
+        score += 20
+        signals.append("fresh:<=10")
+    elif age <= 30:
+        score += 15
+        signals.append("fresh:<=30")
+    elif age <= 90:
+        score += 10
+        signals.append("fresh:<=90")
+
+    is_clothing = _raw_is_clothing(text, item)
+    fast_fashion = raw_contains_any_phrase(text, list(RAW_STYLE_FAST_FASHION))
+    non_clothing = raw_contains_any_phrase(text, RAW_STYLE_NON_CLOTHING) and not is_clothing
+    fake_hit = raw_contains_any_phrase(text, ["fake", "inspired", "unofficial", "style"])
+    strong_official_context = bool(
+        buckets.intersection({"old_blank", "pop_culture", "sports", "biker", "workwear", "metal"})
+        or raw_contains_any_phrase(text, ["licensed", "official", "made in usa", "single stitch", "screen stars"])
+    )
+    generic_sports_brand = raw_contains_any_phrase(text, list(RAW_STYLE_GENERIC_SPORTS))
+    generic_sports_ok = bool(
+        buckets.intersection({"old_blank", "sports", "pop_culture"})
+        or raw_contains_any_phrase(text, ["all over print", "aop", "track jacket", "football shirt", "football kit", "jersey"])
+        or any(sig.startswith("visual:") and not sig.endswith(":graphic") for sig in signals)
+    )
+    carhartt_small_pants = bool(
+        raw_contains_phrase(text, "carhartt")
+        and raw_contains_any_phrase(text, ["pants", "pant", "spodnie", "cargo", "work pants", "double knee", "jeans"])
+        and raw_contains_any_phrase(text, RAW_STYLE_SMALL_CARHARTT_SIZES)
+    )
+
+    if fast_fashion:
+        block_reason = "fast_fashion"
+    elif non_clothing:
+        block_reason = "non_clothing"
+    elif carhartt_small_pants:
+        block_reason = "small_carhartt_pants"
+    elif fake_hit and not strong_official_context:
+        block_reason = "fake_inspired_unofficial"
+    elif generic_sports_brand and not generic_sports_ok:
+        block_reason = "generic_sports_brand_no_style_signal"
+    elif not is_clothing:
+        block_reason = "non_clothing"
+
+    real_signal_count = _raw_real_signal_count(signals)
+    raw_style_real_signal = real_signal_count > 0
+    bucket = "none"
+    for preferred in ("old_blank", "pop_culture", "biker", "sports", "streetwear", "workwear", "metal", "visual"):
+        if preferred in buckets:
+            bucket = preferred
+            break
+    score = max(0, min(100, round(score, 2)))
+
+    if not raw_style_real_signal:
+        block_reason = block_reason or "no_real_style_signal"
+    if price <= 0:
+        block_reason = block_reason or "missing_price"
+    if price > RAW_STYLE_SNIPER_MAX_PRICE:
+        block_reason = block_reason or "price_above_raw_style_max"
+    if age > RAW_STYLE_SNIPER_MAX_AGE_MIN:
+        block_reason = block_reason or "age_above_raw_style_max"
+
+    eligible = False
+    if not block_reason and RAW_STYLE_SNIPER_ENABLED:
+        eligible = bool(
+            (score >= 65 and raw_style_real_signal and price <= RAW_STYLE_SNIPER_MAX_PRICE and age <= RAW_STYLE_SNIPER_MAX_AGE_MIN)
+            or (score >= 55 and effective_price <= 50 and age <= 90 and real_signal_count >= 2)
+            or (buckets.intersection({"streetwear", "biker", "pop_culture", "old_blank"}) and effective_price <= 30 and size_bucket in {"medium", "large"} and age <= 90)
+            or (score >= 75 and price <= RAW_STYLE_SNIPER_MAX_PRICE and age <= RAW_STYLE_SNIPER_MAX_AGE_MIN and real_signal_count >= 2)
+        )
+    if not eligible and not block_reason:
+        block_reason = "below_raw_style_threshold"
+
+    return {
+        "raw_style_score": score,
+        "raw_style_signals": signals,
+        "raw_style_bucket": bucket,
+        "raw_style_block_reason": block_reason,
+        "raw_style_real_signal": raw_style_real_signal,
+        "raw_style_real_signal_count": real_signal_count,
+        "effective_price": round(effective_price, 2),
+        "age_min": age,
+        "eligible": eligible,
+    }
+
+
+def reset_raw_style_cycle():
+    RAW_STYLE_CYCLE_CANDIDATES.clear()
+    RAW_STYLE_STATS.update({
+        "checked": 0,
+        "candidates": 0,
+        "sent": 0,
+        "blocked": 0,
+        "dedupe_skipped": 0,
+    })
+
+
+def collect_raw_style_candidate(item: dict, search: dict | None = None):
+    if not RAW_STYLE_SNIPER_ENABLED:
+        return
+    item = dict(item or {})
+    search = search or {}
+    if search.get("football_mode") or search.get("lego_sw_mode"):
+        return
+    item.setdefault("_search_meta", {"name": search.get("name")})
+    RAW_STYLE_STATS["checked"] += 1
+    profile = compute_raw_style_score(item)
+    print(f"[RAW_STYLE_CHECK] score={profile['raw_style_score']:.0f} "
+          f"bucket={profile['raw_style_bucket']} signals={profile['raw_style_signals'][:5]} "
+          f"real_signal={profile['raw_style_real_signal']} price={float(item.get('price') or 0):.0f} "
+          f"effective_price={profile['effective_price']:.0f} age={profile['age_min']} "
+          f"title={str(item.get('title') or '')[:60]}")
+    if not profile["eligible"]:
+        RAW_STYLE_STATS["blocked"] += 1
+        print(f"[RAW_STYLE_BLOCK] reason={profile['raw_style_block_reason']} "
+              f"score={profile['raw_style_score']:.0f} signals={profile['raw_style_signals'][:5]} "
+              f"title={str(item.get('title') or '')[:60]}")
+        return
+    key = get_item_dedupe_key(item)
+    if already_sent(key):
+        RAW_STYLE_STATS["dedupe_skipped"] += 1
+        print(f"[RAW_STYLE_DEDUPE_SKIP] key={key} title={str(item.get('title') or '')[:60]}")
+        return
+    result = {
+        "engine": "RAW_STYLE",
+        "item": item,
+        "raw_style_score": profile["raw_style_score"],
+        "raw_style_signals": profile["raw_style_signals"],
+        "raw_style_bucket": profile["raw_style_bucket"],
+        "raw_style_real_signal": profile["raw_style_real_signal"],
+        "raw_style_real_signal_count": profile["raw_style_real_signal_count"],
+        "effective_price": profile["effective_price"],
+        "age_min": profile["age_min"],
+        "final_score": profile["raw_style_score"],
+        "tier": "RAW_STYLE",
+    }
+    current = RAW_STYLE_CYCLE_CANDIDATES.get(key)
+    rank = (
+        result["raw_style_score"],
+        -result["age_min"],
+        -result["effective_price"],
+        -float(item.get("price") or 0),
+        result["raw_style_real_signal_count"],
+    )
+    current_rank = None
+    if current:
+        current_item = current.get("item") or {}
+        current_rank = (
+            current.get("raw_style_score", 0),
+            -current.get("age_min", 9999),
+            -current.get("effective_price", 9999),
+            -float(current_item.get("price") or 0),
+            current.get("raw_style_real_signal_count", 0),
+        )
+    if not current or rank > current_rank:
+        RAW_STYLE_CYCLE_CANDIDATES[key] = result
+    RAW_STYLE_STATS["candidates"] = max(RAW_STYLE_STATS["candidates"], len(RAW_STYLE_CYCLE_CANDIDATES))
+    print(f"[RAW_STYLE_CANDIDATE] score={result['raw_style_score']:.0f} "
+          f"bucket={result['raw_style_bucket']} signals={result['raw_style_signals'][:5]} "
+          f"price={float(item.get('price') or 0):.0f} effective_price={result['effective_price']:.0f} "
+          f"age={result['age_min']} title={str(item.get('title') or '')[:60]}")
+
+
+def format_raw_style_alert(result: dict) -> str:
+    item = result.get("item") or {}
+    signals = ", ".join((result.get("raw_style_signals") or [])[:6]) or "-"
+    price = float(item.get("price") or 0)
+    link = item.get("link") or item.get("url") or ""
+    lines = [
+        "⚡ RAW STYLE SNIPE",
+        "",
+        f"score={result.get('raw_style_score', 0):.0f}",
+        f"bucket={result.get('raw_style_bucket', 'none')}",
+        f"age={result.get('age_min', '?')}min",
+        f"price={price:.0f} PLN",
+        f"effective_price={float(result.get('effective_price') or 0):.0f} PLN",
+        f"signals={signals}",
+        "",
+        str(item.get("title") or "")[:140],
+    ]
+    if link:
+        lines.extend(["", "Open link", str(link)])
+    return "\n".join(lines)
+
+
+def send_raw_style_candidates(max_cycle_slots: int, sent_this_cycle: int) -> int:
+    if not RAW_STYLE_SNIPER_ENABLED or max_cycle_slots <= sent_this_cycle:
+        return 0
+    remaining_raw_slots = max(0, RAW_STYLE_SNIPER_MAX_PER_CYCLE - int(RAW_STYLE_STATS.get("sent", 0)))
+    if remaining_raw_slots <= 0:
+        return 0
+    candidates = sorted(
+        RAW_STYLE_CYCLE_CANDIDATES.values(),
+        key=lambda r: (
+            r.get("raw_style_score", 0),
+            -int(r.get("age_min", 9999) or 9999),
+            -float(r.get("effective_price", 9999) or 9999),
+            -float((r.get("item") or {}).get("price") or 0),
+            r.get("raw_style_real_signal_count", 0),
+        ),
+        reverse=True,
+    )
+    sent = 0
+    for result in candidates:
+        if sent >= remaining_raw_slots or sent_this_cycle + sent >= max_cycle_slots:
+            break
+        item = result.get("item") or {}
+        key = get_item_dedupe_key(item)
+        if already_sent(key):
+            engines = set((SENT_ALERTS.get(key) or {}).get("engines") or [])
+            if engines.intersection({"GRAIL", "BRAND", "CHAOS"}):
+                print(f"[RAW_STYLE_MERGE_WITH_MAIN_ENGINE] key={key} engines={sorted(engines)} title={str(item.get('title') or '')[:60]}")
+            print(f"[RAW_STYLE_DEDUPE_BLOCK] key={key} title={str(item.get('title') or '')[:60]}")
+            continue
+        photo = item.get("photo") or get_item_photo(item.get("id"), item.get("link") or item.get("url") or "")
+        sent_ok = send_message(format_raw_style_alert(result), photo_url=photo, item_link=item.get("link") or item.get("url"))
+        if not sent_ok:
+            print(f"[TELEGRAM] raw_style_send_failed key={key} title={str(item.get('title') or '')[:60]}")
+            continue
+        mark_sent(item, result, (item.get("_search_meta") or {}).get("name"))
+        print(f"[RAW_STYLE_DEDUPE_MARK] key={key} title={str(item.get('title') or '')[:60]}")
+        RAW_STYLE_CYCLE_CANDIDATES.pop(key, None)
+        sent += 1
+        RAW_STYLE_STATS["sent"] += 1
+        print(f"[RAW_STYLE_SEND] rank={sent} score={result.get('raw_style_score',0):.0f} "
+              f"bucket={result.get('raw_style_bucket','none')} "
+              f"price={float(item.get('price') or 0):.0f} "
+              f"effective_price={float(result.get('effective_price') or 0):.0f} "
+              f"age={result.get('age_min')} title={str(item.get('title') or '')[:60]}")
+    return sent
+
+
+def print_raw_style_summary():
+    top = sorted(
+        RAW_STYLE_CYCLE_CANDIDATES.values(),
+        key=lambda r: (
+            r.get("raw_style_score", 0),
+            -int(r.get("age_min", 9999) or 9999),
+            -float(r.get("effective_price", 9999) or 9999),
+        ),
+        reverse=True,
+    )[:3]
+    preview = [
+        f"score={r.get('raw_style_score',0):.0f} bucket={r.get('raw_style_bucket','none')} "
+        f"price={float((r.get('item') or {}).get('price') or 0):.0f} "
+        f"effective_price={float(r.get('effective_price') or 0):.0f} "
+        f"age={r.get('age_min')} title={str((r.get('item') or {}).get('title') or '')[:45]}"
+        for r in top
+    ]
+    print(f"[RAW_STYLE_SUMMARY] checked={RAW_STYLE_STATS['checked']} "
+          f"candidates={RAW_STYLE_STATS['candidates']} sent={RAW_STYLE_STATS['sent']} "
+          f"blocked={RAW_STYLE_STATS['blocked']} dedupe_skipped={RAW_STYLE_STATS['dedupe_skipped']} "
+          f"top_candidates={preview}")
+
+
 def get_vinted_thumb(item_url, item_id):
     return None
 
@@ -3135,6 +3608,13 @@ def check_search(search, seen, market_price):
                     item_micro_delay(title)
                     continue
 
+                raw_probe_item = dict(item)
+                raw_probe_item["link"] = href
+                raw_probe_item["url"] = href
+                raw_probe_item["age_min"] = age_min
+                raw_probe_item["_search_meta"] = {"name": search.get("name")}
+                collect_raw_style_candidate(raw_probe_item, search)
+
                 if not price or price < search.get("min_price", 1):
                     cnt_price += 1
                     item_micro_delay(title)
@@ -3680,6 +4160,7 @@ while True:
         cycle_start       = time.time()
 
         print(f"\n🔄 Cykl #{cycle}")
+        reset_raw_style_cycle()
 
         # Req 8 — session refresh (only when needed, not every cycle)
         _maybe_refresh_session()
@@ -3864,6 +4345,9 @@ while True:
                     time.sleep(random.uniform(ITEM_MICRO_DELAY_MIN, ITEM_MICRO_DELAY_MAX))
 
         # ── FALLBACK ────────────────────────────────────────────────
+        raw_style_sent = send_raw_style_candidates(MAX_PER_CYCLE, sent_this_cycle)
+        sent_this_cycle += raw_style_sent
+
         if sent_this_cycle == 0 and not _cycle_403_stop:
             print(f"  ⚠️ FALLBACK MODE — brak wyników, rozszerzam okno do 120 min")
             fallback_items: list = []
@@ -3916,7 +4400,11 @@ while True:
                     sent_this_cycle += 1
                     print(f"  🔁 FALLBACK [{result.get('engine','?')}] | {item['title'][:55]} | {item['price']:.0f} zł")
 
-        print(f"  📊 Cykl #{cycle} zakończony — wysłano: {sent_this_cycle} alertów [CHAOS+BRAND+GRAIL]")
+        extra_raw_style_sent = send_raw_style_candidates(MAX_PER_CYCLE, sent_this_cycle)
+        sent_this_cycle += extra_raw_style_sent
+
+        print_raw_style_summary()
+        print(f"  📊 Cykl #{cycle} zakończony — wysłano: {sent_this_cycle} alertów [CHAOS+BRAND+GRAIL+RAW_STYLE]")
 
         save_seen(seen)
         save_sent_alerts()
