@@ -1999,6 +1999,56 @@ RAW_STYLE_STRONG_SIGNAL_PREFIXES = (
     "old_blank:", "pop:", "biker:", "sports:", "streetwear:",
     "workwear:", "metal:", "visual:",
 )
+RAW_STYLE_WOMEN_FIT_TERMS = [
+    "women", "womens", "women s", "ladies", "lady", "damska", "damskie",
+    "damski", "kobieta", "dziewczeca", "baby tee", "crop", "cropped",
+    "crop top", "top", "tank top", "podkoszulka", "bluzka", "bluzeczka",
+    "ramiaczkach", "ramiaczka", "viscose", "wiskoza", "sukienka", "spodnica",
+]
+RAW_STYLE_SMALL_SIZE_TERMS = [
+    "xs", "extra small", "small", "34", "36", "w24", "w25", "w26", "w27", "w28",
+]
+RAW_STYLE_MENS_EXCEPTION_TERMS = [
+    "men", "mens", "men s", "unisex", "oversize", "oversized", "boxy", "xl", "xxl", "2xl",
+]
+RAW_STYLE_BASIC_TERMS = [
+    "blank", "plain", "basic", "solid color", "no print", "zwykly", "zwykły",
+    "gladki", "gładki", "bez nadruku",
+]
+RAW_STYLE_CONTEXT_TERMS = [
+    "made in usa", "made in u s a", "single stitch", "80s", "90s", "00s",
+    "college", "university", "team", "league", "player", "mlb", "nba", "nfl",
+    "nhl", "ncaa", "dodgers", "raiders", "bulls", "vikings", "rangers",
+    "world series", "super bowl", "final four", "tour", "band", "movie",
+    "promo", "race", "racing", "nascar", "event", "daytona", "sturgis",
+    "bike week", "bikerfest", "official", "licensed", "copyright",
+    "big front print", "front print", "back print", "double sided", "spellout",
+    "spell out", "strong graphic", "big graphic", "large print",
+]
+RAW_STYLE_POP_VALIDATION_TERMS = [
+    "warner bros", "warner brothers", "official", "licensed", "copyright",
+    "made in usa", "single stitch", "80s", "90s", "00s", "big graphic",
+    "big print", "large print", "front print", "back print", "double sided",
+    "movie promo", "old tag", "sweatshirt", "crewneck", "taz", "motorcycle",
+]
+RAW_STYLE_SPORTS_ITEM_TERMS = [
+    "jersey", "sweatshirt", "crewneck", "hoodie", "strong graphic", "big graphic",
+    "large print", "tee", "t-shirt", "tshirt", "koszulka",
+]
+RAW_STYLE_VISUAL_CONTEXT_TERMS = [
+    "harley", "taz", "motorcycle", "nascar", "racing", "band", "tour", "movie",
+    "promo", "college", "university", "mlb", "nba", "nfl", "nhl", "ncaa",
+    "made in usa", "single stitch", "screen stars", "nutmeg", "big print",
+    "back print", "double sided", "all over print", "aop",
+]
+RAW_STYLE_GENERIC_VISUAL_TERMS = [
+    "graphic", "print", "skate", "grunge", "y2k", "swag", "streetwear", "vintage",
+]
+RAW_STYLE_KNOWN_STRONG_MOTIFS = [
+    "harley skull", "skull", "flame", "flames", "taz motorcycle", "motorcycle",
+    "nascar", "petty", "driver", "ramones", "metallica", "manowar", "slayer",
+    "movie promo", "warner bros", "daytona", "sturgis",
+]
 
 RAW_STYLE_CYCLE_CANDIDATES: dict[str, dict] = {}
 RAW_STYLE_STATS = {
@@ -2086,6 +2136,135 @@ def _raw_size_bucket(text: str, item: dict) -> str:
 
 def _raw_real_signal_count(signals: list[str]) -> int:
     return sum(1 for sig in signals if str(sig).startswith(RAW_STYLE_STRONG_SIGNAL_PREFIXES))
+
+
+def _raw_presend_text(item: dict) -> str:
+    return " ".join(str(item.get(k) or "") for k in ("title", "brand", "description", "category", "size"))
+
+
+def _raw_has_small_size(item: dict, text: str) -> bool:
+    size_text = raw_normalize_text(f"{item.get('size') or ''} {text}")
+    return re.search(
+        r"(?<![a-z0-9])(xs|extra small|small|s|34|36|w24|w25|w26|w27|w28)(?![a-z0-9])",
+        size_text,
+    ) is not None
+
+
+def _raw_has_good_size(item: dict, text: str) -> bool:
+    return _raw_size_bucket(text, item) in ("medium", "large")
+
+
+def _raw_exact_year_hit(text: str) -> bool:
+    return re.search(r"(?<!\d)(19[8-9]\d|200[0-7])(?!\d)", raw_normalize_text(text)) is not None
+
+
+def _validated_raw_style_reasons(item: dict, bucket: str) -> list[str]:
+    text = _raw_presend_text(item)
+    reasons: list[str] = []
+
+    def add(reason: str):
+        if reason not in reasons:
+            reasons.append(reason)
+
+    if raw_contains_phrase(text, "made in usa") or raw_contains_phrase(text, "made in u s a"):
+        add("made in usa")
+    if raw_contains_phrase(text, "single stitch"):
+        add("single stitch")
+    if _raw_exact_year_hit(text) or raw_contains_any_phrase(text, ["80s", "90s", "00s"]):
+        add("year_or_era")
+    if raw_contains_any_phrase(text, ["official", "licensed", "copyright"]):
+        add("official_licensed")
+    if raw_contains_any_phrase(text, [
+        "mlb", "nba", "nfl", "nhl", "ncaa", "dodgers", "raiders", "bulls",
+        "vikings", "rangers", "world series", "super bowl", "college",
+        "university", "team", "player", "red sox", "yankees", "bears",
+        "final four",
+    ]):
+        add("team_league_player")
+    if raw_contains_any_phrase(text, ["tour", "band", "movie promo", "promo", "race", "racing", "event"]):
+        add("event_tour_context")
+    if raw_contains_any_phrase(text, ["big print", "big graphic", "large print", "front print", "back print", "double sided", "spellout", "spell out"]):
+        add("strong_print")
+    if raw_contains_any_phrase(text, RAW_STYLE_KNOWN_STRONG_MOTIFS):
+        add("known_motif")
+    if reasons and raw_contains_any_phrase(text, [
+        "screen stars", "fruit of the loom", "russell athletic", "jerzees",
+        "hanes", "nutmeg", "anvil", "tultex", "oneita", "galt sand",
+    ]):
+        add("old_tag_with_context")
+    if _raw_has_good_size(item, text):
+        add("good_size")
+    return reasons
+
+
+def count_validated_raw_style_signals(item: dict, bucket) -> int:
+    return len(_validated_raw_style_reasons(item or {}, str(bucket or "")))
+
+
+def raw_style_pre_send_gate(item, raw_style_result) -> tuple[bool, str]:
+    item = item or {}
+    raw_style_result = raw_style_result or {}
+    text = _raw_presend_text(item)
+    title = str(item.get("title") or "")
+    bucket = str(raw_style_result.get("raw_style_bucket") or "none")
+    score = float(raw_style_result.get("raw_style_score") or 0)
+    price = float(item.get("price") or 0)
+    effective_price = float(raw_style_result.get("effective_price") or price or 0)
+    age = int(raw_style_result.get("age_min") or item.get("age_min") or 9999)
+    reasons = _validated_raw_style_reasons(item, bucket)
+    validated = len(reasons)
+    raw_style_result["_raw_style_validated_signals"] = validated
+    raw_style_result["_raw_style_presend_reasons"] = reasons
+
+    women_fit = raw_contains_any_phrase(text, RAW_STYLE_WOMEN_FIT_TERMS)
+    small_size = _raw_has_small_size(item, text)
+    exception_ok = (
+        raw_contains_any_phrase(text, RAW_STYLE_MENS_EXCEPTION_TERMS)
+        and validated >= 3
+        and bucket != "old_blank"
+    )
+    if women_fit and not exception_ok:
+        return False, "women_fit_presend_block"
+    if small_size and not exception_ok:
+        return False, "small_size_presend_block"
+
+    if price < 25 and validated < 3:
+        return False, "cheap_trash_presend_block"
+    if effective_price <= 5 and bucket in ("old_blank", "pop_culture", "sports") and validated < 3:
+        return False, "cheap_trash_presend_block"
+
+    if age >= 90 and not (score >= 90 and validated >= 3):
+        return False, "stale_raw_style_presend_block"
+
+    if bucket == "old_blank":
+        basic = raw_contains_any_phrase(text, RAW_STYLE_BASIC_TERMS) or (
+            validated < 2
+            and raw_contains_any_phrase(text, ["t-shirt", "tshirt", "tee", "sweatshirt", "hoodie", "bluza"])
+            and not raw_contains_any_phrase(text, RAW_STYLE_CONTEXT_TERMS)
+        )
+        no_context = validated < 2 or not raw_contains_any_phrase(text, RAW_STYLE_CONTEXT_TERMS)
+        if basic:
+            return False, "old_blank_basic_presend"
+        if no_context:
+            return False, "old_blank_no_context_presend"
+
+    if bucket == "pop_culture":
+        if validated < 2 or not raw_contains_any_phrase(text, RAW_STYLE_POP_VALIDATION_TERMS):
+            return False, "pop_culture_not_validated_presend"
+
+    if bucket == "sports":
+        has_context = raw_contains_any_phrase(text, RAW_STYLE_CONTEXT_TERMS)
+        good_item_type = raw_contains_any_phrase(text, RAW_STYLE_SPORTS_ITEM_TERMS)
+        generic_sport = raw_contains_any_phrase(text, ["sportowy t-shirt", "damski t-shirt", "women jersey", "v neck", "v-neck", "small logo"])
+        if not has_context or not good_item_type or generic_sport or validated < 2:
+            return False, "sports_not_validated_presend"
+
+    if bucket == "visual":
+        generic_only = raw_contains_any_phrase(text, RAW_STYLE_GENERIC_VISUAL_TERMS) and not raw_contains_any_phrase(text, RAW_STYLE_VISUAL_CONTEXT_TERMS)
+        if generic_only or validated < 2:
+            return False, "visual_too_generic_presend"
+
+    return True, "pass"
 
 
 def reset_candidate_audit_cycle(cycle_number: int):
@@ -2543,6 +2722,23 @@ def send_raw_style_candidates(max_cycle_slots: int, sent_this_cycle: int) -> int
                             alert_type="RAW_STYLE", score=result.get("raw_style_score"),
                             bucket=result.get("raw_style_bucket"), signals=result.get("raw_style_signals"))
             continue
+        presend_ok, presend_reason = raw_style_pre_send_gate(item, result)
+        validated_signals = int(result.get("_raw_style_validated_signals") or 0)
+        if not presend_ok:
+            print(f"[RAW_STYLE_PRE_SEND_BLOCK] reason={presend_reason} "
+                  f"score={result.get('raw_style_score',0):.0f} "
+                  f"bucket={result.get('raw_style_bucket','none')} "
+                  f"validated_signals={validated_signals} "
+                  f"title={str(item.get('title') or '')[:60]}")
+            audit_candidate("blocked", item, result=result, block_reason=presend_reason,
+                            alert_type="RAW_STYLE", score=result.get("raw_style_score"),
+                            bucket=result.get("raw_style_bucket"), signals=result.get("raw_style_signals"))
+            continue
+        print(f"[RAW_STYLE_PRE_SEND_PASS] score={result.get('raw_style_score',0):.0f} "
+              f"bucket={result.get('raw_style_bucket','none')} "
+              f"validated_signals={validated_signals} "
+              f"pass_reasons={(result.get('_raw_style_presend_reasons') or [])[:5]} "
+              f"title={str(item.get('title') or '')[:60]}")
         photo = item.get("photo") or get_item_photo(item.get("id"), item.get("link") or item.get("url") or "")
         sent_ok = send_message(format_telegram_alert(item, result, "RAW_STYLE"), photo_url=photo, item_link=item.get("link") or item.get("url"))
         if not sent_ok:
