@@ -50,6 +50,8 @@ MIN_SAVING_PLN   = 6       # minimalna oszczędność w zł (odrzuć 1-5 zł ró
 MAX_ALERTS_PER_SEARCH = 20  # więcej itemów do engine — silniki same filtrują jakość
 DEBUG_ALERTS          = os.getenv("DEBUG_ALERTS", "1") == "1"  # FIX: loguj decyzje engine (conf, profit, grail)
 DEBUG_PIPELINE        = os.getenv("DEBUG_PIPELINE", "0") == "1"  # verbose pipeline log
+VERBOSE_ITEM_DEBUG = os.getenv("VERBOSE_ITEM_DEBUG", "0") == "1"
+MAX_VERBOSE_LOGS_PER_CYCLE = int(os.getenv("MAX_VERBOSE_LOGS_PER_CYCLE", "200"))
 TASTE_DISCOVERY_ENABLED = os.getenv("TASTE_DISCOVERY_ENABLED", "1") == "1"
 TASTE_DISCOVERY_MAX_QUERIES_PER_CYCLE = int(os.getenv("TASTE_DISCOVERY_MAX_QUERIES_PER_CYCLE", "3"))
 RAW_STYLE_SNIPER_ENABLED = os.getenv("RAW_STYLE_SNIPER_ENABLED", "1") == "1"
@@ -2133,6 +2135,7 @@ AGE_SOURCE_STATS = {
     "synthetic_rank": 0,
     "unknown": 0,
     "synthetic_sent": 0,
+    "visible_sent": 0,
 }
 SAFEGUARD_STATS = {
     "retried": 0,
@@ -2162,6 +2165,78 @@ AUDIT_STATS = {
 }
 AUDIT_TOP_BLOCKED: list[dict] = []
 AUDIT_TOP_NOT_SENT: list[dict] = []
+VERBOSE_LOG_STATS = {
+    "printed": 0,
+    "suppressed": {
+        "age_source": 0,
+        "size_parse": 0,
+        "safeguard_blocks": 0,
+        "raw_style_blocks": 0,
+    },
+}
+RAW_STYLE_BLOCK_STATS = {
+    "total": 0,
+    "by_reason": {},
+    "top_blocked": [],
+}
+LAST_TELEGRAM_STATUS = None
+LAST_TELEGRAM_ERROR = ""
+
+
+def verbose_item_log(kind: str, message: str, force: bool = False) -> bool:
+    if force:
+        print(message)
+        return True
+    if not VERBOSE_ITEM_DEBUG:
+        suppressed = VERBOSE_LOG_STATS["suppressed"]
+        suppressed[kind] = suppressed.get(kind, 0) + 1
+        return False
+    if MAX_VERBOSE_LOGS_PER_CYCLE > 0 and VERBOSE_LOG_STATS["printed"] < MAX_VERBOSE_LOGS_PER_CYCLE:
+        print(message)
+        VERBOSE_LOG_STATS["printed"] += 1
+        return True
+    suppressed = VERBOSE_LOG_STATS["suppressed"]
+    suppressed[kind] = suppressed.get(kind, 0) + 1
+    return False
+
+
+def suppress_verbose_log(kind: str, count: int = 1):
+    suppressed = VERBOSE_LOG_STATS["suppressed"]
+    suppressed[kind] = suppressed.get(kind, 0) + int(count or 1)
+
+
+def record_raw_style_block(reason: str, score, title: str):
+    reason = reason or "unknown"
+    try:
+        score_f = float(score or 0)
+    except Exception:
+        score_f = 0.0
+    RAW_STYLE_BLOCK_STATS["total"] += 1
+    by_reason = RAW_STYLE_BLOCK_STATS["by_reason"]
+    by_reason[reason] = by_reason.get(reason, 0) + 1
+    top = RAW_STYLE_BLOCK_STATS["top_blocked"]
+    top.append({"score": round(score_f, 1), "reason": reason, "title": str(title or "")[:70]})
+    top.sort(key=lambda x: x.get("score", 0), reverse=True)
+    del top[10:]
+
+
+def log_send_age_source(result: dict):
+    source = (result or {}).get("_visible_age_source") or (result or {}).get("age_source")
+    if source == "synthetic_rank":
+        AGE_SOURCE_STATS["synthetic_sent"] += 1
+    elif source in {"visible_text", "created_at_ts"}:
+        AGE_SOURCE_STATS["visible_sent"] += 1
+
+
+def record_age_source_resolution(source: str):
+    if source == "created_at_ts":
+        AGE_SOURCE_STATS["created_at_ts"] = AGE_SOURCE_STATS.get("created_at_ts", 0) + 1
+    elif source == "visible_text":
+        AGE_SOURCE_STATS["visible_text"] += 1
+    elif source == "synthetic_rank":
+        AGE_SOURCE_STATS["synthetic_rank"] += 1
+    else:
+        AGE_SOURCE_STATS["unknown"] += 1
 
 
 def raw_normalize_text(text: str) -> str:
@@ -2216,15 +2291,15 @@ def _raw_size_bucket(text: str, item: dict) -> str:
     if size_raw:
         if re.search(r"(?<![a-z0-9])(xxl|2xl|xl|x large|extra large|large|l|m l)(?![a-z0-9])", size_raw):
             if DEBUG_ALERTS:
-                print("[SIZE_PARSE] source=item_size bucket=large")
+                verbose_item_log("size_parse", "[SIZE_PARSE] source=item_size bucket=large")
             return "large"
         if re.search(r"(?<![a-z0-9])(m|medium)(?![a-z0-9])", size_raw):
             if DEBUG_ALERTS:
-                print("[SIZE_PARSE] source=item_size bucket=medium")
+                verbose_item_log("size_parse", "[SIZE_PARSE] source=item_size bucket=medium")
             return "medium"
         if re.search(r"(?<![a-z0-9])(w3[0-6]|3[0-6]x3[0-4])(?![a-z0-9])", size_raw):
             if DEBUG_ALERTS:
-                print("[SIZE_PARSE] source=item_size bucket=large")
+                verbose_item_log("size_parse", "[SIZE_PARSE] source=item_size bucket=large")
             return "large"
     title_n = raw_normalize_text(text)
     explicit = re.search(
@@ -2235,14 +2310,14 @@ def _raw_size_bucket(text: str, item: dict) -> str:
     hit = explicit.group(1) if explicit else (waist.group(1) if waist else "")
     if hit in {"xxl", "2xl", "xl", "l"} or hit.startswith("w3") or "x" in hit:
         if DEBUG_ALERTS:
-            print("[SIZE_PARSE] source=title_explicit bucket=large")
+            verbose_item_log("size_parse", "[SIZE_PARSE] source=title_explicit bucket=large")
         return "large"
     if hit == "m":
         if DEBUG_ALERTS:
-            print("[SIZE_PARSE] source=title_explicit bucket=medium")
+            verbose_item_log("size_parse", "[SIZE_PARSE] source=title_explicit bucket=medium")
         return "medium"
     if DEBUG_ALERTS:
-        print("[SIZE_PARSE] source=none bucket=unknown")
+        verbose_item_log("size_parse", "[SIZE_PARSE] source=none bucket=unknown")
     return ""
 
 
@@ -2322,12 +2397,12 @@ def extract_visible_age_minutes(item) -> tuple[int | None, str]:
                 value = str(value)
         minutes = _parse_age_text_minutes(str(value))
         if minutes is not None:
-            print(f"[AGE_PARSE] source=visible_text visible={str(value)[:80]!r} minutes={minutes}")
+            verbose_item_log("age_source", f"[AGE_PARSE] source=visible_text visible={str(value)[:80]!r} minutes={minutes}")
             return minutes, f"visible:{field}"
     synthetic = item.get("age_min")
     if synthetic is None:
         synthetic = item.get("_rank")
-    print(f"[AGE_PARSE] source=synthetic_rank minutes={synthetic} reason=no_visible_age")
+    verbose_item_log("age_source", f"[AGE_PARSE] source=synthetic_rank minutes={synthetic} reason=no_visible_age")
     return None, "no_visible_age"
 
 
@@ -2337,7 +2412,8 @@ def get_item_age_info(item) -> dict:
     if ts:
         try:
             minutes = max(0, int((time.time() - float(ts)) / 60))
-            print(f"[AGE_SOURCE] source=created_at_ts minutes={minutes} usable_for_freshness=True")
+            verbose_item_log("age_source", f"[AGE_SOURCE] source=created_at_ts minutes={minutes} usable_for_freshness=True")
+            record_age_source_resolution("created_at_ts")
             return {
                 "minutes": minutes,
                 "source": "created_at_ts",
@@ -2362,7 +2438,8 @@ def get_item_age_info(item) -> dict:
                 value = str(value)
         minutes = _parse_age_text_minutes(str(value))
         if minutes is not None:
-            print(f"[AGE_SOURCE] source=visible_text minutes={minutes} text={str(value)[:80]!r} usable_for_freshness=True")
+            verbose_item_log("age_source", f"[AGE_SOURCE] source=visible_text minutes={minutes} text={str(value)[:80]!r} usable_for_freshness=True")
+            record_age_source_resolution("visible_text")
             return {
                 "minutes": minutes,
                 "source": "visible_text",
@@ -2384,7 +2461,8 @@ def get_item_age_info(item) -> dict:
                 minutes = 180
         except Exception:
             minutes = None
-        print(f"[AGE_SOURCE] source=synthetic_rank minutes={minutes} usable_for_freshness=False")
+        verbose_item_log("age_source", f"[AGE_SOURCE] source=synthetic_rank minutes={minutes} usable_for_freshness=False")
+        record_age_source_resolution("synthetic_rank")
         return {
             "minutes": minutes,
             "source": "synthetic_rank",
@@ -2392,7 +2470,8 @@ def get_item_age_info(item) -> dict:
             "visible_text": None,
         }
 
-    print("[AGE_SOURCE] source=unknown usable_for_freshness=False")
+    verbose_item_log("age_source", "[AGE_SOURCE] source=unknown usable_for_freshness=False")
+    record_age_source_resolution("unknown")
     return {
         "minutes": None,
         "source": "unknown",
@@ -2405,15 +2484,15 @@ def _raw_weak_brand_only(item: dict, text: str) -> bool:
     brand = raw_normalize_text(item.get("brand") or "")
     title = raw_normalize_text(item.get("title") or "")
     if brand in WEAK_VINTAGE_BRANDS:
-        print(f"[WEAK_BRAND_SIGNAL_IGNORED] brand={item.get('brand')} title={str(item.get('title') or '')[:60]}")
+        verbose_item_log("raw_style_blocks", f"[WEAK_BRAND_SIGNAL_IGNORED] brand={item.get('brand')} title={str(item.get('title') or '')[:60]}")
         return True
     for weak in WEAK_VINTAGE_BRANDS:
         if raw_contains_phrase(title, f"marka {weak}") or raw_contains_phrase(title, f"brand {weak}"):
-            print(f"[WEAK_BRAND_SIGNAL_IGNORED] brand={weak} title={str(item.get('title') or '')[:60]}")
+            verbose_item_log("raw_style_blocks", f"[WEAK_BRAND_SIGNAL_IGNORED] brand={weak} title={str(item.get('title') or '')[:60]}")
             return True
     m = re.search(r"\bmarka\s+([a-z0-9 ]{2,30})", title)
     if m and m.group(1).strip() in WEAK_VINTAGE_BRANDS:
-        print(f"[WEAK_BRAND_SIGNAL_IGNORED] brand={m.group(1).strip()} title={str(item.get('title') or '')[:60]}")
+        verbose_item_log("raw_style_blocks", f"[WEAK_BRAND_SIGNAL_IGNORED] brand={m.group(1).strip()} title={str(item.get('title') or '')[:60]}")
         return True
     return False
 
@@ -2498,7 +2577,7 @@ def _old_blank_tag_hit(text: str) -> bool:
 def _log_weak_descriptors_ignored(text: str, title: str):
     for term in WEAK_DESCRIPTOR_TERMS:
         if raw_contains_phrase(text, term):
-            print(f"[WEAK_DESCRIPTOR_IGNORED] term={term} title={title[:60]}")
+            verbose_item_log("raw_style_blocks", f"[WEAK_DESCRIPTOR_IGNORED] term={term} title={title[:60]}")
 
 
 def _presend_block(result: dict, source: str, reason: str) -> tuple[bool, str]:
@@ -2539,15 +2618,6 @@ def telegram_presend_gate(item, result=None, source="MAIN") -> tuple[bool, str]:
     result["_age_usable_for_freshness"] = bool(age_info.get("usable_for_freshness"))
     AGE_GATE_STATS["raw_checked"] += 1
     _log_weak_descriptors_ignored(text, title)
-
-    if age_info.get("source") == "created_at_ts":
-        AGE_SOURCE_STATS["created_at_ts"] = AGE_SOURCE_STATS.get("created_at_ts", 0) + 1
-    elif age_info.get("source") == "visible_text":
-        AGE_SOURCE_STATS["visible_text"] += 1
-    elif age_info.get("source") == "synthetic_rank":
-        AGE_SOURCE_STATS["synthetic_rank"] += 1
-    else:
-        AGE_SOURCE_STATS["unknown"] += 1
 
     if not age_info.get("usable_for_freshness"):
         result["_visible_age_source"] = "synthetic_rank" if age_info.get("source") == "synthetic_rank" else "unknown"
@@ -2995,6 +3065,7 @@ def reset_raw_style_cycle():
         "synthetic_rank": 0,
         "unknown": 0,
         "synthetic_sent": 0,
+        "visible_sent": 0,
     })
     SAFEGUARD_STATS.update({
         "retried": 0,
@@ -3003,6 +3074,18 @@ def reset_raw_style_cycle():
         "blocked_presend": 0,
         "sent": 0,
         "limit_skipped": 0,
+    })
+    VERBOSE_LOG_STATS["printed"] = 0
+    VERBOSE_LOG_STATS["suppressed"] = {
+        "age_source": 0,
+        "size_parse": 0,
+        "safeguard_blocks": 0,
+        "raw_style_blocks": 0,
+    }
+    RAW_STYLE_BLOCK_STATS.update({
+        "total": 0,
+        "by_reason": {},
+        "top_blocked": [],
     })
 
 
@@ -3016,11 +3099,12 @@ def collect_raw_style_candidate(item: dict, search: dict | None = None):
     item.setdefault("_search_meta", {"name": search.get("name")})
     RAW_STYLE_STATS["checked"] += 1
     profile = compute_raw_style_score(item)
-    print(f"[RAW_STYLE_CHECK] score={profile['raw_style_score']:.0f} "
-          f"bucket={profile['raw_style_bucket']} signals={profile['raw_style_signals'][:5]} "
-          f"real_signal={profile['raw_style_real_signal']} price={float(item.get('price') or 0):.0f} "
-          f"effective_price={profile['effective_price']:.0f} age={profile['age_min']} "
-          f"title={str(item.get('title') or '')[:60]}")
+    if VERBOSE_ITEM_DEBUG:
+        print(f"[RAW_STYLE_CHECK] score={profile['raw_style_score']:.0f} "
+              f"bucket={profile['raw_style_bucket']} signals={profile['raw_style_signals'][:5]} "
+              f"real_signal={profile['raw_style_real_signal']} price={float(item.get('price') or 0):.0f} "
+              f"effective_price={profile['effective_price']:.0f} age={profile['age_min']} "
+              f"title={str(item.get('title') or '')[:60]}")
     audit_candidate(
         "raw_style_check", item, search, profile,
         score=profile.get("raw_style_score"),
@@ -3029,9 +3113,14 @@ def collect_raw_style_candidate(item: dict, search: dict | None = None):
     )
     if not profile["eligible"]:
         RAW_STYLE_STATS["blocked"] += 1
-        print(f"[RAW_STYLE_BLOCK] reason={profile['raw_style_block_reason']} "
-              f"score={profile['raw_style_score']:.0f} signals={profile['raw_style_signals'][:5]} "
-              f"title={str(item.get('title') or '')[:60]}")
+        record_raw_style_block(profile.get("raw_style_block_reason"), profile.get("raw_style_score"), item.get("title"))
+        raw_block_msg = (f"[RAW_STYLE_BLOCK] reason={profile['raw_style_block_reason']} "
+                         f"score={profile['raw_style_score']:.0f} signals={profile['raw_style_signals'][:5]} "
+                         f"title={str(item.get('title') or '')[:60]}")
+        if VERBOSE_ITEM_DEBUG or float(profile.get("raw_style_score") or 0) >= 60:
+            verbose_item_log("raw_style_blocks", raw_block_msg, force=not VERBOSE_ITEM_DEBUG)
+        else:
+            suppress_verbose_log("raw_style_blocks")
         audit_candidate(
             "blocked", item, search, profile,
             block_reason=profile.get("raw_style_block_reason"),
@@ -3062,6 +3151,7 @@ def collect_raw_style_candidate(item: dict, search: dict | None = None):
         "raw_style_real_signal_count": profile["raw_style_real_signal_count"],
         "effective_price": profile["effective_price"],
         "age_min": profile["age_min"],
+        "age_source": profile.get("age_source"),
         "final_score": profile["raw_style_score"],
         "tier": "RAW_STYLE",
     }
@@ -3085,6 +3175,7 @@ def collect_raw_style_candidate(item: dict, search: dict | None = None):
         )
     if not current or rank > current_rank:
         RAW_STYLE_CYCLE_CANDIDATES[key] = result
+        query_coverage_record(search.get("name"))["candidates_created"] += 1
     RAW_STYLE_STATS["candidates"] = max(RAW_STYLE_STATS["candidates"], len(RAW_STYLE_CYCLE_CANDIDATES))
     print(f"[RAW_STYLE_CANDIDATE] score={result['raw_style_score']:.0f} "
           f"bucket={result['raw_style_bucket']} signals={result['raw_style_signals'][:5]} "
@@ -3158,12 +3249,17 @@ def send_raw_style_candidates(max_cycle_slots: int, sent_this_cycle: int) -> int
         validated_signals = int(result.get("_raw_style_validated_signals") or 0)
         if not presend_ok:
             query_coverage_record((item.get("_search_meta") or {}).get("name"))["blocked_count"] += 1
-            print(f"[RAW_STYLE_PRE_SEND_BLOCK] reason={presend_reason} "
-                  f"score={result.get('raw_style_score',0):.0f} "
-                  f"bucket={result.get('raw_style_bucket','none')} "
-                  f"validated_signals={validated_signals} "
-                  f"visible_age={result.get('_visible_age_minutes')} "
-                  f"title={str(item.get('title') or '')[:60]}")
+            record_raw_style_block(presend_reason, result.get("raw_style_score"), item.get("title"))
+            presend_block_msg = (f"[RAW_STYLE_PRE_SEND_BLOCK] reason={presend_reason} "
+                                 f"score={result.get('raw_style_score',0):.0f} "
+                                 f"bucket={result.get('raw_style_bucket','none')} "
+                                 f"validated_signals={validated_signals} "
+                                 f"visible_age={result.get('_visible_age_minutes')} "
+                                 f"title={str(item.get('title') or '')[:60]}")
+            if VERBOSE_ITEM_DEBUG or float(result.get("raw_style_score") or 0) >= 70:
+                print(presend_block_msg)
+            else:
+                suppress_verbose_log("raw_style_blocks")
             audit_candidate("blocked", item, result=result, block_reason=presend_reason,
                             alert_type="RAW_STYLE", score=result.get("raw_style_score"),
                             bucket=result.get("raw_style_bucket"), signals=result.get("raw_style_signals"))
@@ -3174,11 +3270,15 @@ def send_raw_style_candidates(max_cycle_slots: int, sent_this_cycle: int) -> int
               f"pass_reasons={(result.get('_raw_style_presend_reasons') or [])[:5]} "
               f"title={str(item.get('title') or '')[:60]}")
         photo = item.get("photo") or get_item_photo(item.get("id"), item.get("link") or item.get("url") or "")
-        sent_ok = send_message(format_telegram_alert(item, result, "RAW_STYLE"), photo_url=photo, item_link=item.get("link") or item.get("url"))
+        sent_ok = send_alert_message(
+            format_telegram_alert(item, result, "RAW_STYLE"),
+            item, result, "RAW_STYLE", key,
+            photo_url=photo,
+            item_link=item.get("link") or item.get("url"),
+        )
         if not sent_ok:
-            print(f"[TELEGRAM] raw_style_send_failed key={key} title={str(item.get('title') or '')[:60]}")
             continue
-        log_decision_trace(item, result, "RAW_STYLE", presend_reason)
+        log_decision_trace(item, result, "RAW_STYLE", presend_reason, send_status="success")
         query_coverage_record((item.get("_search_meta") or {}).get("name"))["alerts_sent"] += 1
         mark_sent(item, result, (item.get("_search_meta") or {}).get("name"))
         print(f"[RAW_STYLE_DEDUPE_MARK] key={key} title={str(item.get('title') or '')[:60]}")
@@ -3186,8 +3286,7 @@ def send_raw_style_candidates(max_cycle_slots: int, sent_this_cycle: int) -> int
         sent += 1
         RAW_STYLE_STATS["sent"] += 1
         AGE_GATE_STATS["sent"] += 1
-        if result.get("_visible_age_source") == "synthetic_rank":
-            AGE_SOURCE_STATS["synthetic_sent"] += 1
+        log_send_age_source(result)
         print(f"[RAW_STYLE_SEND] rank={sent} score={result.get('raw_style_score',0):.0f} "
               f"bucket={result.get('raw_style_bucket','none')} "
               f"price={float(item.get('price') or 0):.0f} "
@@ -3231,17 +3330,28 @@ def print_raw_style_summary():
           f"passed={PRESEND_STATS['passed']} blocked={PRESEND_STATS['blocked']} "
           f"blocked_by_reason={PRESEND_STATS['blocked_by_reason']} "
           f"by_source={PRESEND_STATS['by_source']}")
-    print(f"[AGE_SOURCE_SUMMARY] visible_text={AGE_SOURCE_STATS['visible_text']} "
-          f"created_at_ts={AGE_SOURCE_STATS.get('created_at_ts', 0)} "
+    print(f"[AGE_SOURCE_SUMMARY] created_at_ts={AGE_SOURCE_STATS.get('created_at_ts', 0)} "
+          f"visible_text={AGE_SOURCE_STATS['visible_text']} "
           f"synthetic_rank={AGE_SOURCE_STATS['synthetic_rank']} "
           f"unknown={AGE_SOURCE_STATS['unknown']} "
-          f"synthetic_sent={AGE_SOURCE_STATS['synthetic_sent']}")
+          f"synthetic_sent={AGE_SOURCE_STATS['synthetic_sent']} "
+          f"visible_sent={AGE_SOURCE_STATS.get('visible_sent', 0)}")
     print(f"[SAFEGUARD_SUMMARY] retried={SAFEGUARD_STATS['retried']} "
           f"added={SAFEGUARD_STATS.get('added', 0)} "
           f"passed_presend={SAFEGUARD_STATS['passed_presend']} "
           f"blocked_presend={SAFEGUARD_STATS['blocked_presend']} "
           f"sent={SAFEGUARD_STATS['sent']} "
           f"limit_skipped={SAFEGUARD_STATS['limit_skipped']}")
+    print(f"[RAW_STYLE_BLOCK_SUMMARY] total={RAW_STYLE_BLOCK_STATS['total']} "
+          f"by_reason={RAW_STYLE_BLOCK_STATS['by_reason']} "
+          f"top_blocked={RAW_STYLE_BLOCK_STATS['top_blocked']}")
+    suppressed = VERBOSE_LOG_STATS["suppressed"]
+    total_suppressed = sum(int(v or 0) for v in suppressed.values())
+    print(f"[VERBOSE_LOG_SUPPRESSED] age_source={suppressed.get('age_source', 0)} "
+          f"size_parse={suppressed.get('size_parse', 0)} "
+          f"safeguard_blocks={suppressed.get('safeguard_blocks', 0)} "
+          f"raw_style_blocks={suppressed.get('raw_style_blocks', 0)} "
+          f"total_suppressed={total_suppressed}")
 
 
 def print_candidate_audit_summary():
@@ -3273,7 +3383,7 @@ def print_candidate_audit_summary():
         )
 
 
-def log_decision_trace(item: dict, result: dict, source: str, presend_reason: str = "pass"):
+def log_decision_trace(item: dict, result: dict, source: str, presend_reason: str = "pass", send_status: str = "success"):
     age_info = get_item_age_info(item)
     signals = result.get("_raw_style_presend_reasons") or validated_real_signal_reasons(item, result)
     query = (item.get("_search_meta") or {}).get("name") or "unknown"
@@ -3284,6 +3394,7 @@ def log_decision_trace(item: dict, result: dict, source: str, presend_reason: st
           f"bucket={result.get('raw_style_bucket') or result.get('taste_bucket') or result.get('tier')} "
           f"score={result.get('raw_style_score') or result.get('taste_watch_score') or result.get('final_score')} "
           f"presend_reason={presend_reason} "
+          f"send_status={send_status} "
           f"final_reason={result.get('reason') or result.get('_quality_block_reason') or result.get('raw_style_block_reason')} "
           f"title={str(item.get('title') or '')[:80]}")
 
@@ -3376,9 +3487,11 @@ TG_MIN_INTERVAL = 2.0
 
 
 def send_message(text, photo_url=None, item_link=None):
-    global _last_tg_send
+    global _last_tg_send, LAST_TELEGRAM_STATUS, LAST_TELEGRAM_ERROR
     import json as _json
     tg_base = f"https://api.telegram.org/bot{TOKEN}"
+    LAST_TELEGRAM_STATUS = None
+    LAST_TELEGRAM_ERROR = ""
 
     elapsed = time.time() - _last_tg_send
     if elapsed < TG_MIN_INTERVAL:
@@ -3403,7 +3516,9 @@ def send_message(text, photo_url=None, item_link=None):
                 data["reply_markup"] = reply_markup
             r = requests.post(f"{tg_base}/sendPhoto", data=data, timeout=15)
             last_response = r
-            print(f"[TELEGRAM] status={r.status_code} body={r.text[:200]}")
+            LAST_TELEGRAM_STATUS = r.status_code
+            if VERBOSE_ITEM_DEBUG:
+                print(f"[TELEGRAM] status={r.status_code} body={r.text[:200]}")
             if r.status_code == 200:
                 sent = True
             elif r.status_code == 429:
@@ -3419,23 +3534,42 @@ def send_message(text, photo_url=None, item_link=None):
                 data["reply_markup"] = reply_markup
             r = requests.post(f"{tg_base}/sendMessage", data=data, timeout=10)
             last_response = r
-            print(f"[TELEGRAM] status={r.status_code} body={r.text[:200]}")
+            LAST_TELEGRAM_STATUS = r.status_code
+            if VERBOSE_ITEM_DEBUG:
+                print(f"[TELEGRAM] status={r.status_code} body={r.text[:200]}")
             if r.status_code == 429:
                 time.sleep(5)
                 r = requests.post(f"{tg_base}/sendMessage", data=data, timeout=10)
                 last_response = r
-                print(f"[TELEGRAM] status={r.status_code} body={r.text[:200]}")
+                LAST_TELEGRAM_STATUS = r.status_code
+                if VERBOSE_ITEM_DEBUG:
+                    print(f"[TELEGRAM] status={r.status_code} body={r.text[:200]}")
 
         _last_tg_send = time.time()
+        if last_response is not None and last_response.status_code != 200:
+            LAST_TELEGRAM_ERROR = str(last_response.text[:200])
         return bool(last_response and last_response.status_code == 200)
 
     except Exception as e:
+        LAST_TELEGRAM_ERROR = str(e)
         print(f"Błąd wysyłania: {e}")
         return False
 
 # ─────────────────────────────────────────
 #  💰 WYCIĄGANIE CENY
 # ─────────────────────────────────────────
+def send_alert_message(text, item: dict, result: dict, source: str, key: str, photo_url=None, item_link=None) -> bool:
+    title = str((item or {}).get("title") or "")[:60]
+    print(f"[SEND_ATTEMPT] source={source} key={key} title={title}")
+    ok = send_message(text, photo_url=photo_url, item_link=item_link)
+    if ok:
+        print(f"[SEND_SUCCESS] source={source} key={key} telegram_status={LAST_TELEGRAM_STATUS or 200} title={title}")
+        return True
+    error = LAST_TELEGRAM_ERROR or "send_message_returned_false"
+    print(f"[SEND_FAIL] source={source} key={key} status={LAST_TELEGRAM_STATUS} error={str(error)[:160]} title={title}")
+    return False
+
+
 TITLE_NOISE_WORDS = [
     "swag", "drip", "opium", "archive", "avantgarde", "rare unique",
     "hidden gem", "japanstyle", "y2k", "rap",
@@ -3553,6 +3687,9 @@ def _alert_meta(alert_type: str) -> dict:
 
 
 def _item_age_label(item: dict, result: dict) -> str:
+    age_source = result.get("age_source") or result.get("_visible_age_source")
+    if age_source == "synthetic_rank":
+        return "?"
     age = result.get("age_min") or item.get("age_min")
     if age is None:
         age = parse_item_age_minutes(item)
@@ -3658,7 +3795,10 @@ def format_telegram_alert(item: dict, result: dict, alert_type: str | None = Non
             pass
     if size:
         lines.append(f"📏 Rozmiar: {size}")
-    if age != "?":
+    age_source = result.get("age_source") or result.get("_visible_age_source")
+    if age_source == "synthetic_rank":
+        lines.append("⏱️ Świeżość: brak danych")
+    elif age != "?":
         lines.append(f"⏱️ Dodane: {age}")
     if score is not None:
         lines.append(f"🎯 {score_label}: {score}/100")
@@ -4908,6 +5048,7 @@ def check_search(search, seen, market_price):
                 seen_audit_item["age_min"] = age_min
                 seen_audit_item["_search_meta"] = {"name": search.get("name")}
                 audit_candidate("seen", seen_audit_item, search)
+                query_coverage_record(search.get("name"))["items_seen"] += 1
                 print(f"[AUDIT_SEEN] query={search.get('name')} title={title[:60]}")
 
                 if not item_id or not href:
@@ -5232,8 +5373,11 @@ def check_search(search, seen, market_price):
                         or (real_signal_count >= 4)
                     )
                     if not qualifies:
-                        print(f"[SAFEGUARD_QUALIFY_BLOCK] reason=not_enough_real_signal "
-                              f"title={title[:60]} signals={real_signal_reasons[:5]}")
+                        verbose_item_log(
+                            "safeguard_blocks",
+                            f"[SAFEGUARD_QUALIFY_BLOCK] reason=not_enough_real_signal "
+                            f"title={title[:60]} signals={real_signal_reasons[:5]}",
+                        )
                         continue
                     SAFEGUARD_STATS["added"] += 1
                     found.append({
@@ -5638,7 +5782,6 @@ while True:
             qcov["last_checked_at"] = now
             qcov["checked_this_cycle"] = True
             new_items, all_ids = check_search(search, seen, market_price)
-            qcov["items_seen"] += len(new_items)
             searches_done += 1
             print(f"  [SEARCH] selected={search['name']} nowych={len(new_items)}")
 
@@ -5762,19 +5905,21 @@ while True:
 
                 photo     = item.get("photo") or get_item_photo(item["id"], item.get("link", ""))
                 alert_msg = format_telegram_alert(item, result)
-                sent_ok = send_message(alert_msg, photo_url=photo, item_link=item.get("link"))
+                sent_ok = send_alert_message(
+                    alert_msg, item, result, presend_source, dedupe_key,
+                    photo_url=photo,
+                    item_link=item.get("link"),
+                )
                 if not sent_ok:
-                    print(f"[TELEGRAM] send_failed key={dedupe_key} title={str(item.get('title',''))[:60]}")
                     continue
-                log_decision_trace(item, result, presend_source, presend_reason)
+                log_decision_trace(item, result, presend_source, presend_reason, send_status="success")
                 query_coverage_record((item.get("_search_meta") or {}).get("name"))["alerts_sent"] += 1
                 mark_sent(item, result, (item.get("_search_meta") or {}).get("name"))
                 audit_candidate("sent", item, result=result, sent=True, alert_type=_alert_type(result),
                                 score=result.get("final_score"))
                 if alert_type == "STYLE_WATCH":
                     AGE_GATE_STATS["sent"] += 1
-                if result.get("_visible_age_source") == "synthetic_rank":
-                    AGE_SOURCE_STATS["synthetic_sent"] += 1
+                log_send_age_source(result)
                 if presend_source == "SAFEGUARD":
                     safeguard_sent_this_cycle += 1
                     SAFEGUARD_STATS["sent"] += 1
@@ -5874,19 +6019,21 @@ while True:
                           f"title={str(item.get('title') or '')[:60]}")
                     photo     = item.get("photo") or get_item_photo(item["id"], item.get("link", ""))
                     alert_msg = format_telegram_alert(item, result)
-                    sent_ok = send_message(alert_msg, photo_url=photo, item_link=item.get("link"))
+                    sent_ok = send_alert_message(
+                        alert_msg, item, result, "SAFEGUARD", dedupe_key,
+                        photo_url=photo,
+                        item_link=item.get("link"),
+                    )
                     if not sent_ok:
-                        print(f"[TELEGRAM] send_failed key={dedupe_key} title={str(item.get('title',''))[:60]}")
                         continue
-                    log_decision_trace(item, result, "SAFEGUARD", presend_reason)
+                    log_decision_trace(item, result, "SAFEGUARD", presend_reason, send_status="success")
                     query_coverage_record((item.get("_search_meta") or {}).get("name"))["alerts_sent"] += 1
                     mark_sent(item, result, (item.get("_search_meta") or {}).get("name"))
                     audit_candidate("sent", item, result=result, sent=True, alert_type=_alert_type(result),
                                     score=result.get("final_score"))
                     if alert_type == "STYLE_WATCH":
                         AGE_GATE_STATS["sent"] += 1
-                    if result.get("_visible_age_source") == "synthetic_rank":
-                        AGE_SOURCE_STATS["synthetic_sent"] += 1
+                    log_send_age_source(result)
                     safeguard_sent_this_cycle += 1
                     SAFEGUARD_STATS["sent"] += 1
                     seen[item["id"]] = now
