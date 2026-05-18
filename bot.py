@@ -60,6 +60,8 @@ RAW_STYLE_SNIPER_MAX_AGE_MIN = int(os.getenv("RAW_STYLE_SNIPER_MAX_AGE_MIN", "90
 RAW_STYLE_SNIPER_MAX_PRICE = float(os.getenv("RAW_STYLE_SNIPER_MAX_PRICE", "160"))
 NEGOTIATION_BUFFER_PLN = float(os.getenv("NEGOTIATION_BUFFER_PLN", "15"))
 RAW_STYLE_MAX_VISIBLE_AGE_MIN = int(os.getenv("RAW_STYLE_MAX_VISIBLE_AGE_MIN", "180"))
+MAX_DETAIL_SEND_AGE_MIN = int(os.getenv("MAX_DETAIL_SEND_AGE_MIN", "4320"))
+ALLOW_UNVERIFIED_AGE_FOR_STRONG_GRAIL = os.getenv("ALLOW_UNVERIFIED_AGE_FOR_STRONG_GRAIL", "1") == "1"
 SAFEGUARD_STRICT_PRESEND_ENABLED = os.getenv("SAFEGUARD_STRICT_PRESEND_ENABLED", "1") == "1"
 SAFEGUARD_MAX_SEND_PER_CYCLE = int(os.getenv("SAFEGUARD_MAX_SEND_PER_CYCLE", "1"))
 STARTUP_IMAGE_ENABLED = os.getenv("STARTUP_IMAGE_ENABLED", "1") == "1"
@@ -2137,6 +2139,13 @@ AGE_SOURCE_STATS = {
     "synthetic_sent": 0,
     "visible_sent": 0,
 }
+DETAIL_AGE_STATS = {
+    "checked": 0,
+    "parsed": 0,
+    "blocked_stale": 0,
+    "blocked_unverified": 0,
+    "allowed_grail_unverified": 0,
+}
 SAFEGUARD_STATS = {
     "retried": 0,
     "added": 0,
@@ -2225,7 +2234,7 @@ def log_send_age_source(result: dict):
     source = (result or {}).get("_visible_age_source") or (result or {}).get("age_source")
     if source == "synthetic_rank":
         AGE_SOURCE_STATS["synthetic_sent"] += 1
-    elif source in {"visible_text", "created_at_ts"}:
+    elif source in {"visible_text", "created_at_ts", "detail_visible_text"}:
         AGE_SOURCE_STATS["visible_sent"] += 1
 
 
@@ -2233,6 +2242,8 @@ def record_age_source_resolution(source: str):
     if source == "created_at_ts":
         AGE_SOURCE_STATS["created_at_ts"] = AGE_SOURCE_STATS.get("created_at_ts", 0) + 1
     elif source == "visible_text":
+        AGE_SOURCE_STATS["visible_text"] += 1
+    elif source == "detail_visible_text":
         AGE_SOURCE_STATS["visible_text"] += 1
     elif source == "synthetic_rank":
         AGE_SOURCE_STATS["synthetic_rank"] += 1
@@ -2379,6 +2390,92 @@ def _parse_age_text_minutes(text: str) -> int | None:
     if re.search(r"\b(?:mies|miesi|miesiac|month|a month)\b", t):
         return 43200
     return None
+
+
+def _extract_detail_age_text(html: str) -> tuple[int | None, str | None]:
+    try:
+        text = BeautifulSoup(html or "", "html.parser").get_text(" ", strip=True)
+    except Exception:
+        text = str(html or "")
+    if not text:
+        return None, None
+    candidates: list[str] = []
+    patterns = [
+        r"(Dodane\s+(?:\d+\s*)?(?:min\.?|minut(?:y)?|godz\.?|godzin(?:e|ę|a|y)?|wczoraj|dzień|dzien|dni|tydzień|tydzien|tygodnia|tyg\.?|miesiąc|miesiac|mies\.?|miesięcy|miesiecy))",
+        r"((?:\d+\s*)?(?:min(?:ute)?s?|hours?|days?|weeks?|months?)\s+ago)",
+        r"\b(yesterday)\b",
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            candidates.append(match.group(1) if match.groups() else match.group(0))
+    for match in re.finditer(r"(.{0,25}(?:Dodane|ago|wczoraj|yesterday).{0,70})", text, flags=re.IGNORECASE):
+        candidates.append(match.group(1))
+    seen = set()
+    for candidate in candidates:
+        raw = re.sub(r"\s+", " ", str(candidate or "")).strip()
+        if not raw or raw.lower() in seen:
+            continue
+        seen.add(raw.lower())
+        minutes = _parse_age_text_minutes(raw)
+        if minutes is not None:
+            return minutes, raw[:120]
+    return None, None
+
+
+def verify_detail_age_before_send(item, source_age: str | None = None) -> dict:
+    item = item or {}
+    title = str(item.get("title") or "")[:80]
+    url = item.get("link") or item.get("url") or ""
+    DETAIL_AGE_STATS["checked"] += 1
+    if not url:
+        print(f"[DETAIL_AGE_VERIFY_ERROR] title={title} error=missing_url")
+        return {
+            "ok": False,
+            "age_minutes": None,
+            "age_source": "error",
+            "raw_text": None,
+            "block_reason": "detail_age_missing_url",
+        }
+    try:
+        response = vinted_fetch(url, label="detail_age_verify")
+        if not response:
+            print(f"[DETAIL_AGE_VERIFY_ERROR] title={title} error=no_response")
+            return {
+                "ok": False,
+                "age_minutes": None,
+                "age_source": "error",
+                "raw_text": None,
+                "block_reason": "detail_age_fetch_error",
+            }
+        minutes, raw_text = _extract_detail_age_text(response.text)
+        if minutes is None:
+            print(f"[DETAIL_AGE_UNVERIFIED_BLOCK] title={title} reason=detail_age_not_found")
+            return {
+                "ok": False,
+                "age_minutes": None,
+                "age_source": "not_found",
+                "raw_text": raw_text,
+                "block_reason": "detail_age_unverified_block",
+            }
+        DETAIL_AGE_STATS["parsed"] += 1
+        print(f"[DETAIL_AGE_VERIFY] title={title} source_age={source_age or 'unknown'} "
+              f"detail_age_source=detail_visible_text age_minutes={minutes} raw_text={raw_text}")
+        return {
+            "ok": True,
+            "age_minutes": minutes,
+            "age_source": "detail_visible_text",
+            "raw_text": raw_text,
+            "block_reason": None,
+        }
+    except Exception as e:
+        print(f"[DETAIL_AGE_VERIFY_ERROR] title={title} error={e}")
+        return {
+            "ok": False,
+            "age_minutes": None,
+            "age_source": "error",
+            "raw_text": None,
+            "block_reason": "detail_age_verify_error",
+        }
 
 
 def extract_visible_age_minutes(item) -> tuple[int | None, str]:
@@ -2631,6 +2728,48 @@ def telegram_presend_gate(item, result=None, source="MAIN") -> tuple[bool, str]:
             or score >= 95
         )
     )
+
+    if not age_info.get("usable_for_freshness"):
+        detail_age = verify_detail_age_before_send(item, source_age=age_info.get("source"))
+        result["_detail_age_verification"] = detail_age
+        if detail_age.get("ok") and detail_age.get("age_minutes") is not None:
+            detail_minutes = int(detail_age.get("age_minutes"))
+            result["_visible_age_minutes"] = detail_minutes
+            result["_visible_age_source"] = "detail_visible_text"
+            result["_age_usable_for_freshness"] = True
+            result["age_min"] = detail_minutes
+            result["age_source"] = "detail_visible_text"
+            item["age_min"] = detail_minutes
+            item["age_source"] = "detail_visible_text"
+            visible_age = detail_minutes
+            age_info = {
+                "minutes": detail_minutes,
+                "source": "detail_visible_text",
+                "usable_for_freshness": True,
+                "visible_text": detail_age.get("raw_text"),
+            }
+            record_age_source_resolution("detail_visible_text")
+            if detail_minutes > MAX_DETAIL_SEND_AGE_MIN:
+                DETAIL_AGE_STATS["blocked_stale"] += 1
+                print(f"[STALE_DETAIL_AGE_BLOCK] title={title[:80]} "
+                      f"age_minutes={detail_minutes} raw_age_text={detail_age.get('raw_text')} "
+                      f"source=detail_visible_text url={item.get('link') or item.get('url')} "
+                      f"max_allowed={MAX_DETAIL_SEND_AGE_MIN}")
+                return _presend_block(result, source, "stale_detail_age_presend_block")
+        else:
+            confidence = float(result.get("confidence") or 0)
+            if (
+                strong_grail
+                and ALLOW_UNVERIFIED_AGE_FOR_STRONG_GRAIL
+                and validated >= 5
+                and confidence >= 8.5
+            ):
+                DETAIL_AGE_STATS["allowed_grail_unverified"] += 1
+                print(f"[DETAIL_AGE_UNVERIFIED_GRAIL_ALLOW] title={title[:80]} "
+                      f"validated_signals={validated} confidence={confidence:.1f}")
+            else:
+                DETAIL_AGE_STATS["blocked_unverified"] += 1
+                return _presend_block(result, source, detail_age.get("block_reason") or "detail_age_unverified_block")
 
     if visible_age is not None and visible_age > RAW_STYLE_MAX_VISIBLE_AGE_MIN and not strong_grail:
         AGE_GATE_STATS["blocked_stale_visible_age"] += 1
@@ -3060,6 +3199,13 @@ def reset_raw_style_cycle():
         "blocked_by_reason": {},
         "by_source": {},
     })
+    DETAIL_AGE_STATS.update({
+        "checked": 0,
+        "parsed": 0,
+        "blocked_stale": 0,
+        "blocked_unverified": 0,
+        "allowed_grail_unverified": 0,
+    })
     AGE_SOURCE_STATS.update({
         "created_at_ts": 0,
         "visible_text": 0,
@@ -3338,6 +3484,11 @@ def print_raw_style_summary():
           f"unknown={AGE_SOURCE_STATS['unknown']} "
           f"synthetic_sent={AGE_SOURCE_STATS['synthetic_sent']} "
           f"visible_sent={AGE_SOURCE_STATS.get('visible_sent', 0)}")
+    print(f"[DETAIL_AGE_SUMMARY] checked={DETAIL_AGE_STATS['checked']} "
+          f"parsed={DETAIL_AGE_STATS['parsed']} "
+          f"blocked_stale={DETAIL_AGE_STATS['blocked_stale']} "
+          f"blocked_unverified={DETAIL_AGE_STATS['blocked_unverified']} "
+          f"allowed_grail_unverified={DETAIL_AGE_STATS['allowed_grail_unverified']}")
     print(f"[SAFEGUARD_SUMMARY] retried={SAFEGUARD_STATS['retried']} "
           f"added={SAFEGUARD_STATS.get('added', 0)} "
           f"passed_presend={SAFEGUARD_STATS['passed_presend']} "
