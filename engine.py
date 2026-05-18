@@ -41,7 +41,7 @@ os.makedirs(_DATA_DIR, exist_ok=True)
 
 DB_FILE       = os.path.join(_DATA_DIR, "market_db.json")
 
-DEBUG_ALERTS    = True
+DEBUG_ALERTS    = os.getenv("DEBUG_ALERTS", "1") == "1"
 WATCH_ALERTS_ENABLED = os.getenv("WATCH_ALERTS_ENABLED", "0") == "1"
 WATCH_MAX_PER_CYCLE = int(os.getenv("WATCH_MAX_PER_CYCLE", "2"))
 TASTE_WATCH_ENABLED = os.getenv("TASTE_WATCH_ENABLED", "1") == "1"
@@ -2614,11 +2614,21 @@ class ChaosEngine:
             db_data = self.db.lookup(db_key)
             if db_data and db_data.get("count", 0) >= 3:
                 market_price = db_data.get("median")
-        if not market_price:
-            market_price = price * 1.6
+        no_market_data = not bool(market_price)
+        real_signal_hits = [
+            sig for sig in [
+                "single stitch", "made in usa", "made in u.s.a", "80s", "90s", "00s",
+                "official", "licensed", "copyright", "tour", "race", "racing",
+                "movie promo", "back print", "front print", "double sided",
+                "big print", "large graphic", "sturgis", "daytona", "bike week",
+                "skull", "flame", "eagle", "rrl", "double rl", "nascar",
+                "warner bros", "taz motorcycle",
+            ]
+            if sig in title.lower()
+        ]
 
-        estimated_value = market_price
-        profit          = estimated_value - price
+        estimated_value = market_price if market_price else price
+        profit          = (estimated_value - price) if market_price else 0
 
         # Confidence: brand floor enforced (Global rule)
         confidence = 4.0
@@ -2684,6 +2694,10 @@ class ChaosEngine:
             confidence -= 2.0
 
         confidence = round(min(max(confidence, 0.0), 10.0), 2)
+        if no_market_data and len(real_signal_hits) < 3:
+            confidence = min(confidence, 5.5)
+            if DEBUG_ALERTS:
+                print(f"  [NO_MARKET_DATA_CAP] title={title[:60]} confidence_cap=5.5 real_signals={real_signal_hits}")
 
         if profit < 10 and anomaly_score == 0 and pattern_score <= 0:
             return {**base, "_skip_reason": "low_profit_no_anomaly",
@@ -2738,6 +2752,8 @@ class ChaosEngine:
             "profit":           round(profit, 2),
             "estimated_value":  round(estimated_value, 2),
             "market_price":     round(market_price, 2) if market_price else None,
+            "no_market_data":   no_market_data,
+            "real_signal_hits": real_signal_hits,
             "confidence":       confidence,
             "anomaly_score":    anomaly_score,
             "pattern_score":    pattern_score,
@@ -4007,6 +4023,28 @@ class Engine:
         # ── Step 4: dynamic profit threshold ────────────────────────────
         min_profit = 50 if len(candidate_pool) > 15 else 40
         candidate_pool = [r for r in candidate_pool if r.get("profit", 0) >= min_profit]
+        if not candidate_pool and not (
+            (WATCH_ALERTS_ENABLED and any(r.get("watch_candidate") for r in fallback_pool))
+            or (TASTE_WATCH_SEND_ENABLED and any(r.get("taste_watch_candidate") for r in fallback_pool))
+        ):
+            preview = sorted(
+                fallback_pool,
+                key=lambda rr: (
+                    rr.get("final_score", 0),
+                    rr.get("signal_quality_score", 0),
+                    rr.get("desirability_score", 0),
+                ),
+                reverse=True,
+            )[:1]
+            if preview:
+                item = preview[0].get("item") or {}
+                print(f"  [ENGINE_TOP1_WATCH_ONLY] reason=no_sendable_candidates "
+                      f"title={str(item.get('title') or '')[:60]} "
+                      f"score={preview[0].get('final_score', 0)}")
+            _print_quality_summary(sent_count=0)
+            _print_style_watch_preview()
+            self.db.save(force=True)
+            return []
         print(f"  🎚 min_profit={min_profit} → {len(candidate_pool)} candidates")
 
         # ── Step 5: anti-spam / near-duplicate removal ───────────────────
@@ -4313,7 +4351,7 @@ class Engine:
         """Konwertuje wynik silnika do formatu legacy."""
         item  = r.get("item", {})
         price = item.get("price", 0)
-        est   = r.get("estimated_value", 0) or r.get("median_price", 0) or price * 1.6
+        est   = r.get("estimated_value", 0) or r.get("median_price", 0) or price
         return {
             "send_alert":      r.get("send_alert", False),
             "tier":            r.get("tier"),
