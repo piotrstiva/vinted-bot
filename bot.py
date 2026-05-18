@@ -6,7 +6,7 @@ import re
 import base64
 import random
 import unicodedata
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 from statistics import median
 from bs4 import BeautifulSoup
 
@@ -60,6 +60,7 @@ RAW_STYLE_SNIPER_MAX_AGE_MIN = int(os.getenv("RAW_STYLE_SNIPER_MAX_AGE_MIN", "90
 RAW_STYLE_SNIPER_MAX_PRICE = float(os.getenv("RAW_STYLE_SNIPER_MAX_PRICE", "160"))
 NEGOTIATION_BUFFER_PLN = float(os.getenv("NEGOTIATION_BUFFER_PLN", "15"))
 RAW_STYLE_MAX_VISIBLE_AGE_MIN = int(os.getenv("RAW_STYLE_MAX_VISIBLE_AGE_MIN", "180"))
+DETAIL_AGE_VERIFY_ENABLED = os.getenv("DETAIL_AGE_VERIFY_ENABLED", "0") == "1"
 MAX_DETAIL_SEND_AGE_MIN = int(os.getenv("MAX_DETAIL_SEND_AGE_MIN", "4320"))
 ALLOW_UNVERIFIED_AGE_FOR_STRONG_GRAIL = os.getenv("ALLOW_UNVERIFIED_AGE_FOR_STRONG_GRAIL", "1") == "1"
 SAFEGUARD_STRICT_PRESEND_ENABLED = os.getenv("SAFEGUARD_STRICT_PRESEND_ENABLED", "1") == "1"
@@ -73,6 +74,11 @@ CANDIDATE_AUDIT_PATH = os.getenv("CANDIDATE_AUDIT_PATH", "/data/vinted_bot/candi
 CANDIDATE_AUDIT_MAX_LINES_PER_CYCLE = int(os.getenv("CANDIDATE_AUDIT_MAX_LINES_PER_CYCLE", "300"))
 CANDIDATE_AUDIT_TELEGRAM_SUMMARY = os.getenv("CANDIDATE_AUDIT_TELEGRAM_SUMMARY", "0") == "1"
 AUDIT_WATCH_TITLES = os.getenv("AUDIT_WATCH_TITLES", "")
+
+if DETAIL_AGE_VERIFY_ENABLED:
+    print("[DETAIL_AGE_VERIFY_ENABLED]")
+else:
+    print("[DETAIL_AGE_VERIFY_DISABLED]")
 
 # ─────────────────────────────────────────
 #  ⚡ SNIPER MODE
@@ -2423,6 +2429,15 @@ def _extract_detail_age_text(html: str) -> tuple[int | None, str | None]:
 
 
 def verify_detail_age_before_send(item, source_age: str | None = None) -> dict:
+    if not DETAIL_AGE_VERIFY_ENABLED:
+        print("[DETAIL_AGE_VERIFY_SKIPPED] reason=disabled")
+        return {
+            "ok": False,
+            "age_minutes": None,
+            "age_source": "disabled",
+            "raw_text": None,
+            "block_reason": None,
+        }
     item = item or {}
     title = str(item.get("title") or "")[:80]
     url = item.get("link") or item.get("url") or ""
@@ -2730,46 +2745,54 @@ def telegram_presend_gate(item, result=None, source="MAIN") -> tuple[bool, str]:
     )
 
     if not age_info.get("usable_for_freshness"):
-        detail_age = verify_detail_age_before_send(item, source_age=age_info.get("source"))
-        result["_detail_age_verification"] = detail_age
-        if detail_age.get("ok") and detail_age.get("age_minutes") is not None:
-            detail_minutes = int(detail_age.get("age_minutes"))
-            result["_visible_age_minutes"] = detail_minutes
-            result["_visible_age_source"] = "detail_visible_text"
-            result["_age_usable_for_freshness"] = True
-            result["age_min"] = detail_minutes
-            result["age_source"] = "detail_visible_text"
-            item["age_min"] = detail_minutes
-            item["age_source"] = "detail_visible_text"
-            visible_age = detail_minutes
-            age_info = {
-                "minutes": detail_minutes,
-                "source": "detail_visible_text",
-                "usable_for_freshness": True,
-                "visible_text": detail_age.get("raw_text"),
+        if not DETAIL_AGE_VERIFY_ENABLED:
+            result["_detail_age_verification"] = {
+                "ok": False,
+                "age_source": "disabled",
+                "block_reason": None,
             }
-            record_age_source_resolution("detail_visible_text")
-            if detail_minutes > MAX_DETAIL_SEND_AGE_MIN:
-                DETAIL_AGE_STATS["blocked_stale"] += 1
-                print(f"[STALE_DETAIL_AGE_BLOCK] title={title[:80]} "
-                      f"age_minutes={detail_minutes} raw_age_text={detail_age.get('raw_text')} "
-                      f"source=detail_visible_text url={item.get('link') or item.get('url')} "
-                      f"max_allowed={MAX_DETAIL_SEND_AGE_MIN}")
-                return _presend_block(result, source, "stale_detail_age_presend_block")
+            print(f"[DETAIL_AGE_VERIFY_SKIPPED] reason=disabled source_age={age_info.get('source')}")
         else:
-            confidence = float(result.get("confidence") or 0)
-            if (
-                strong_grail
-                and ALLOW_UNVERIFIED_AGE_FOR_STRONG_GRAIL
-                and validated >= 5
-                and confidence >= 8.5
-            ):
-                DETAIL_AGE_STATS["allowed_grail_unverified"] += 1
-                print(f"[DETAIL_AGE_UNVERIFIED_GRAIL_ALLOW] title={title[:80]} "
-                      f"validated_signals={validated} confidence={confidence:.1f}")
+            detail_age = verify_detail_age_before_send(item, source_age=age_info.get("source"))
+            result["_detail_age_verification"] = detail_age
+            if detail_age.get("ok") and detail_age.get("age_minutes") is not None:
+                detail_minutes = int(detail_age.get("age_minutes"))
+                result["_visible_age_minutes"] = detail_minutes
+                result["_visible_age_source"] = "detail_visible_text"
+                result["_age_usable_for_freshness"] = True
+                result["age_min"] = detail_minutes
+                result["age_source"] = "detail_visible_text"
+                item["age_min"] = detail_minutes
+                item["age_source"] = "detail_visible_text"
+                visible_age = detail_minutes
+                age_info = {
+                    "minutes": detail_minutes,
+                    "source": "detail_visible_text",
+                    "usable_for_freshness": True,
+                    "visible_text": detail_age.get("raw_text"),
+                }
+                record_age_source_resolution("detail_visible_text")
+                if detail_minutes > MAX_DETAIL_SEND_AGE_MIN:
+                    DETAIL_AGE_STATS["blocked_stale"] += 1
+                    print(f"[STALE_DETAIL_AGE_BLOCK] title={title[:80]} "
+                          f"age_minutes={detail_minutes} raw_age_text={detail_age.get('raw_text')} "
+                          f"source=detail_visible_text url={item.get('link') or item.get('url')} "
+                          f"max_allowed={MAX_DETAIL_SEND_AGE_MIN}")
+                    return _presend_block(result, source, "stale_detail_age_presend_block")
             else:
-                DETAIL_AGE_STATS["blocked_unverified"] += 1
-                return _presend_block(result, source, detail_age.get("block_reason") or "detail_age_unverified_block")
+                confidence = float(result.get("confidence") or 0)
+                if (
+                    strong_grail
+                    and ALLOW_UNVERIFIED_AGE_FOR_STRONG_GRAIL
+                    and validated >= 5
+                    and confidence >= 8.5
+                ):
+                    DETAIL_AGE_STATS["allowed_grail_unverified"] += 1
+                    print(f"[DETAIL_AGE_UNVERIFIED_GRAIL_ALLOW] title={title[:80]} "
+                          f"validated_signals={validated} confidence={confidence:.1f}")
+                else:
+                    DETAIL_AGE_STATS["blocked_unverified"] += 1
+                    return _presend_block(result, source, detail_age.get("block_reason") or "detail_age_unverified_block")
 
     if visible_age is not None and visible_age > RAW_STYLE_MAX_VISIBLE_AGE_MIN and not strong_grail:
         AGE_GATE_STATS["blocked_stale_visible_age"] += 1
@@ -4403,6 +4426,8 @@ def vinted_fetch(url: str, label: str = "") -> "requests.Response | None":
 
     for attempt in range(1, 4):   # max 3 attempts (Req 7)
         try:
+            host = urlparse(url).netloc or "unknown"
+            print(f"[REQUEST_CONTEXT] label={label} detail_age_enabled={1 if DETAIL_AGE_VERIFY_ENABLED else 0} url_host={host}")
             r = requests.get(url, headers=get_headers(), timeout=15)
 
             if r.status_code == 200:
