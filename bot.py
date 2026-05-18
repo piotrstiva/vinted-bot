@@ -5,6 +5,7 @@ import json
 import re
 import base64
 import random
+import unicodedata
 from urllib.parse import quote_plus
 from statistics import median
 from bs4 import BeautifulSoup
@@ -57,6 +58,8 @@ RAW_STYLE_SNIPER_MAX_AGE_MIN = int(os.getenv("RAW_STYLE_SNIPER_MAX_AGE_MIN", "90
 RAW_STYLE_SNIPER_MAX_PRICE = float(os.getenv("RAW_STYLE_SNIPER_MAX_PRICE", "160"))
 NEGOTIATION_BUFFER_PLN = float(os.getenv("NEGOTIATION_BUFFER_PLN", "15"))
 RAW_STYLE_MAX_VISIBLE_AGE_MIN = int(os.getenv("RAW_STYLE_MAX_VISIBLE_AGE_MIN", "180"))
+SAFEGUARD_STRICT_PRESEND_ENABLED = os.getenv("SAFEGUARD_STRICT_PRESEND_ENABLED", "1") == "1"
+SAFEGUARD_MAX_SEND_PER_CYCLE = int(os.getenv("SAFEGUARD_MAX_SEND_PER_CYCLE", "1"))
 STARTUP_IMAGE_ENABLED = os.getenv("STARTUP_IMAGE_ENABLED", "1") == "1"
 STARTUP_IMAGE_PATH = os.getenv("STARTUP_IMAGE_PATH", "assets/hidden_gem_logo.png")
 STARTUP_IMAGE_URL = os.getenv("STARTUP_IMAGE_URL", "")
@@ -1991,6 +1994,9 @@ RAW_STYLE_CLOTHING_TERMS = [
     "t-shirt", "tshirt", "tee", "koszulka", "longsleeve", "long sleeve",
     "hoodie", "sweatshirt", "crewneck", "jacket", "kurtka", "shirt",
     "bluza", "zip hoodie", "sweater", "vest", "coat",
+    "camiseta", "maglietta", "pullover", "jakna", "giacca", "veste",
+    "jersey", "kit", "pants", "spodnie", "jeans", "trousers",
+    "shorts", "szorty", "plaszcz",
 ]
 RAW_STYLE_SMALL_CARHARTT_SIZES = [
     "xs", "extra small", "small", "w24", "w25", "w26", "w27", "w28",
@@ -2007,11 +2013,42 @@ RAW_STYLE_WOMEN_FIT_TERMS = [
     "ramiaczkach", "ramiaczka", "viscose", "wiskoza", "sukienka", "spodnica",
     "v neck", "v-neck", "fitted",
 ]
+WOMEN_FIT_TERMS = [
+    "women", "womens", "women's", "women s", "ladies", "lady", "girls", "girl",
+    "female", "femme", "woman", "damska", "damskie", "damski", "kobieta",
+    "kobiety", "dziewczeca", "damen", "frauen", "madchen", "vrouw",
+    "vrouwen", "meisje", "dam", "dame", "pige", "kvinna", "kvinnor",
+    "tjej", "kvinner", "jente", "femmes", "fille", "filles", "donna",
+    "donne", "ragazza", "mujer", "mujeres", "chica", "mulher", "mulheres",
+    "damske", "zeny", "noi", "no", "naisten", "nainen", "femei", "femeie",
+]
+FITTED_TOP_TERMS = [
+    "baby tee", "babydoll", "crop", "cropped", "crop top", "top", "tank",
+    "tank top", "cami", "camisole", "halter", "v-neck", "v neck", "blouse",
+    "bluzka", "bluzeczka", "ramiaczkach", "ramiaczka", "na ramiaczkach",
+    "sleeveless", "bez rekawow", "body", "bodysuit", "gorset", "corset",
+    "fitted", "slim fit",
+]
+HARD_FITTED_TOP_TERMS = [
+    "baby tee", "crop", "cropped", "crop top", "top", "tank", "tank top",
+    "cami", "camisole", "blouse", "bluzka", "bluzeczka", "gorset", "corset",
+]
+KIDS_TERMS = [
+    "kids", "kid", "children", "child", "junior", "youth", "boys", "girls",
+    "dzieciece", "dziecieca", "dzieci", "chlopiece", "dziewczece",
+    "kinder", "enfant", "bambino", "bambina", "nino", "nina",
+]
+MENS_UNISEX_TERMS = [
+    "men", "mens", "men's", "men s", "male", "meski", "meska", "unisex",
+    "herren", "homme", "uomo", "hombre", "panske", "heren", "mies", "miesten",
+]
+OVERSIZE_TERMS = ["oversize", "oversized", "boxy", "baggy", "loose fit", "relaxed fit"]
 RAW_STYLE_SMALL_SIZE_TERMS = [
     "xs", "extra small", "small", "34", "36", "w24", "w25", "w26", "w27", "w28",
 ]
 RAW_STYLE_MENS_EXCEPTION_TERMS = [
     "men", "mens", "men s", "unisex", "oversize", "oversized", "boxy", "xl", "xxl", "2xl",
+    "herren", "homme", "uomo", "hombre", "panske", "heren",
 ]
 RAW_STYLE_BASIC_TERMS = [
     "blank", "plain", "basic", "solid color", "no print", "zwykly", "zwykły",
@@ -2052,7 +2089,11 @@ RAW_STYLE_KNOWN_STRONG_MOTIFS = [
     "movie promo", "warner bros", "daytona", "sturgis",
 ]
 WEAK_VINTAGE_BRANDS = {"vintage", "japan style", "retro", "no brand", "handmade", "unknown"}
-WEAK_DESCRIPTOR_TERMS = ["vintage", "retro", "y2k", "japanstyle", "japan style", "avantgarde", "swag", "streetwear", "archive", "rare", "unique"]
+WEAK_DESCRIPTOR_TERMS = [
+    "vintage", "retro", "y2k", "japanstyle", "japan style", "avant garde",
+    "avantgarde", "swag", "streetwear", "archive", "rare", "unique",
+    "oldschool", "old skool",
+]
 WEAK_NOVELTY_BRANDS = ["gas monkey", "gas monkey garage", "american flag", "japan style"]
 
 RAW_STYLE_CYCLE_CANDIDATES: dict[str, dict] = {}
@@ -2071,6 +2112,26 @@ AGE_GATE_STATS = {
     "blocked_weak_brand": 0,
     "blocked_women_fitted": 0,
     "sent": 0,
+}
+PRESEND_STATS = {
+    "checked": 0,
+    "passed": 0,
+    "blocked": 0,
+    "blocked_by_reason": {},
+    "by_source": {},
+}
+AGE_SOURCE_STATS = {
+    "visible_text": 0,
+    "synthetic_rank": 0,
+    "unknown": 0,
+    "synthetic_sent": 0,
+}
+SAFEGUARD_STATS = {
+    "retried": 0,
+    "passed_presend": 0,
+    "blocked_presend": 0,
+    "sent": 0,
+    "limit_skipped": 0,
 }
 
 AUDIT_CURRENT_CYCLE = 0
@@ -2096,6 +2157,8 @@ AUDIT_TOP_NOT_SENT: list[dict] = []
 def raw_normalize_text(text: str) -> str:
     text_l = str(text or "").lower()
     text_l = text_l.replace("ü", "u").replace("ó", "o").replace("ł", "l")
+    text_l = unicodedata.normalize("NFKD", text_l)
+    text_l = "".join(ch for ch in text_l if not unicodedata.combining(ch))
     text_l = text_l.replace("&", " and ")
     text_l = re.sub(r"[^a-z0-9]+", " ", text_l)
     return re.sub(r"\s+", " ", text_l).strip()
@@ -2157,9 +2220,15 @@ def _raw_presend_text(item: dict) -> str:
 
 
 def _raw_has_small_size(item: dict, text: str) -> bool:
+    size_only = raw_normalize_text(item.get("size") or "")
+    if re.fullmatch(r"(xs|extra small|small|s|34|36|w24|w25|w26|w27|w28)", size_only or ""):
+        return True
     size_text = raw_normalize_text(f"{item.get('size') or ''} {text}")
     return re.search(
-        r"(?<![a-z0-9])(xs|extra small|small|s|34|36|w24|w25|w26|w27|w28)(?![a-z0-9])",
+        r"(?<![a-z0-9])(?:size|rozmiar|r|w)\s*(xs|s|34|36|24|25|26|27|28)(?![a-z0-9])",
+        size_text,
+    ) is not None or re.search(
+        r"(?<![a-z0-9])(w24|w25|w26|w27|w28|extra small|small)(?![a-z0-9])",
         size_text,
     ) is not None
 
@@ -2287,71 +2356,157 @@ def count_validated_raw_style_signals(item: dict, bucket) -> int:
     return len(_validated_raw_style_reasons(item or {}, str(bucket or "")))
 
 
-def raw_style_pre_send_gate(item, raw_style_result) -> tuple[bool, str]:
+def _presend_bump(source: str, passed: bool, reason: str | None = None):
+    source = source or "MAIN"
+    PRESEND_STATS["checked"] += 1
+    by_source = PRESEND_STATS["by_source"]
+    by_source[source] = by_source.get(source, 0) + 1
+    if passed:
+        PRESEND_STATS["passed"] += 1
+        return
+    PRESEND_STATS["blocked"] += 1
+    reason = reason or "blocked"
+    blocked = PRESEND_STATS["blocked_by_reason"]
+    blocked[reason] = blocked.get(reason, 0) + 1
+
+
+def _validated_real_signal_reasons(item: dict, bucket: str) -> list[str]:
+    return [
+        reason for reason in _validated_raw_style_reasons(item or {}, bucket)
+        if reason not in ("good_size", "old_tag_with_context")
+    ]
+
+
+def _old_blank_tag_hit(text: str) -> bool:
+    return raw_contains_any_phrase(text, [
+        "fruit of the loom", "hanes", "jerzees", "russell athletic", "nutmeg",
+        "galt sand", "tultex", "anvil", "screen stars", "oneita",
+    ])
+
+
+def _log_weak_descriptors_ignored(text: str, title: str):
+    for term in WEAK_DESCRIPTOR_TERMS:
+        if raw_contains_phrase(text, term):
+            print(f"[WEAK_DESCRIPTOR_IGNORED] term={term} title={title[:60]}")
+
+
+def _presend_block(result: dict, source: str, reason: str) -> tuple[bool, str]:
+    result["_presend_block_reason"] = reason
+    _presend_bump(source, False, reason)
+    return False, reason
+
+
+def telegram_presend_gate(item, result=None, source="MAIN") -> tuple[bool, str]:
     item = item or {}
-    raw_style_result = raw_style_result or {}
+    result = result or {}
+    source = source or "MAIN"
     text = _raw_presend_text(item)
     title = str(item.get("title") or "")
-    bucket = str(raw_style_result.get("raw_style_bucket") or raw_style_result.get("taste_bucket") or "none")
+    bucket = str(result.get("raw_style_bucket") or result.get("taste_bucket") or result.get("tier") or "none")
+    try:
+        alert_type = _alert_type(result)
+    except NameError:
+        alert_type = source
     score = float(
-        raw_style_result.get("raw_style_score")
-        or raw_style_result.get("taste_watch_score")
-        or raw_style_result.get("final_score")
+        result.get("raw_style_score")
+        or result.get("taste_watch_score")
+        or result.get("final_score")
+        or result.get("signal_quality_score")
         or 0
     )
     price = float(item.get("price") or 0)
-    effective_price = float(raw_style_result.get("effective_price") or price or 0)
+    effective_price = float(result.get("effective_price") or price or 0)
     reasons = _validated_raw_style_reasons(item, bucket)
-    validated = len(reasons)
-    raw_style_result["_raw_style_validated_signals"] = validated
-    raw_style_result["_raw_style_presend_reasons"] = reasons
+    real_reasons = _validated_real_signal_reasons(item, bucket)
+    validated = len(real_reasons)
+    result["_raw_style_validated_signals"] = validated
+    result["_raw_style_presend_reasons"] = real_reasons or reasons
     visible_age, visible_age_source = extract_visible_age_minutes(item)
-    raw_style_result["_visible_age_minutes"] = visible_age
-    raw_style_result["_visible_age_source"] = visible_age_source
+    result["_visible_age_minutes"] = visible_age
+    result["_visible_age_source"] = visible_age_source
     AGE_GATE_STATS["raw_checked"] += 1
+    _log_weak_descriptors_ignored(text, title)
+
+    if visible_age is not None:
+        AGE_SOURCE_STATS["visible_text"] += 1
+        print(f"[AGE_SOURCE] source=visible_text minutes={visible_age}")
+    else:
+        synthetic_age = result.get("age_min")
+        if synthetic_age is None:
+            synthetic_age = item.get("age_min")
+        if synthetic_age is None:
+            synthetic_age = item.get("_rank")
+        if synthetic_age is not None:
+            AGE_SOURCE_STATS["synthetic_rank"] += 1
+            print("[AGE_SOURCE] source=synthetic_rank usable_for_freshness=false")
+            result["_visible_age_source"] = "synthetic_rank"
+        else:
+            AGE_SOURCE_STATS["unknown"] += 1
+            print("[AGE_SOURCE] source=unknown usable_for_freshness=false")
+            result["_visible_age_source"] = "unknown"
+
+    strong_grail = (
+        alert_type == "GRAIL"
+        and (
+            result.get("tier") == "TIER_S"
+            or float(result.get("signal_quality_score") or 0) >= 85
+            or score >= 95
+        )
+    )
 
     if visible_age is not None and visible_age > RAW_STYLE_MAX_VISIBLE_AGE_MIN:
         AGE_GATE_STATS["blocked_stale_visible_age"] += 1
         print(f"[STALE_BLOCK_DETAIL] visible_age={visible_age} title={title[:80]}")
-        return False, "stale_visible_age_presend_block"
-    if visible_age is None and not (score >= 90 and validated >= 3):
-        AGE_GATE_STATS["blocked_unknown_age"] += 1
-        return False, "unknown_age_not_enough_signal"
+        return _presend_block(result, source, "stale_visible_age_presend_block")
 
-    women_fit = raw_contains_any_phrase(text, RAW_STYLE_WOMEN_FIT_TERMS)
+    if raw_contains_any_phrase(text, KIDS_TERMS):
+        return _presend_block(result, source, "kids_presend_block")
+
+    women_fit = raw_contains_any_phrase(text, WOMEN_FIT_TERMS)
+    fitted_top = raw_contains_any_phrase(text, FITTED_TOP_TERMS)
     small_size = _raw_has_small_size(item, text)
+    has_mens_unisex = raw_contains_any_phrase(text, MENS_UNISEX_TERMS)
+    has_oversize = raw_contains_any_phrase(text, OVERSIZE_TERMS)
+    has_xl_size = _raw_size_bucket(text, item) == "large"
+    hard_fitted = raw_contains_any_phrase(text, HARD_FITTED_TOP_TERMS)
     exception_ok = (
-        raw_contains_any_phrase(text, RAW_STYLE_MENS_EXCEPTION_TERMS)
-        and validated >= 3
+        (has_mens_unisex or has_oversize or has_xl_size)
+        and validated >= 4
+        and not hard_fitted
+        and (strong_grail or source in {"RAW_STYLE", "STYLE_WATCH"} and score >= 90)
         and bucket != "old_blank"
     )
-    if women_fit and not exception_ok:
+    if (women_fit or fitted_top) and not exception_ok:
         AGE_GATE_STATS["blocked_women_fitted"] += 1
-        return False, "women_or_fitted_presend_block"
-    if small_size and not exception_ok:
+        return _presend_block(result, source, "women_or_fitted_presend_block")
+    if source in {"RAW_STYLE", "STYLE_WATCH", "SAFEGUARD"} and small_size and not exception_ok:
         AGE_GATE_STATS["blocked_women_fitted"] += 1
-        return False, "small_size_presend_block"
+        return _presend_block(result, source, "small_size_presend_block")
 
-    if _raw_weak_brand_only(item, text):
+    if _raw_weak_brand_only(item, text) and validated < 3 and not strong_grail:
         AGE_GATE_STATS["blocked_weak_brand"] += 1
-        return False, "weak_brand_only_presend_block"
+        return _presend_block(result, source, "weak_brand_only_presend_block")
 
     if raw_contains_any_phrase(text, WEAK_NOVELTY_BRANDS) and validated < 3:
         AGE_GATE_STATS["blocked_weak_brand"] += 1
-        return False, "weak_novelty_brand_presend_block"
+        return _presend_block(result, source, "weak_novelty_brand_presend_block")
 
-    if price < 25 and validated < 3:
-        return False, "cheap_trash_presend_block"
-    if effective_price <= 5 and bucket in ("old_blank", "pop_culture", "sports") and validated < 3:
-        return False, "cheap_trash_presend_block"
-    if validated < 2:
-        return False, "not_enough_validated_signals_presend"
+    if source == "SAFEGUARD" and SAFEGUARD_STRICT_PRESEND_ENABLED and validated < 3 and not strong_grail:
+        return _presend_block(result, source, "safeguard_relaxed_not_enough_signal")
 
-    if bucket == "old_blank":
-        real_context_reasons = [
-            r for r in reasons
-            if r not in ("old_tag_with_context", "good_size")
-        ]
+    if visible_age is None and result.get("_visible_age_source") == "synthetic_rank" and validated < 3 and not strong_grail:
+        AGE_GATE_STATS["blocked_unknown_age"] += 1
+        return _presend_block(result, source, "synthetic_age_not_enough_real_signals")
+
+    if price < 25 and validated < 3 and not strong_grail:
+        return _presend_block(result, source, "cheap_trash_presend_block")
+    if effective_price <= 5 and bucket in ("old_blank", "pop_culture", "sports") and validated < 3 and not strong_grail:
+        return _presend_block(result, source, "cheap_trash_presend_block")
+    if source in {"RAW_STYLE", "STYLE_WATCH", "SAFEGUARD"} and validated < 2 and not strong_grail:
+        return _presend_block(result, source, "not_enough_validated_signals_presend")
+
+    if (bucket == "old_blank" or _old_blank_tag_hit(text)) and not strong_grail:
+        real_context_reasons = real_reasons
         basic = raw_contains_any_phrase(text, RAW_STYLE_BASIC_TERMS) or (
             len(real_context_reasons) < 2
             and raw_contains_any_phrase(text, ["t-shirt", "tshirt", "tee", "sweatshirt", "hoodie", "bluza"])
@@ -2360,28 +2515,33 @@ def raw_style_pre_send_gate(item, raw_style_result) -> tuple[bool, str]:
         no_context = len(real_context_reasons) < 2 or not raw_contains_any_phrase(text, RAW_STYLE_CONTEXT_TERMS)
         if basic:
             AGE_GATE_STATS["blocked_old_blank_no_context"] += 1
-            return False, "old_blank_basic_presend"
+            return _presend_block(result, source, "old_blank_no_context_presend_block")
         if no_context:
             AGE_GATE_STATS["blocked_old_blank_no_context"] += 1
-            return False, "old_blank_no_real_context_presend"
+            return _presend_block(result, source, "old_blank_no_context_presend_block")
 
-    if bucket == "pop_culture":
+    if source in {"RAW_STYLE", "STYLE_WATCH"} and bucket == "pop_culture":
         if validated < 2 or not raw_contains_any_phrase(text, RAW_STYLE_POP_VALIDATION_TERMS):
-            return False, "pop_culture_not_validated_presend"
+            return _presend_block(result, source, "pop_culture_not_validated_presend")
 
-    if bucket == "sports":
+    if source in {"RAW_STYLE", "STYLE_WATCH"} and bucket == "sports":
         has_context = raw_contains_any_phrase(text, RAW_STYLE_CONTEXT_TERMS)
         good_item_type = raw_contains_any_phrase(text, RAW_STYLE_SPORTS_ITEM_TERMS)
         generic_sport = raw_contains_any_phrase(text, ["sportowy t-shirt", "damski t-shirt", "women jersey", "v neck", "v-neck", "small logo"])
         if not has_context or not good_item_type or generic_sport or validated < 2:
-            return False, "sports_not_validated_presend"
+            return _presend_block(result, source, "sports_not_validated_presend")
 
-    if bucket == "visual":
+    if source in {"RAW_STYLE", "STYLE_WATCH"} and bucket == "visual":
         generic_only = raw_contains_any_phrase(text, RAW_STYLE_GENERIC_VISUAL_TERMS) and not raw_contains_any_phrase(text, RAW_STYLE_VISUAL_CONTEXT_TERMS)
         if generic_only or validated < 2:
-            return False, "visual_too_generic_presend"
+            return _presend_block(result, source, "visual_too_generic_presend")
 
+    _presend_bump(source, True)
     return True, "pass"
+
+
+def raw_style_pre_send_gate(item, raw_style_result) -> tuple[bool, str]:
+    return telegram_presend_gate(item, raw_style_result, source="RAW_STYLE")
 
 
 def reset_candidate_audit_cycle(cycle_number: int):
@@ -2698,6 +2858,26 @@ def reset_raw_style_cycle():
         "blocked_women_fitted": 0,
         "sent": 0,
     })
+    PRESEND_STATS.update({
+        "checked": 0,
+        "passed": 0,
+        "blocked": 0,
+        "blocked_by_reason": {},
+        "by_source": {},
+    })
+    AGE_SOURCE_STATS.update({
+        "visible_text": 0,
+        "synthetic_rank": 0,
+        "unknown": 0,
+        "synthetic_sent": 0,
+    })
+    SAFEGUARD_STATS.update({
+        "retried": 0,
+        "passed_presend": 0,
+        "blocked_presend": 0,
+        "sent": 0,
+        "limit_skipped": 0,
+    })
 
 
 def collect_raw_style_candidate(item: dict, search: dict | None = None):
@@ -2877,6 +3057,8 @@ def send_raw_style_candidates(max_cycle_slots: int, sent_this_cycle: int) -> int
         sent += 1
         RAW_STYLE_STATS["sent"] += 1
         AGE_GATE_STATS["sent"] += 1
+        if result.get("_visible_age_source") == "synthetic_rank":
+            AGE_SOURCE_STATS["synthetic_sent"] += 1
         print(f"[RAW_STYLE_SEND] rank={sent} score={result.get('raw_style_score',0):.0f} "
               f"bucket={result.get('raw_style_bucket','none')} "
               f"price={float(item.get('price') or 0):.0f} "
@@ -2916,6 +3098,19 @@ def print_raw_style_summary():
           f"blocked_weak_brand={AGE_GATE_STATS['blocked_weak_brand']} "
           f"blocked_women_fitted={AGE_GATE_STATS['blocked_women_fitted']} "
           f"sent={AGE_GATE_STATS['sent']}")
+    print(f"[PRESEND_SUMMARY] checked={PRESEND_STATS['checked']} "
+          f"passed={PRESEND_STATS['passed']} blocked={PRESEND_STATS['blocked']} "
+          f"blocked_by_reason={PRESEND_STATS['blocked_by_reason']} "
+          f"by_source={PRESEND_STATS['by_source']}")
+    print(f"[AGE_SOURCE_SUMMARY] visible_text={AGE_SOURCE_STATS['visible_text']} "
+          f"synthetic_rank={AGE_SOURCE_STATS['synthetic_rank']} "
+          f"unknown={AGE_SOURCE_STATS['unknown']} "
+          f"synthetic_sent={AGE_SOURCE_STATS['synthetic_sent']}")
+    print(f"[SAFEGUARD_SUMMARY] retried={SAFEGUARD_STATS['retried']} "
+          f"passed_presend={SAFEGUARD_STATS['passed_presend']} "
+          f"blocked_presend={SAFEGUARD_STATS['blocked_presend']} "
+          f"sent={SAFEGUARD_STATS['sent']} "
+          f"limit_skipped={SAFEGUARD_STATS['limit_skipped']}")
 
 
 def print_candidate_audit_summary():
@@ -5252,6 +5447,7 @@ while True:
         # ── STEP 7 — EVALUATE_AND_DECIDE ────────────────────────────
         sent_this_cycle = 0
         MAX_PER_CYCLE   = 10
+        safeguard_sent_this_cycle = 0
 
         for search, item in special_items:
             item["_search_meta"] = {
@@ -5297,21 +5493,35 @@ while True:
                     continue
 
                 alert_type = _alert_type(result)
-                if alert_type == "STYLE_WATCH":
-                    presend_ok, presend_reason = raw_style_pre_send_gate(item, result)
-                    validated_signals = int(result.get("_raw_style_validated_signals") or 0)
-                    if not presend_ok:
-                        print(f"[RAW_STYLE_PRE_SEND_BLOCK] reason={presend_reason} "
-                              f"alert=STYLE_WATCH score={result.get('taste_watch_score') or result.get('final_score') or 0:.0f} "
-                              f"bucket={result.get('taste_bucket') or result.get('raw_style_bucket') or 'none'} "
-                              f"validated_signals={validated_signals} "
-                              f"visible_age={result.get('_visible_age_minutes')} "
-                              f"title={str(item.get('title') or '')[:60]}")
-                        audit_candidate("blocked", item, result=result, block_reason=presend_reason,
-                                        alert_type="STYLE_WATCH", score=result.get("taste_watch_score") or result.get("final_score"),
-                                        bucket=result.get("taste_bucket") or result.get("raw_style_bucket"),
-                                        signals=result.get("taste_signals") or result.get("raw_style_signals"))
+                is_safeguard = "safeguard_relaxed" in (item.get("reasons") or [])
+                presend_source = "SAFEGUARD" if is_safeguard else alert_type
+                if presend_source == "SAFEGUARD":
+                    SAFEGUARD_STATS["retried"] += 1
+                    if safeguard_sent_this_cycle >= SAFEGUARD_MAX_SEND_PER_CYCLE:
+                        SAFEGUARD_STATS["limit_skipped"] += 1
+                        print(f"[SAFEGUARD_SEND_LIMIT_SKIP] title={str(item.get('title') or '')[:60]}")
+                        audit_candidate("final_skip", item, result=result, block_reason="safeguard_send_limit",
+                                        alert_type=alert_type, score=result.get("final_score"))
                         continue
+                presend_ok, presend_reason = telegram_presend_gate(item, result, source=presend_source)
+                validated_signals = int(result.get("_raw_style_validated_signals") or 0)
+                if not presend_ok:
+                    if presend_source == "SAFEGUARD":
+                        SAFEGUARD_STATS["blocked_presend"] += 1
+                        print(f"[SAFEGUARD_PRESEND_BLOCK] reason={presend_reason} "
+                              f"validated_signals={validated_signals} title={str(item.get('title') or '')[:60]}")
+                    else:
+                        print(f"[PRESEND_BLOCK] source={presend_source} reason={presend_reason} "
+                              f"validated_signals={validated_signals} title={str(item.get('title') or '')[:60]}")
+                    audit_candidate("blocked", item, result=result, block_reason=presend_reason,
+                                    alert_type=alert_type, score=result.get("final_score"),
+                                    bucket=result.get("taste_bucket") or result.get("raw_style_bucket") or result.get("tier"),
+                                    signals=result.get("taste_signals") or result.get("raw_style_signals"))
+                    continue
+                if presend_source == "SAFEGUARD":
+                    SAFEGUARD_STATS["passed_presend"] += 1
+                    print(f"[SAFEGUARD_PRESEND_PASS] validated_signals={validated_signals} "
+                          f"title={str(item.get('title') or '')[:60]}")
 
                 photo     = item.get("photo") or get_item_photo(item["id"], item.get("link", ""))
                 alert_msg = format_telegram_alert(item, result)
@@ -5324,6 +5534,11 @@ while True:
                                 score=result.get("final_score"))
                 if alert_type == "STYLE_WATCH":
                     AGE_GATE_STATS["sent"] += 1
+                if result.get("_visible_age_source") == "synthetic_rank":
+                    AGE_SOURCE_STATS["synthetic_sent"] += 1
+                if presend_source == "SAFEGUARD":
+                    safeguard_sent_this_cycle += 1
+                    SAFEGUARD_STATS["sent"] += 1
                 seen[item["id"]] = now
                 sent_this_cycle += 1
 
@@ -5396,21 +5611,27 @@ while True:
                                         alert_type=_alert_type(result), score=result.get("final_score"))
                         continue
                     alert_type = _alert_type(result)
-                    if alert_type == "STYLE_WATCH":
-                        presend_ok, presend_reason = raw_style_pre_send_gate(item, result)
-                        validated_signals = int(result.get("_raw_style_validated_signals") or 0)
-                        if not presend_ok:
-                            print(f"[RAW_STYLE_PRE_SEND_BLOCK] reason={presend_reason} "
-                                  f"alert=STYLE_WATCH score={result.get('taste_watch_score') or result.get('final_score') or 0:.0f} "
-                                  f"bucket={result.get('taste_bucket') or result.get('raw_style_bucket') or 'none'} "
-                                  f"validated_signals={validated_signals} "
-                                  f"visible_age={result.get('_visible_age_minutes')} "
-                                  f"title={str(item.get('title') or '')[:60]}")
-                            audit_candidate("blocked", item, result=result, block_reason=presend_reason,
-                                            alert_type="STYLE_WATCH", score=result.get("taste_watch_score") or result.get("final_score"),
-                                            bucket=result.get("taste_bucket") or result.get("raw_style_bucket"),
-                                            signals=result.get("taste_signals") or result.get("raw_style_signals"))
-                            continue
+                    SAFEGUARD_STATS["retried"] += 1
+                    if safeguard_sent_this_cycle >= SAFEGUARD_MAX_SEND_PER_CYCLE:
+                        SAFEGUARD_STATS["limit_skipped"] += 1
+                        print(f"[SAFEGUARD_SEND_LIMIT_SKIP] title={str(item.get('title') or '')[:60]}")
+                        audit_candidate("final_skip", item, result=result, block_reason="safeguard_send_limit",
+                                        alert_type=alert_type, score=result.get("final_score"))
+                        continue
+                    presend_ok, presend_reason = telegram_presend_gate(item, result, source="SAFEGUARD")
+                    validated_signals = int(result.get("_raw_style_validated_signals") or 0)
+                    if not presend_ok:
+                        SAFEGUARD_STATS["blocked_presend"] += 1
+                        print(f"[SAFEGUARD_PRESEND_BLOCK] reason={presend_reason} "
+                              f"validated_signals={validated_signals} title={str(item.get('title') or '')[:60]}")
+                        audit_candidate("blocked", item, result=result, block_reason=presend_reason,
+                                        alert_type=alert_type, score=result.get("final_score"),
+                                        bucket=result.get("taste_bucket") or result.get("raw_style_bucket") or result.get("tier"),
+                                        signals=result.get("taste_signals") or result.get("raw_style_signals"))
+                        continue
+                    SAFEGUARD_STATS["passed_presend"] += 1
+                    print(f"[SAFEGUARD_PRESEND_PASS] validated_signals={validated_signals} "
+                          f"title={str(item.get('title') or '')[:60]}")
                     photo     = item.get("photo") or get_item_photo(item["id"], item.get("link", ""))
                     alert_msg = format_telegram_alert(item, result)
                     sent_ok = send_message(alert_msg, photo_url=photo, item_link=item.get("link"))
@@ -5422,6 +5643,10 @@ while True:
                                     score=result.get("final_score"))
                     if alert_type == "STYLE_WATCH":
                         AGE_GATE_STATS["sent"] += 1
+                    if result.get("_visible_age_source") == "synthetic_rank":
+                        AGE_SOURCE_STATS["synthetic_sent"] += 1
+                    safeguard_sent_this_cycle += 1
+                    SAFEGUARD_STATS["sent"] += 1
                     seen[item["id"]] = now
                     sent_this_cycle += 1
                     print(f"  🔁 FALLBACK [{result.get('engine','?')}] | {item['title'][:55]} | {item['price']:.0f} zł")
