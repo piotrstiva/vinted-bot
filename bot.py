@@ -2172,6 +2172,7 @@ VERBOSE_LOG_STATS = {
         "size_parse": 0,
         "safeguard_blocks": 0,
         "raw_style_blocks": 0,
+        "audit_seen": 0,
     },
 }
 RAW_STYLE_BLOCK_STATS = {
@@ -3081,6 +3082,7 @@ def reset_raw_style_cycle():
         "size_parse": 0,
         "safeguard_blocks": 0,
         "raw_style_blocks": 0,
+        "audit_seen": 0,
     }
     RAW_STYLE_BLOCK_STATS.update({
         "total": 0,
@@ -3351,6 +3353,7 @@ def print_raw_style_summary():
           f"size_parse={suppressed.get('size_parse', 0)} "
           f"safeguard_blocks={suppressed.get('safeguard_blocks', 0)} "
           f"raw_style_blocks={suppressed.get('raw_style_blocks', 0)} "
+          f"audit_seen={suppressed.get('audit_seen', 0)} "
           f"total_suppressed={total_suppressed}")
 
 
@@ -3384,7 +3387,14 @@ def print_candidate_audit_summary():
 
 
 def log_decision_trace(item: dict, result: dict, source: str, presend_reason: str = "pass", send_status: str = "success"):
-    age_info = get_item_age_info(item)
+    if result.get("_visible_age_source") or result.get("age_source"):
+        age_info = {
+            "source": result.get("_visible_age_source") or result.get("age_source"),
+            "minutes": result.get("_visible_age_minutes") if result.get("_visible_age_minutes") is not None else result.get("age_min"),
+            "usable_for_freshness": bool(result.get("_age_usable_for_freshness")),
+        }
+    else:
+        age_info = get_item_age_info(item)
     signals = result.get("_raw_style_presend_reasons") or validated_real_signal_reasons(item, result)
     query = (item.get("_search_meta") or {}).get("name") or "unknown"
     print(f"[DECISION_TRACE] id={item.get('id')} query={query} source={source} "
@@ -5049,7 +5059,7 @@ def check_search(search, seen, market_price):
                 seen_audit_item["_search_meta"] = {"name": search.get("name")}
                 audit_candidate("seen", seen_audit_item, search)
                 query_coverage_record(search.get("name"))["items_seen"] += 1
-                print(f"[AUDIT_SEEN] query={search.get('name')} title={title[:60]}")
+                verbose_item_log("audit_seen", f"[AUDIT_SEEN] query={search.get('name')} title={title[:60]}")
 
                 if not item_id or not href:
                     audit_candidate("blocked", seen_audit_item, search, block_reason="missing_id_or_url")
