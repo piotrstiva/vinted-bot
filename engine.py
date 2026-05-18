@@ -42,6 +42,8 @@ os.makedirs(_DATA_DIR, exist_ok=True)
 DB_FILE       = os.path.join(_DATA_DIR, "market_db.json")
 
 DEBUG_ALERTS    = os.getenv("DEBUG_ALERTS", "1") == "1"
+VERBOSE_ITEM_DEBUG = os.getenv("VERBOSE_ITEM_DEBUG", "0") == "1"
+NO_MARKET_DATA_CAP_LOG_LIMIT = int(os.getenv("NO_MARKET_DATA_CAP_LOG_LIMIT", "10"))
 WATCH_ALERTS_ENABLED = os.getenv("WATCH_ALERTS_ENABLED", "0") == "1"
 WATCH_MAX_PER_CYCLE = int(os.getenv("WATCH_MAX_PER_CYCLE", "2"))
 TASTE_WATCH_ENABLED = os.getenv("TASTE_WATCH_ENABLED", "1") == "1"
@@ -53,6 +55,31 @@ DEBUG_PIPELINE  = os.getenv("DEBUG_PIPELINE", "0") == "1"   # Part 7 — verbose
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  🧠 PART 1 — CENTRAL FEATURE EXTRACTION
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+NO_MARKET_DATA_CAP_STATS = {
+    "count": 0,
+    "examples": [],
+}
+
+
+def reset_no_market_data_cap_stats():
+    NO_MARKET_DATA_CAP_STATS["count"] = 0
+    NO_MARKET_DATA_CAP_STATS["examples"] = []
+
+
+def log_no_market_data_cap(title: str, real_signal_hits: list):
+    NO_MARKET_DATA_CAP_STATS["count"] += 1
+    if len(NO_MARKET_DATA_CAP_STATS["examples"]) < 5:
+        NO_MARKET_DATA_CAP_STATS["examples"].append(str(title or "")[:60])
+    if VERBOSE_ITEM_DEBUG or NO_MARKET_DATA_CAP_STATS["count"] <= NO_MARKET_DATA_CAP_LOG_LIMIT:
+        print(f"  [NO_MARKET_DATA_CAP] title={str(title or '')[:60]} confidence_cap=5.5 real_signals={real_signal_hits}")
+
+
+def print_no_market_data_cap_summary():
+    count = int(NO_MARKET_DATA_CAP_STATS.get("count") or 0)
+    if count:
+        print(f"[NO_MARKET_DATA_CAP_SUMMARY] count={count} examples={NO_MARKET_DATA_CAP_STATS.get('examples', [])}")
+
 
 def extract_item_features(item: dict) -> dict:
     """
@@ -2697,7 +2724,7 @@ class ChaosEngine:
         if no_market_data and len(real_signal_hits) < 3:
             confidence = min(confidence, 5.5)
             if DEBUG_ALERTS:
-                print(f"  [NO_MARKET_DATA_CAP] title={title[:60]} confidence_cap=5.5 real_signals={real_signal_hits}")
+                log_no_market_data_cap(title, real_signal_hits)
 
         if profit < 10 and anomaly_score == 0 and pattern_score <= 0:
             return {**base, "_skip_reason": "low_profit_no_anomaly",
@@ -3757,6 +3784,7 @@ class Engine:
           9. Debug output
         """
         market_prices = market_prices or {}
+        reset_no_market_data_cap_stats()
         total     = len(items)
         processed = 0
         all_scored: list[dict] = []   # wszystkie wyniki z evaluate_and_decide
@@ -3948,6 +3976,7 @@ class Engine:
             print(f"  [AWAIT] no sendable candidates | held={held} fallback={len(fallback_pool)}")
             _print_quality_summary(sent_count=0)
             _print_style_watch_preview()
+            print_no_market_data_cap_summary()
             self.db.save(force=True)
             return []
 
@@ -4043,6 +4072,7 @@ class Engine:
                       f"score={preview[0].get('final_score', 0)}")
             _print_quality_summary(sent_count=0)
             _print_style_watch_preview()
+            print_no_market_data_cap_summary()
             self.db.save(force=True)
             return []
         print(f"  🎚 min_profit={min_profit} → {len(candidate_pool)} candidates")
@@ -4332,6 +4362,7 @@ class Engine:
 
         _print_quality_summary(sent_count=len(final))
         _print_style_watch_preview()
+        print_no_market_data_cap_summary()
 
         self.db.save(force=True)
         print(f"  💾 MarketDB saved: {len(self.db.db)} grup → {DB_FILE}")
