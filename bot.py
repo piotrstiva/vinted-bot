@@ -48,7 +48,7 @@ MIN_DISCOUNT_PCT = 40      # % poniżej mediany → okazja
 MIN_AI_CONFIDENCE = 60     # % pewności AI że to ukryta okazja
 MIN_SAVING_PLN   = 6       # minimalna oszczędność w zł (odrzuć 1-5 zł różnicę)
 MAX_ALERTS_PER_SEARCH = 20  # więcej itemów do engine — silniki same filtrują jakość
-DEBUG_ALERTS          = True  # FIX: loguj decyzje engine (conf, profit, grail)
+DEBUG_ALERTS          = os.getenv("DEBUG_ALERTS", "1") == "1"  # FIX: loguj decyzje engine (conf, profit, grail)
 DEBUG_PIPELINE        = os.getenv("DEBUG_PIPELINE", "0") == "1"  # verbose pipeline log
 TASTE_DISCOVERY_ENABLED = os.getenv("TASTE_DISCOVERY_ENABLED", "1") == "1"
 TASTE_DISCOVERY_MAX_QUERIES_PER_CYCLE = int(os.getenv("TASTE_DISCOVERY_MAX_QUERIES_PER_CYCLE", "3"))
@@ -474,6 +474,7 @@ SCROLL_ITER_MIN    = 2
 SCROLL_ITER_MAX    = 5
 SCROLL_STEP_MIN    = 2.0
 SCROLL_STEP_MAX    = 6.0
+_CORE_SEARCH_ACTIVE = False
 
 
 def pick_depth() -> tuple[str, int]:
@@ -496,6 +497,8 @@ def item_micro_delay(item_title: str = "") -> None:
     Req 1 — Sleep after processing each item to simulate human reading speed.
     15% chance of longer 'reading' pause.
     """
+    if _CORE_SEARCH_ACTIVE:
+        return
     if random.random() < ITEM_READ_PAUSE_PCT:
         delay = random.uniform(ITEM_READ_PAUSE_MIN, ITEM_READ_PAUSE_MAX)
         if DEBUG_ALERTS:
@@ -1997,6 +2000,10 @@ RAW_STYLE_CLOTHING_TERMS = [
     "camiseta", "maglietta", "pullover", "jakna", "giacca", "veste",
     "jersey", "kit", "pants", "spodnie", "jeans", "trousers",
     "shorts", "szorty", "plaszcz",
+    "bukser", "troje", "haettetroje", "jakke", "byxor", "troja",
+    "paita", "huppari", "takki", "housut", "tricko", "mikina", "bunda",
+    "kalhoty", "polo", "pulover", "dzseki", "nadrag", "tricou",
+    "hanorac", "geaca", "pantaloni", "striuke", "marskineliai", "dzinsai",
 ]
 RAW_STYLE_SMALL_CARHARTT_SIZES = [
     "xs", "extra small", "small", "w24", "w25", "w26", "w27", "w28",
@@ -2121,6 +2128,7 @@ PRESEND_STATS = {
     "by_source": {},
 }
 AGE_SOURCE_STATS = {
+    "created_at_ts": 0,
     "visible_text": 0,
     "synthetic_rank": 0,
     "unknown": 0,
@@ -2128,11 +2136,13 @@ AGE_SOURCE_STATS = {
 }
 SAFEGUARD_STATS = {
     "retried": 0,
+    "added": 0,
     "passed_presend": 0,
     "blocked_presend": 0,
     "sent": 0,
     "limit_skipped": 0,
 }
+QUERY_COVERAGE: dict[str, dict] = {}
 
 AUDIT_CURRENT_CYCLE = 0
 AUDIT_LINES_THIS_CYCLE = 0
@@ -2185,9 +2195,8 @@ def _raw_hits(text: str, phrases: list[str]) -> list[str]:
 
 
 def _raw_item_age(item: dict) -> int:
-    age = item.get("age_min")
-    if age is None:
-        age = parse_item_age_minutes(item)
+    age_info = get_item_age_info(item)
+    age = age_info.get("minutes")
     try:
         return int(age)
     except Exception:
@@ -2203,11 +2212,37 @@ def _raw_is_clothing(text: str, item: dict) -> bool:
 
 
 def _raw_size_bucket(text: str, item: dict) -> str:
-    full = f"{text} {item.get('size') or ''}"
-    if re.search(r"(?<![a-z0-9])(xxl|2xl|xl|x large|extra large|large|l)(?![a-z0-9])", raw_normalize_text(full)):
+    size_raw = raw_normalize_text(item.get("size") or "")
+    if size_raw:
+        if re.search(r"(?<![a-z0-9])(xxl|2xl|xl|x large|extra large|large|l|m l)(?![a-z0-9])", size_raw):
+            if DEBUG_ALERTS:
+                print("[SIZE_PARSE] source=item_size bucket=large")
+            return "large"
+        if re.search(r"(?<![a-z0-9])(m|medium)(?![a-z0-9])", size_raw):
+            if DEBUG_ALERTS:
+                print("[SIZE_PARSE] source=item_size bucket=medium")
+            return "medium"
+        if re.search(r"(?<![a-z0-9])(w3[0-6]|3[0-6]x3[0-4])(?![a-z0-9])", size_raw):
+            if DEBUG_ALERTS:
+                print("[SIZE_PARSE] source=item_size bucket=large")
+            return "large"
+    title_n = raw_normalize_text(text)
+    explicit = re.search(
+        r"(?<![a-z0-9])(?:size|rozmiar|r|vel|koko|str)\s*\.?\s*(xxl|2xl|xl|l|m|w3[0-6]|3[0-6]x3[0-4])(?![a-z0-9])",
+        title_n,
+    )
+    waist = re.search(r"(?<![a-z0-9])(w3[0-6]|3[0-6]x3[0-4])(?![a-z0-9])", title_n)
+    hit = explicit.group(1) if explicit else (waist.group(1) if waist else "")
+    if hit in {"xxl", "2xl", "xl", "l"} or hit.startswith("w3") or "x" in hit:
+        if DEBUG_ALERTS:
+            print("[SIZE_PARSE] source=title_explicit bucket=large")
         return "large"
-    if re.search(r"(?<![a-z0-9])(m|medium)(?![a-z0-9])", raw_normalize_text(full)):
+    if hit == "m":
+        if DEBUG_ALERTS:
+            print("[SIZE_PARSE] source=title_explicit bucket=medium")
         return "medium"
+    if DEBUG_ALERTS:
+        print("[SIZE_PARSE] source=none bucket=unknown")
     return ""
 
 
@@ -2296,6 +2331,76 @@ def extract_visible_age_minutes(item) -> tuple[int | None, str]:
     return None, "no_visible_age"
 
 
+def get_item_age_info(item) -> dict:
+    item = item or {}
+    ts = item.get("created_at_ts")
+    if ts:
+        try:
+            minutes = max(0, int((time.time() - float(ts)) / 60))
+            print(f"[AGE_SOURCE] source=created_at_ts minutes={minutes} usable_for_freshness=True")
+            return {
+                "minutes": minutes,
+                "source": "created_at_ts",
+                "usable_for_freshness": True,
+                "visible_text": None,
+            }
+        except Exception:
+            pass
+
+    fields = [
+        "age", "age_text", "created_at_text", "added", "added_text",
+        "date", "subtitle", "metadata", "raw_card_text", "detail_text",
+    ]
+    for field in fields:
+        value = item.get(field)
+        if value is None:
+            continue
+        if isinstance(value, (dict, list)):
+            try:
+                value = json.dumps(value, ensure_ascii=False)
+            except Exception:
+                value = str(value)
+        minutes = _parse_age_text_minutes(str(value))
+        if minutes is not None:
+            print(f"[AGE_SOURCE] source=visible_text minutes={minutes} text={str(value)[:80]!r} usable_for_freshness=True")
+            return {
+                "minutes": minutes,
+                "source": "visible_text",
+                "usable_for_freshness": True,
+                "visible_text": str(value),
+            }
+
+    rank = item.get("_rank")
+    if rank is not None:
+        try:
+            rank_i = int(rank)
+            if rank_i <= 5:
+                minutes = 5
+            elif rank_i <= 20:
+                minutes = 30
+            elif rank_i <= 50:
+                minutes = 90
+            else:
+                minutes = 180
+        except Exception:
+            minutes = None
+        print(f"[AGE_SOURCE] source=synthetic_rank minutes={minutes} usable_for_freshness=False")
+        return {
+            "minutes": minutes,
+            "source": "synthetic_rank",
+            "usable_for_freshness": False,
+            "visible_text": None,
+        }
+
+    print("[AGE_SOURCE] source=unknown usable_for_freshness=False")
+    return {
+        "minutes": None,
+        "source": "unknown",
+        "usable_for_freshness": False,
+        "visible_text": None,
+    }
+
+
 def _raw_weak_brand_only(item: dict, text: str) -> bool:
     brand = raw_normalize_text(item.get("brand") or "")
     title = raw_normalize_text(item.get("title") or "")
@@ -2377,6 +2482,12 @@ def _validated_real_signal_reasons(item: dict, bucket: str) -> list[str]:
     ]
 
 
+def validated_real_signal_reasons(item, result=None, bucket=None) -> list[str]:
+    result = result or {}
+    bucket = bucket or result.get("raw_style_bucket") or result.get("taste_bucket") or result.get("tier") or "none"
+    return _validated_real_signal_reasons(item or {}, str(bucket or "none"))
+
+
 def _old_blank_tag_hit(text: str) -> bool:
     return raw_contains_any_phrase(text, [
         "fruit of the loom", "hanes", "jerzees", "russell athletic", "nutmeg",
@@ -2421,29 +2532,25 @@ def telegram_presend_gate(item, result=None, source="MAIN") -> tuple[bool, str]:
     validated = len(real_reasons)
     result["_raw_style_validated_signals"] = validated
     result["_raw_style_presend_reasons"] = real_reasons or reasons
-    visible_age, visible_age_source = extract_visible_age_minutes(item)
+    age_info = get_item_age_info(item)
+    visible_age = age_info.get("minutes") if age_info.get("usable_for_freshness") else None
     result["_visible_age_minutes"] = visible_age
-    result["_visible_age_source"] = visible_age_source
+    result["_visible_age_source"] = age_info.get("source")
+    result["_age_usable_for_freshness"] = bool(age_info.get("usable_for_freshness"))
     AGE_GATE_STATS["raw_checked"] += 1
     _log_weak_descriptors_ignored(text, title)
 
-    if visible_age is not None:
+    if age_info.get("source") == "created_at_ts":
+        AGE_SOURCE_STATS["created_at_ts"] = AGE_SOURCE_STATS.get("created_at_ts", 0) + 1
+    elif age_info.get("source") == "visible_text":
         AGE_SOURCE_STATS["visible_text"] += 1
-        print(f"[AGE_SOURCE] source=visible_text minutes={visible_age}")
+    elif age_info.get("source") == "synthetic_rank":
+        AGE_SOURCE_STATS["synthetic_rank"] += 1
     else:
-        synthetic_age = result.get("age_min")
-        if synthetic_age is None:
-            synthetic_age = item.get("age_min")
-        if synthetic_age is None:
-            synthetic_age = item.get("_rank")
-        if synthetic_age is not None:
-            AGE_SOURCE_STATS["synthetic_rank"] += 1
-            print("[AGE_SOURCE] source=synthetic_rank usable_for_freshness=false")
-            result["_visible_age_source"] = "synthetic_rank"
-        else:
-            AGE_SOURCE_STATS["unknown"] += 1
-            print("[AGE_SOURCE] source=unknown usable_for_freshness=false")
-            result["_visible_age_source"] = "unknown"
+        AGE_SOURCE_STATS["unknown"] += 1
+
+    if not age_info.get("usable_for_freshness"):
+        result["_visible_age_source"] = "synthetic_rank" if age_info.get("source") == "synthetic_rank" else "unknown"
 
     strong_grail = (
         alert_type == "GRAIL"
@@ -2454,7 +2561,7 @@ def telegram_presend_gate(item, result=None, source="MAIN") -> tuple[bool, str]:
         )
     )
 
-    if visible_age is not None and visible_age > RAW_STYLE_MAX_VISIBLE_AGE_MIN:
+    if visible_age is not None and visible_age > RAW_STYLE_MAX_VISIBLE_AGE_MIN and not strong_grail:
         AGE_GATE_STATS["blocked_stale_visible_age"] += 1
         print(f"[STALE_BLOCK_DETAIL] visible_age={visible_age} title={title[:80]}")
         return _presend_block(result, source, "stale_visible_age_presend_block")
@@ -2644,10 +2751,9 @@ def audit_candidate(stage: str, item: dict, search: dict | None = None, result: 
     result = result or {}
     meta = item.get("_search_meta") or {}
     search = search or {}
-    age = result.get("age_min") or item.get("age_min")
-    if age is None:
-        age = parse_item_age_minutes(item)
-    age_source = "created_at_ts" if item.get("created_at_ts") else ("age_min" if item.get("age_min") is not None else "parsed")
+    age_info = get_item_age_info(item)
+    age = result.get("age_min") if result.get("age_min") is not None else age_info.get("minutes")
+    age_source = result.get("age_source") or age_info.get("source")
     dedupe_key = ""
     try:
         dedupe_key = get_item_dedupe_key(item)
@@ -2663,6 +2769,7 @@ def audit_candidate(stage: str, item: dict, search: dict | None = None, result: 
         "effective_price": result.get("effective_price"),
         "age": age,
         "age_source": age_source,
+        "age_usable_for_freshness": age_info.get("usable_for_freshness"),
         "size": item.get("size") or result.get("size"),
         "category": result.get("category") or item.get("category"),
         "bucket": bucket or result.get("raw_style_bucket") or result.get("taste_bucket") or result.get("tier"),
@@ -2690,7 +2797,9 @@ def compute_raw_style_score(item: dict) -> dict:
     text_n = raw_normalize_text(text)
     price = float(item.get("price") or 0)
     effective_price = max(0.0, price - NEGOTIATION_BUFFER_PLN)
-    age = _raw_item_age(item)
+    age_info = get_item_age_info(item)
+    age = int(age_info.get("minutes") if age_info.get("minutes") is not None else 9999)
+    freshness_scored = False
     signals: list[str] = []
     buckets: set[str] = set()
     score = 0
@@ -2755,15 +2864,18 @@ def compute_raw_style_score(item: dict) -> dict:
         score += 5
         signals.append("price:effective_<=100")
 
-    if age <= 10:
+    if age_info.get("usable_for_freshness") and age <= 10:
         score += 20
         signals.append("fresh:<=10")
-    elif age <= 30:
+        freshness_scored = True
+    elif age_info.get("usable_for_freshness") and age <= 30:
         score += 15
         signals.append("fresh:<=30")
-    elif age <= 90:
+        freshness_scored = True
+    elif age_info.get("usable_for_freshness") and age <= 90:
         score += 10
         signals.append("fresh:<=90")
+        freshness_scored = True
 
     is_clothing = _raw_is_clothing(text, item)
     fast_fashion = raw_contains_any_phrase(text, list(RAW_STYLE_FAST_FASHION))
@@ -2813,17 +2925,26 @@ def compute_raw_style_score(item: dict) -> dict:
         block_reason = block_reason or "missing_price"
     if price > RAW_STYLE_SNIPER_MAX_PRICE:
         block_reason = block_reason or "price_above_raw_style_max"
-    if age > RAW_STYLE_SNIPER_MAX_AGE_MIN:
+    if age_info.get("usable_for_freshness") and age > RAW_STYLE_SNIPER_MAX_AGE_MIN:
         block_reason = block_reason or "age_above_raw_style_max"
 
     eligible = False
+    validated_real_count = len(validated_real_signal_reasons(item, bucket=bucket))
     if not block_reason and RAW_STYLE_SNIPER_ENABLED:
-        eligible = bool(
-            (score >= 65 and raw_style_real_signal and price <= RAW_STYLE_SNIPER_MAX_PRICE and age <= RAW_STYLE_SNIPER_MAX_AGE_MIN)
-            or (score >= 55 and effective_price <= 50 and age <= 90 and real_signal_count >= 2)
-            or (buckets.intersection({"streetwear", "biker", "pop_culture", "old_blank"}) and effective_price <= 30 and size_bucket in {"medium", "large"} and age <= 90)
-            or (score >= 75 and price <= RAW_STYLE_SNIPER_MAX_PRICE and age <= RAW_STYLE_SNIPER_MAX_AGE_MIN and real_signal_count >= 2)
-        )
+        if age_info.get("usable_for_freshness"):
+            eligible = bool(
+                (score >= 65 and raw_style_real_signal and price <= RAW_STYLE_SNIPER_MAX_PRICE and age <= RAW_STYLE_SNIPER_MAX_AGE_MIN)
+                or (score >= 55 and effective_price <= 50 and age <= 90 and real_signal_count >= 2)
+                or (buckets.intersection({"streetwear", "biker", "pop_culture", "old_blank"}) and effective_price <= 30 and size_bucket in {"medium", "large"} and age <= 90)
+                or (score >= 75 and price <= RAW_STYLE_SNIPER_MAX_PRICE and age <= RAW_STYLE_SNIPER_MAX_AGE_MIN and real_signal_count >= 2)
+            )
+        else:
+            eligible = bool(
+                price <= RAW_STYLE_SNIPER_MAX_PRICE
+                and validated_real_count >= 3
+                and score >= 70
+                and raw_style_real_signal
+            )
     if not eligible and not block_reason:
         block_reason = "below_raw_style_threshold"
 
@@ -2836,6 +2957,9 @@ def compute_raw_style_score(item: dict) -> dict:
         "raw_style_real_signal_count": real_signal_count,
         "effective_price": round(effective_price, 2),
         "age_min": age,
+        "age_source": age_info.get("source"),
+        "freshness_scored": freshness_scored,
+        "validated_real_signals": validated_real_count,
         "eligible": eligible,
     }
 
@@ -2866,6 +2990,7 @@ def reset_raw_style_cycle():
         "by_source": {},
     })
     AGE_SOURCE_STATS.update({
+        "created_at_ts": 0,
         "visible_text": 0,
         "synthetic_rank": 0,
         "unknown": 0,
@@ -2873,6 +2998,7 @@ def reset_raw_style_cycle():
     })
     SAFEGUARD_STATS.update({
         "retried": 0,
+        "added": 0,
         "passed_presend": 0,
         "blocked_presend": 0,
         "sent": 0,
@@ -3031,6 +3157,7 @@ def send_raw_style_candidates(max_cycle_slots: int, sent_this_cycle: int) -> int
         presend_ok, presend_reason = raw_style_pre_send_gate(item, result)
         validated_signals = int(result.get("_raw_style_validated_signals") or 0)
         if not presend_ok:
+            query_coverage_record((item.get("_search_meta") or {}).get("name"))["blocked_count"] += 1
             print(f"[RAW_STYLE_PRE_SEND_BLOCK] reason={presend_reason} "
                   f"score={result.get('raw_style_score',0):.0f} "
                   f"bucket={result.get('raw_style_bucket','none')} "
@@ -3051,6 +3178,8 @@ def send_raw_style_candidates(max_cycle_slots: int, sent_this_cycle: int) -> int
         if not sent_ok:
             print(f"[TELEGRAM] raw_style_send_failed key={key} title={str(item.get('title') or '')[:60]}")
             continue
+        log_decision_trace(item, result, "RAW_STYLE", presend_reason)
+        query_coverage_record((item.get("_search_meta") or {}).get("name"))["alerts_sent"] += 1
         mark_sent(item, result, (item.get("_search_meta") or {}).get("name"))
         print(f"[RAW_STYLE_DEDUPE_MARK] key={key} title={str(item.get('title') or '')[:60]}")
         RAW_STYLE_CYCLE_CANDIDATES.pop(key, None)
@@ -3103,10 +3232,12 @@ def print_raw_style_summary():
           f"blocked_by_reason={PRESEND_STATS['blocked_by_reason']} "
           f"by_source={PRESEND_STATS['by_source']}")
     print(f"[AGE_SOURCE_SUMMARY] visible_text={AGE_SOURCE_STATS['visible_text']} "
+          f"created_at_ts={AGE_SOURCE_STATS.get('created_at_ts', 0)} "
           f"synthetic_rank={AGE_SOURCE_STATS['synthetic_rank']} "
           f"unknown={AGE_SOURCE_STATS['unknown']} "
           f"synthetic_sent={AGE_SOURCE_STATS['synthetic_sent']}")
     print(f"[SAFEGUARD_SUMMARY] retried={SAFEGUARD_STATS['retried']} "
+          f"added={SAFEGUARD_STATS.get('added', 0)} "
           f"passed_presend={SAFEGUARD_STATS['passed_presend']} "
           f"blocked_presend={SAFEGUARD_STATS['blocked_presend']} "
           f"sent={SAFEGUARD_STATS['sent']} "
@@ -3140,6 +3271,74 @@ def print_candidate_audit_summary():
             f"main_candidates={AUDIT_STATS['main_candidates']} main_sent={AUDIT_STATS['main_sent']}\n"
             f"blocked={AUDIT_STATS['blocked']}"
         )
+
+
+def log_decision_trace(item: dict, result: dict, source: str, presend_reason: str = "pass"):
+    age_info = get_item_age_info(item)
+    signals = result.get("_raw_style_presend_reasons") or validated_real_signal_reasons(item, result)
+    query = (item.get("_search_meta") or {}).get("name") or "unknown"
+    print(f"[DECISION_TRACE] id={item.get('id')} query={query} source={source} "
+          f"age_source={age_info.get('source')} age_min={age_info.get('minutes')} "
+          f"usable_freshness={age_info.get('usable_for_freshness')} "
+          f"real_signals={signals[:5]} engine={result.get('engine')} "
+          f"bucket={result.get('raw_style_bucket') or result.get('taste_bucket') or result.get('tier')} "
+          f"score={result.get('raw_style_score') or result.get('taste_watch_score') or result.get('final_score')} "
+          f"presend_reason={presend_reason} "
+          f"final_reason={result.get('reason') or result.get('_quality_block_reason') or result.get('raw_style_block_reason')} "
+          f"title={str(item.get('title') or '')[:80]}")
+
+
+def is_core_search(search: dict) -> bool:
+    if search.get("core_search") is True:
+        return True
+    name = raw_normalize_text(search.get("name") or search.get("query") or "")
+    layer = raw_normalize_text(search.get("layer") or "")
+    if layer == "grail":
+        return True
+    core_terms = [
+        "taste discovery", "carhartt", "harley", "bape", "stussy",
+        "single stitch", "made in usa", "screen stars", "fruit of the loom",
+    ]
+    return any(raw_contains_phrase(name, term) for term in core_terms)
+
+
+def query_coverage_record(name: str) -> dict:
+    return QUERY_COVERAGE.setdefault(name or "unknown", {
+        "last_checked_at": None,
+        "seconds_since_last_check": None,
+        "items_seen": 0,
+        "candidates_created": 0,
+        "alerts_sent": 0,
+        "blocked_count": 0,
+        "core": False,
+        "checked_this_cycle": False,
+        "skipped_this_cycle": False,
+    })
+
+
+def print_query_coverage_summary():
+    core_checked = core_skipped = peripheral_checked = peripheral_skipped = 0
+    oldest_core_since = 0
+    for name, data in QUERY_COVERAGE.items():
+        if data.get("core"):
+            core_checked += 1 if data.get("checked_this_cycle") else 0
+            core_skipped += 1 if data.get("skipped_this_cycle") else 0
+            oldest_core_since = max(oldest_core_since, int(data.get("seconds_since_last_check") or 0))
+        else:
+            peripheral_checked += 1 if data.get("checked_this_cycle") else 0
+            peripheral_skipped += 1 if data.get("skipped_this_cycle") else 0
+        print(f"[QUERY_COVERAGE] name={name} since_last={data.get('seconds_since_last_check')} "
+              f"seen={data.get('items_seen', 0)} candidates={data.get('candidates_created', 0)} "
+              f"sent={data.get('alerts_sent', 0)} blocked={data.get('blocked_count', 0)}")
+        data["checked_this_cycle"] = False
+        data["skipped_this_cycle"] = False
+        data["items_seen"] = 0
+        data["candidates_created"] = 0
+        data["alerts_sent"] = 0
+        data["blocked_count"] = 0
+    print(f"[QUERY_COVERAGE_SUMMARY] core_checked={core_checked} core_skipped={core_skipped} "
+          f"peripheral_checked={peripheral_checked} peripheral_skipped={peripheral_skipped} "
+          f"oldest_core_since_last={oldest_core_since}")
 
 
 def find_audit_matches(search_text: str, limit=20):
@@ -3997,6 +4196,7 @@ def parse_items_from_html(html):
                         if item_id in seen_ids:
                             continue
                         seen_ids.add(item_id)
+                        ts_final = None
 
                         # Fix #6 — debug: raz pokaż klucze pierwszego itemu żeby wiedzieć
                         # jakie pola zwraca Vinted (pomaga wykryć właściwe pole czasu)
@@ -4006,7 +4206,7 @@ def parse_items_from_html(html):
                                               ["time", "date", "at", "ts", "push", "create", "update", "active"])]
                             if ts_keys:
                                 print(f"  🕐 Vinted TS fields: {ts_keys} | vals: {[entry.get(k) for k in ts_keys[:4]]}")
-                                print(f"  🕐 ts_final będzie: {ts_final} (prawdziwy timestamp)")
+                                print("  🕐 ts_final zostanie policzony po parsowaniu pola czasu")
                             else:
                                 print(f"  ⚠️  Vinted NIE zwraca pola z czasem — używam syntetycznego wieku (rank-based)")
                                 print(f"  🕐 Vinted keys (first 10): {list(entry.keys())[:10]}")
@@ -4044,6 +4244,8 @@ def parse_items_from_html(html):
                                     ts_final = dt.timestamp()
                                 except:
                                     pass
+                        if len(seen_ids) == 1 and not items and DEBUG_PIPELINE:
+                            print(f"[PARSE_TS] item_id={item_id} ts_final={ts_final}")
 
                         # Filtr czasu — tylko oferty z ostatnich 24h (gdy mamy ts)
                         if ts_final:
@@ -4099,7 +4301,11 @@ def parse_items_from_html(html):
                                 "raw_card_text": raw_card_text,
                                 "_rank":         len(items),  # pozycja na liście (do synth-age)
                             })
-                    except:
+                    except Exception as e:
+                        if DEBUG_PIPELINE:
+                            _item_id = locals().get("item_id", "?")
+                            _title = locals().get("title", "")
+                            print(f"[PARSE_ITEM_ERROR] error={e} item_id={_item_id} title={_title[:80] if _title else '?'}")
                         continue
 
                 if items:
@@ -4593,6 +4799,8 @@ _SNIPER_SEEN: dict[str, float] = {}   # FIX: dict z TTL zamiast set (wygasa po 6
 #  🕵️ SPRAWDZANIE OFERT (HTML scraping)
 # ─────────────────────────────────────────
 def check_search(search, seen, market_price):
+    global _CORE_SEARCH_ACTIVE
+    _CORE_SEARCH_ACTIVE = is_core_search(search)
     found    = []
     all_ids  = []
     cnt_seen = cnt_price = cnt_kw = cnt_rejected = 0
@@ -4634,12 +4842,15 @@ def check_search(search, seen, market_price):
 
         # ── Req 2 — DYNAMIC DEPTH: pick how many items to process ──
         depth_name, max_items_this_run = pick_depth()
+        if _CORE_SEARCH_ACTIVE:
+            depth_name, max_items_this_run = "core", len(tiered_items)
         items = items[:max_items_this_run]
         print(f"  [DEPTH] depth={depth_name} max_items={max_items_this_run} "
               f"(available={len(tiered_items)})")
 
         # ── Req 7 — FAKE SCROLL before processing (simulate page scan) ──
-        fake_scroll()
+        if not _CORE_SEARCH_ACTIVE:
+            fake_scroll()
 
         # ── Req 3 — Load search profile ──────────────────────────────
         profile         = get_search_profile(search.get("name", ""))
@@ -5013,9 +5224,18 @@ def check_search(search, seen, market_price):
                         saving          = market_price - price
                         is_below_market = discount_pct >= 30 and saving >= MIN_SAVING_PLN
                     features = extract_item_features(item)
-                    qualifies = is_steal_price or is_below_market or features["is_vintage"]
+                    real_signal_reasons = validated_real_signal_reasons(item, bucket="safeguard")
+                    real_signal_count = len(real_signal_reasons)
+                    qualifies = (
+                        (is_below_market and real_signal_count >= 2)
+                        or (is_steal_price and real_signal_count >= 3)
+                        or (real_signal_count >= 4)
+                    )
                     if not qualifies:
+                        print(f"[SAFEGUARD_QUALIFY_BLOCK] reason=not_enough_real_signal "
+                              f"title={title[:60]} signals={real_signal_reasons[:5]}")
                         continue
+                    SAFEGUARD_STATS["added"] += 1
                     found.append({
                         "id": item_id, "title": title, "link": href,
                         "price": price, "market_price": market_price,
@@ -5367,7 +5587,9 @@ while True:
         # Req 10 — early exit
         if random.random() < 0.10:
             print(f"  [CYCLE] early_exit=True (noise injection)")
-            this_cycle_searches = this_cycle_searches[:1]
+            core_keep = [s for s in this_cycle_searches if is_core_search(s)]
+            peripheral_keep = [s for s in this_cycle_searches if not is_core_search(s)][:1]
+            this_cycle_searches = core_keep + peripheral_keep
 
         if TASTE_DISCOVERY_ENABLED and TASTE_DISCOVERY_QUERIES:
             taste_limit = max(0, int(TASTE_DISCOVERY_MAX_QUERIES_PER_CYCLE or 0))
@@ -5393,19 +5615,30 @@ while True:
         searches_done = 0
 
         for search in this_cycle_searches:
+            core_search = is_core_search(search)
+            qcov = query_coverage_record(search["name"])
+            qcov["core"] = core_search
             # Req 7 — hard stop if cycle marked for stop by 403
             if _cycle_403_stop:
                 print(f"  [403] cycle_stop — przerywam cykl po banie")
                 break
 
             # Req 6 — 20% chance: skip search entirely (noise)
-            if random.random() < 0.20:
-                print(f"  [SEARCH] skipped={search['name']} (noise injection)")
+            if random.random() < 0.20 and not core_search:
+                qcov["skipped_this_cycle"] = True
+                print(f"  [SEARCH_SKIP] name={search['name']} reason=random_noise_peripheral_only")
                 continue
 
             print(f"  ⏳ Sprawdzam: {search['name']}")
+            if core_search:
+                print(f"  [CORE_SEARCH_RUN] name={search['name']}")
             market_price = market_prices.get(search["name"])
+            last_checked = qcov.get("last_checked_at")
+            qcov["seconds_since_last_check"] = int(now - last_checked) if last_checked else None
+            qcov["last_checked_at"] = now
+            qcov["checked_this_cycle"] = True
             new_items, all_ids = check_search(search, seen, market_price)
+            qcov["items_seen"] += len(new_items)
             searches_done += 1
             print(f"  [SEARCH] selected={search['name']} nowych={len(new_items)}")
 
@@ -5422,7 +5655,8 @@ while True:
             )
 
             # Req 6 — 10% chance: first page only (early stop within search)
-            items_to_take = 1 if random.random() < 0.10 else MAX_ALERTS_PER_SEARCH
+            items_to_take = MAX_ALERTS_PER_SEARCH if core_search else (1 if random.random() < 0.10 else MAX_ALERTS_PER_SEARCH)
+            qcov["candidates_created"] += min(len(new_items), items_to_take)
             for item in new_items[:items_to_take]:
                 item["_search_meta"] = {
                     "football_mode":  search.get("football_mode"),
@@ -5436,10 +5670,12 @@ while True:
                     all_new_items.append(item)
 
             # Req 4 — thinking pause between searches
-            _thinking_pause(after=search["name"])
+            if not core_search:
+                _thinking_pause(after=search["name"])
 
             # Req 7 — 20% chance: random idle (30–90s) between searches
-            maybe_random_idle(context=search["name"])
+            if not core_search:
+                maybe_random_idle(context=search["name"])
 
         cycle_duration = time.time() - cycle_start
         print(f"  [CYCLE] search_count={searches_done} duration={cycle_duration:.0f}s")
@@ -5506,6 +5742,7 @@ while True:
                 presend_ok, presend_reason = telegram_presend_gate(item, result, source=presend_source)
                 validated_signals = int(result.get("_raw_style_validated_signals") or 0)
                 if not presend_ok:
+                    query_coverage_record((item.get("_search_meta") or {}).get("name"))["blocked_count"] += 1
                     if presend_source == "SAFEGUARD":
                         SAFEGUARD_STATS["blocked_presend"] += 1
                         print(f"[SAFEGUARD_PRESEND_BLOCK] reason={presend_reason} "
@@ -5529,6 +5766,8 @@ while True:
                 if not sent_ok:
                     print(f"[TELEGRAM] send_failed key={dedupe_key} title={str(item.get('title',''))[:60]}")
                     continue
+                log_decision_trace(item, result, presend_source, presend_reason)
+                query_coverage_record((item.get("_search_meta") or {}).get("name"))["alerts_sent"] += 1
                 mark_sent(item, result, (item.get("_search_meta") or {}).get("name"))
                 audit_candidate("sent", item, result=result, sent=True, alert_type=_alert_type(result),
                                 score=result.get("final_score"))
@@ -5621,6 +5860,7 @@ while True:
                     presend_ok, presend_reason = telegram_presend_gate(item, result, source="SAFEGUARD")
                     validated_signals = int(result.get("_raw_style_validated_signals") or 0)
                     if not presend_ok:
+                        query_coverage_record((item.get("_search_meta") or {}).get("name"))["blocked_count"] += 1
                         SAFEGUARD_STATS["blocked_presend"] += 1
                         print(f"[SAFEGUARD_PRESEND_BLOCK] reason={presend_reason} "
                               f"validated_signals={validated_signals} title={str(item.get('title') or '')[:60]}")
@@ -5638,6 +5878,8 @@ while True:
                     if not sent_ok:
                         print(f"[TELEGRAM] send_failed key={dedupe_key} title={str(item.get('title',''))[:60]}")
                         continue
+                    log_decision_trace(item, result, "SAFEGUARD", presend_reason)
+                    query_coverage_record((item.get("_search_meta") or {}).get("name"))["alerts_sent"] += 1
                     mark_sent(item, result, (item.get("_search_meta") or {}).get("name"))
                     audit_candidate("sent", item, result=result, sent=True, alert_type=_alert_type(result),
                                     score=result.get("final_score"))
@@ -5662,6 +5904,7 @@ while True:
 
         print_raw_style_summary()
         print_candidate_audit_summary()
+        print_query_coverage_summary()
         print(f"  📊 Cykl #{cycle} zakończony — wysłano: {sent_this_cycle} alertów [CHAOS+BRAND+GRAIL+RAW_STYLE]")
 
         save_seen(seen)
