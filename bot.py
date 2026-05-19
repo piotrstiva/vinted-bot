@@ -6,6 +6,7 @@ import re
 import base64
 import random
 import unicodedata
+import sys
 from urllib.parse import quote_plus, urlparse
 from statistics import median
 from bs4 import BeautifulSoup
@@ -74,6 +75,8 @@ CANDIDATE_AUDIT_PATH = os.getenv("CANDIDATE_AUDIT_PATH", "/data/vinted_bot/candi
 CANDIDATE_AUDIT_MAX_LINES_PER_CYCLE = int(os.getenv("CANDIDATE_AUDIT_MAX_LINES_PER_CYCLE", "300"))
 CANDIDATE_AUDIT_TELEGRAM_SUMMARY = os.getenv("CANDIDATE_AUDIT_TELEGRAM_SUMMARY", "0") == "1"
 AUDIT_WATCH_TITLES = os.getenv("AUDIT_WATCH_TITLES", "")
+FRESH_DISCOVERY_ENABLED = os.getenv("FRESH_DISCOVERY_ENABLED", "1") == "1"
+FRESH_DISCOVERY_PER_CYCLE = max(0, int(os.getenv("FRESH_DISCOVERY_PER_CYCLE", "1")))
 
 if DETAIL_AGE_VERIFY_ENABLED:
     print("[DETAIL_AGE_VERIFY_ENABLED]")
@@ -2180,6 +2183,29 @@ AUDIT_STATS = {
 }
 AUDIT_TOP_BLOCKED: list[dict] = []
 AUDIT_TOP_NOT_SENT: list[dict] = []
+BOT_POSITIVE_KNOWLEDGE_BASE: dict = {}
+FRESH_DISCOVERY_QUERY_POOL: list[str] = []
+TARGET_MARKERS: set[str] = set()
+FRESH_DISCOVERY_STATE_FILE = os.path.join(DATA_DIR, "fresh_discovery_state.json")
+FRESH_DISCOVERY_STATS = {
+    "enabled": FRESH_DISCOVERY_ENABLED,
+    "pool_total": 0,
+    "queries_run": 0,
+    "seen": 0,
+    "candidates": 0,
+    "sent": 0,
+    "blocked": 0,
+    "top_block_reasons": {},
+}
+TARGET_AUDIT_STATS = {
+    "target_seen": 0,
+    "target_candidates": 0,
+    "target_sent": 0,
+    "target_blocked": 0,
+    "seen_logs": 0,
+    "blocked_logs": 0,
+    "top_target_block_reasons": {},
+}
 VERBOSE_LOG_STATS = {
     "printed": 0,
     "suppressed": {
@@ -2285,6 +2311,407 @@ def raw_contains_exact_token(text: str, token: str) -> bool:
 
 def _raw_hits(text: str, phrases: list[str]) -> list[str]:
     return [phrase for phrase in phrases if raw_contains_phrase(text, phrase)]
+
+
+CURATED_FRESH_DISCOVERY_SEED = [
+    "single stitch vintage",
+    "made in usa vintage",
+    "90s vintage t shirt",
+    "vintage graphic tee",
+    "vintage disney tee",
+    "disney cruise line",
+    "warner bros vintage",
+    "looney tunes vintage",
+    "space jam vintage",
+    "nasa vintage",
+    "vintage nasa shirt",
+    "nutmeg vintage",
+    "vintage nba nutmeg",
+    "orlando magic vintage",
+    "jerzees vintage",
+    "hanes beefy",
+    "fruit of the loom usa",
+    "screen stars vintage",
+    "band tee vintage",
+    "tour tee vintage",
+    "rap tee vintage",
+    "metal longsleeve vintage",
+    "harley davidson vintage",
+    "daytona bike week",
+    "sturgis vintage",
+    "nascar vintage",
+    "racing vintage",
+    "carhartt detroit",
+    "carhartt santa fe",
+    "workwear vintage",
+    "stussy vintage tee",
+    "ed hardy vintage",
+    "affliction vintage",
+    "archive graphic tee",
+    "designer archive",
+    "ralph lauren vintage knit",
+    "polo sport vintage",
+]
+
+
+def _knowledge_add_unique(target: list[str], value):
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            _knowledge_add_unique(target, item)
+        return
+    text = raw_normalize_text(value)
+    if text and text not in target:
+        target.append(text)
+
+
+def _negative_discovery_terms() -> set[str]:
+    terms: set[str] = set()
+    for name in (
+        "GLOBAL_EXCLUDE", "BLOCKED_BRANDS", "RAW_STYLE_FAST_FASHION",
+        "RAW_STYLE_NON_CLOTHING", "WOMEN_FIT_TERMS", "FITTED_TOP_TERMS",
+        "KIDS_TERMS", "WEAK_DESCRIPTOR_TERMS", "WEAK_NOVELTY_BRANDS",
+    ):
+        val = globals().get(name, [])
+        for term in (val if isinstance(val, (list, tuple, set)) else []):
+            norm = raw_normalize_text(term)
+            if norm:
+                terms.add(norm)
+    return terms
+
+
+def build_bot_positive_knowledge_base() -> dict:
+    base = {
+        "search_profile_terms": [],
+        "raw_style_terms": [],
+        "authenticity_terms": [],
+        "motif_terms": [],
+        "brand_terms": [],
+        "category_terms": [],
+        "manual_seed_terms": [],
+    }
+    for name, profile in (SEARCH_PROFILES or {}).items():
+        _knowledge_add_unique(base["search_profile_terms"], name)
+        _knowledge_add_unique(base["search_profile_terms"], profile.get("required_phrases") or [])
+        _knowledge_add_unique(base["category_terms"], profile.get("allowed_types") or [])
+    for search in SEARCHES:
+        if search.get("layer") in {"grail", "targeted", "taste_discovery"} or search.get("grail_mode"):
+            _knowledge_add_unique(base["search_profile_terms"], search.get("name"))
+            _knowledge_add_unique(base["brand_terms"], search.get("keywords") or [])
+    _knowledge_add_unique(base["manual_seed_terms"], TASTE_DISCOVERY_QUERIES)
+    _knowledge_add_unique(base["manual_seed_terms"], CURATED_FRESH_DISCOVERY_SEED)
+    for name in (
+        "RAW_STYLE_CONTEXT_TERMS", "RAW_STYLE_POP_VALIDATION_TERMS",
+        "RAW_STYLE_VISUAL_CONTEXT_TERMS", "RAW_STYLE_KNOWN_STRONG_MOTIFS",
+        "RAW_STYLE_OLD_BLANK", "RAW_STYLE_POP_CULTURE", "RAW_STYLE_BIKER",
+        "RAW_STYLE_SPORTS_COLLEGE", "RAW_STYLE_STREETWEAR",
+        "RAW_STYLE_RALPH_WORKWEAR", "RAW_STYLE_METAL", "RAW_STYLE_ERA_SIGNALS",
+    ):
+        _knowledge_add_unique(base["raw_style_terms"], globals().get(name, []))
+    engine_mod = sys.modules.get("engine")
+    if engine_mod:
+        for name in ("AUTHENTICITY_SIGNALS", "DESIRABLE_VINTAGE"):
+            _knowledge_add_unique(base["authenticity_terms"], getattr(engine_mod, name, []))
+        for name in (
+            "DESIRABLE_OUTDOOR", "DESIRABLE_NIKE", "DESIRABLE_ADIDAS",
+            "DESIRABLE_DENIM", "DESIRABLE_HARLEY", "DESIRABLE_DESIGNER",
+            "DESIRABLE_CARHARTT", "RALPH_LAUREN_DESIRABLE_SIGNALS",
+            "LEE_DESIRABLE_SIGNALS",
+        ):
+            _knowledge_add_unique(base["motif_terms"], getattr(engine_mod, name, []))
+    _knowledge_add_unique(base["motif_terms"], [
+        "vintage t shirt", "single stitch", "made in usa", "old blanks",
+        "screen stars", "hanes beefy", "fruit of the loom usa", "jerzees",
+        "band tee", "tour tee", "rap tee", "metal longsleeve",
+        "warner bros", "looney tunes", "space jam", "disney", "nasa",
+        "nutmeg", "nba", "nascar", "harley", "daytona", "sturgis",
+        "carhartt detroit", "carhartt santa fe", "archive graphic tee",
+        "designer archive", "stussy", "ed hardy", "affliction", "polo sport",
+    ])
+    negatives = _negative_discovery_terms()
+    for key, values in list(base.items()):
+        filtered = []
+        for term in values:
+            if term in negatives:
+                continue
+            if any(term == neg or raw_contains_phrase(term, neg) for neg in negatives if len(neg) > 4):
+                continue
+            if term not in filtered:
+                filtered.append(term)
+        base[key] = filtered
+    examples = []
+    for key in ("authenticity_terms", "motif_terms", "manual_seed_terms"):
+        examples.extend(base.get(key, [])[:4])
+    print(f"[BOT_KNOWLEDGE_BASE_BUILT] "
+          f"search_profile_terms={len(base['search_profile_terms'])} "
+          f"raw_style_terms={len(base['raw_style_terms'])} "
+          f"authenticity_terms={len(base['authenticity_terms'])} "
+          f"motif_terms={len(base['motif_terms'])} "
+          f"brand_terms={len(base['brand_terms'])} "
+          f"category_terms={len(base['category_terms'])} examples={examples[:8]}")
+    return base
+
+
+WEAK_DISCOVERY_QUERY_WORDS = {
+    "tee", "shirt", "t shirt", "tshirt", "koszulka", "vintage",
+    "graphic", "streetwear", "archive", "style", "y2k", "rare",
+}
+
+STRONG_SINGLE_DISCOVERY_QUERIES = {
+    "rrl",
+}
+
+
+def is_discovery_safe_query(query: str) -> bool:
+    q = raw_normalize_text(query)
+    if not q:
+        return False
+    if q in STRONG_SINGLE_DISCOVERY_QUERIES:
+        return True
+    tokens = q.split()
+    if len(tokens) == 1 and q in WEAK_DISCOVERY_QUERY_WORDS:
+        return False
+    if q in WEAK_DISCOVERY_QUERY_WORDS:
+        return False
+    negatives = _negative_discovery_terms()
+    if any(raw_contains_phrase(q, neg) for neg in negatives):
+        return False
+    context_terms = [
+        "vintage", "single stitch", "made in usa", "screen stars", "hanes",
+        "fruit of the loom", "jerzees", "nutmeg", "archive", "designer",
+        "workwear", "carhartt", "detroit", "santa fe", "harley", "daytona",
+        "sturgis", "warner", "looney", "disney", "space jam", "nasa",
+        "nba", "nascar", "tour", "band", "rap", "metal", "polo sport",
+        "stussy", "ed hardy", "affliction", "rrl", "double rl",
+    ]
+    return any(raw_contains_phrase(q, term) for term in context_terms) and len(q) >= 7
+
+
+def build_fresh_discovery_queries_from_knowledge(base: dict) -> list[str]:
+    candidates: list[str] = []
+    manual_added: set[str] = set()
+    rejected_too_generic = 0
+    rejected_negative = 0
+
+    def add(query: str, source: str = "code"):
+        nonlocal rejected_too_generic, rejected_negative
+        q = raw_normalize_text(query)
+        if not q:
+            return
+        if q in WEAK_DISCOVERY_QUERY_WORDS or (len(q.split()) == 1 and q in WEAK_DISCOVERY_QUERY_WORDS):
+            rejected_too_generic += 1
+            return
+        if any(raw_contains_phrase(q, neg) for neg in _negative_discovery_terms()):
+            rejected_negative += 1
+            return
+        if not is_discovery_safe_query(q):
+            rejected_too_generic += 1
+            return
+        if q not in candidates:
+            candidates.append(q)
+            if source == "manual":
+                manual_added.add(q)
+
+    for query in CURATED_FRESH_DISCOVERY_SEED:
+        add(query, source="manual")
+    for query in base.get("manual_seed_terms", []):
+        add(query, source="manual")
+    for term in base.get("authenticity_terms", []) + base.get("raw_style_terms", []) + base.get("motif_terms", []):
+        t = raw_normalize_text(term)
+        if not t:
+            continue
+        if raw_contains_phrase(t, "single stitch") or raw_contains_phrase(t, "made in usa"):
+            add(f"{t} vintage")
+        elif raw_contains_phrase(t, "screen stars") or raw_contains_phrase(t, "hanes beefy"):
+            add(f"{t} vintage")
+        elif raw_contains_phrase(t, "fruit of the loom"):
+            add("fruit of the loom usa")
+        elif raw_contains_phrase(t, "carhartt") or raw_contains_phrase(t, "detroit") or raw_contains_phrase(t, "santa fe"):
+            add(t if "carhartt" in t else f"carhartt {t}")
+        elif raw_contains_phrase(t, "warner") or raw_contains_phrase(t, "looney") or raw_contains_phrase(t, "disney"):
+            add(f"{t} vintage")
+        elif raw_contains_phrase(t, "nba") or raw_contains_phrase(t, "nutmeg") or raw_contains_phrase(t, "nascar"):
+            add(f"{t} vintage")
+        elif raw_contains_phrase(t, "archive") or raw_contains_phrase(t, "designer"):
+            add(t)
+    for term in base.get("search_profile_terms", []) + base.get("brand_terms", []):
+        t = raw_normalize_text(term)
+        if not t:
+            continue
+        if raw_contains_any_phrase(t, ["single stitch", "made in usa", "screen stars", "hanes beefy", "fruit of the loom usa"]):
+            add(t)
+        elif raw_contains_any_phrase(t, ["harley", "daytona", "sturgis", "nascar", "warner bros", "looney tunes", "space jam", "nutmeg"]):
+            add(f"{t} vintage")
+        elif raw_contains_any_phrase(t, ["carhartt", "detroit", "santa fe", "polo sport", "designer archive", "archive graphic"]):
+            add(t)
+    print(f"[FRESH_DISCOVERY_POOL_BUILT] total={len(candidates)} "
+          f"from_existing_code={max(0, len(candidates) - len(manual_added))} "
+          f"from_manual_seed={len(manual_added)} "
+          f"rejected_too_generic={rejected_too_generic} rejected_negative={rejected_negative} "
+          f"examples={candidates[:10]}")
+    return candidates
+
+
+def build_target_markers_from_knowledge(base: dict) -> set[str]:
+    markers: set[str] = set()
+    negatives = _negative_discovery_terms()
+    for key in ("search_profile_terms", "raw_style_terms", "authenticity_terms", "motif_terms", "brand_terms", "manual_seed_terms"):
+        for term in base.get(key, []):
+            t = raw_normalize_text(term)
+            if len(t) >= 3 and t not in negatives and t not in WEAK_DISCOVERY_QUERY_WORDS:
+                markers.add(t)
+    print(f"[TARGET_MARKERS_BUILT] total={len(markers)} examples={sorted(markers)[:12]}")
+    return markers
+
+
+def make_fresh_discovery_search(query: str) -> dict:
+    encoded = quote_plus(query)
+    return {
+        "name": f"Fresh Discovery: {query}",
+        "url": f"https://www.vinted.pl/catalog?search_text={encoded}&catalog[]=4&order=newest_first&currency=PLN&price_to=450",
+        "category": "clothing",
+        "keywords": query.split(),
+        "exclude_keywords": ["dziec", "kids", "baby", "junior"],
+        "min_price": 1,
+        "layer": "fresh_discovery",
+        "hidden_gem_mode": True,
+        "fresh_discovery": True,
+        "core_search": True,
+        "no_median": True,
+    }
+
+
+def _fresh_discovery_load_index() -> int:
+    try:
+        with open(FRESH_DISCOVERY_STATE_FILE, "r", encoding="utf-8") as fh:
+            return int((json.load(fh) or {}).get("index", 0))
+    except Exception:
+        return 0
+
+
+def _fresh_discovery_save_index(index: int):
+    try:
+        os.makedirs(os.path.dirname(FRESH_DISCOVERY_STATE_FILE), exist_ok=True)
+        tmp = FRESH_DISCOVERY_STATE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"index": int(index), "updated_ts": time.time()}, fh)
+        os.replace(tmp, FRESH_DISCOVERY_STATE_FILE)
+    except Exception as e:
+        print(f"[FRESH_DISCOVERY_STATE_ERROR] error={e}")
+
+
+def select_fresh_discovery_queries() -> list[str]:
+    if not FRESH_DISCOVERY_ENABLED or not FRESH_DISCOVERY_QUERY_POOL:
+        return []
+    count = min(FRESH_DISCOVERY_PER_CYCLE, len(FRESH_DISCOVERY_QUERY_POOL))
+    if count <= 0:
+        return []
+    index_before = _fresh_discovery_load_index() % len(FRESH_DISCOVERY_QUERY_POOL)
+    selected = [
+        FRESH_DISCOVERY_QUERY_POOL[(index_before + offset) % len(FRESH_DISCOVERY_QUERY_POOL)]
+        for offset in range(count)
+    ]
+    index_after = (index_before + count) % len(FRESH_DISCOVERY_QUERY_POOL)
+    _fresh_discovery_save_index(index_after)
+    print(f"[FRESH_DISCOVERY_ROTATION] pool_total={len(FRESH_DISCOVERY_QUERY_POOL)} "
+          f"index_before={index_before} selected={selected} index_after={index_after}")
+    return selected
+
+
+def reset_fresh_discovery_cycle():
+    FRESH_DISCOVERY_STATS.update({
+        "enabled": FRESH_DISCOVERY_ENABLED,
+        "pool_total": len(FRESH_DISCOVERY_QUERY_POOL),
+        "queries_run": 0,
+        "seen": 0,
+        "candidates": 0,
+        "sent": 0,
+        "blocked": 0,
+        "top_block_reasons": {},
+    })
+    TARGET_AUDIT_STATS.update({
+        "target_seen": 0,
+        "target_candidates": 0,
+        "target_sent": 0,
+        "target_blocked": 0,
+        "seen_logs": 0,
+        "blocked_logs": 0,
+        "top_target_block_reasons": {},
+    })
+
+
+def _target_marker_hits(item: dict, result: dict | None = None) -> list[str]:
+    if not TARGET_MARKERS:
+        return []
+    result = result or {}
+    text = " ".join(str(x or "") for x in (
+        item.get("title"), item.get("brand"), item.get("description"),
+        item.get("category"), result.get("category"), result.get("brand"),
+        result.get("brand_detected"),
+    ))
+    hits = [marker for marker in sorted(TARGET_MARKERS) if raw_contains_phrase(text, marker)]
+    return hits[:8]
+
+
+def _target_audit_event(event: dict):
+    markers = event.get("matched_markers") or []
+    if not markers:
+        return
+    stage = event.get("stage")
+    query = event.get("query")
+    title = str(event.get("title") or "")[:70]
+    if stage == "seen":
+        TARGET_AUDIT_STATS["target_seen"] += 1
+        if TARGET_AUDIT_STATS["seen_logs"] < 20:
+            TARGET_AUDIT_STATS["seen_logs"] += 1
+            print(f"[TARGET_SEEN] query={query} title={title} brand={event.get('brand')} "
+                  f"price={event.get('price')} size={event.get('size')} "
+                  f"age_source={event.get('age_source')} age_min={event.get('age')} "
+                  f"matched_markers={markers[:5]}")
+    elif stage == "candidate":
+        TARGET_AUDIT_STATS["target_candidates"] += 1
+    elif stage == "sent":
+        TARGET_AUDIT_STATS["target_sent"] += 1
+        print(f"[TARGET_SENT] query={query} title={title} source={event.get('alert_type') or event.get('engine')} "
+              f"score={event.get('score')} matched_markers={markers[:5]}")
+    elif stage in ("blocked", "quality_block", "final_skip", "rank_not_selected", "dedupe_skip"):
+        TARGET_AUDIT_STATS["target_blocked"] += 1
+        reason = event.get("block_reason") or stage
+        reasons = TARGET_AUDIT_STATS["top_target_block_reasons"]
+        reasons[reason] = reasons.get(reason, 0) + 1
+        if TARGET_AUDIT_STATS["blocked_logs"] < 15:
+            TARGET_AUDIT_STATS["blocked_logs"] += 1
+            print(f"[TARGET_BLOCKED] query={query} title={title} score={event.get('score')} "
+                  f"reason={reason} matched_markers={markers[:5]}")
+
+
+def _fresh_discovery_audit_event(event: dict):
+    if not str(event.get("query") or "").startswith("Fresh Discovery:"):
+        return
+    stage = event.get("stage")
+    if stage == "seen":
+        FRESH_DISCOVERY_STATS["seen"] += 1
+    elif stage == "candidate":
+        FRESH_DISCOVERY_STATS["candidates"] += 1
+    elif stage == "sent":
+        FRESH_DISCOVERY_STATS["sent"] += 1
+    elif stage in ("blocked", "quality_block", "final_skip", "rank_not_selected", "dedupe_skip"):
+        FRESH_DISCOVERY_STATS["blocked"] += 1
+        reason = event.get("block_reason") or stage
+        reasons = FRESH_DISCOVERY_STATS["top_block_reasons"]
+        reasons[reason] = reasons.get(reason, 0) + 1
+
+
+def print_fresh_discovery_summary():
+    print(f"[FRESH_DISCOVERY_SUMMARY] enabled={FRESH_DISCOVERY_STATS['enabled']} "
+          f"pool_total={FRESH_DISCOVERY_STATS['pool_total']} queries_run={FRESH_DISCOVERY_STATS['queries_run']} "
+          f"seen={FRESH_DISCOVERY_STATS['seen']} candidates={FRESH_DISCOVERY_STATS['candidates']} "
+          f"sent={FRESH_DISCOVERY_STATS['sent']} blocked={FRESH_DISCOVERY_STATS['blocked']} "
+          f"top_block_reasons={FRESH_DISCOVERY_STATS['top_block_reasons']}")
+    print(f"[TARGET_AUDIT_SUMMARY] target_seen={TARGET_AUDIT_STATS['target_seen']} "
+          f"target_candidates={TARGET_AUDIT_STATS['target_candidates']} "
+          f"target_sent={TARGET_AUDIT_STATS['target_sent']} "
+          f"target_blocked={TARGET_AUDIT_STATS['target_blocked']} "
+          f"top_target_block_reasons={TARGET_AUDIT_STATS['top_target_block_reasons']}")
 
 
 def _raw_item_age(item: dict) -> int:
@@ -3020,6 +3447,11 @@ def audit_candidate(stage: str, item: dict, search: dict | None = None, result: 
         "alert_type": alert_type,
         "dedupe_key": dedupe_key,
     }
+    _fresh_discovery_audit_event(event)
+    markers = _target_marker_hits(item, result)
+    if markers:
+        event["matched_markers"] = markers
+        _target_audit_event(event)
     write_candidate_audit(event)
 
 
@@ -3163,6 +3595,20 @@ def compute_raw_style_score(item: dict) -> dict:
 
     eligible = False
     validated_real_count = len(validated_real_signal_reasons(item, bucket=bucket))
+    collectible_watch = bool(
+        price > RAW_STYLE_SNIPER_MAX_PRICE
+        and raw_style_real_signal
+        and (
+            validated_real_count >= 4
+            or (
+                buckets.intersection({"old_blank", "pop_culture", "sports", "workwear", "metal", "biker"})
+                and (raw_contains_any_phrase(text, RAW_STYLE_ERA_SIGNALS)
+                     or raw_contains_any_phrase(text, ["single stitch", "made in usa", "screen stars", "nutmeg", "licensed", "official"]))
+            )
+        )
+    )
+    if block_reason == "price_above_raw_style_max" and collectible_watch:
+        block_reason = "price_high_but_collectible_watch"
     if not block_reason and RAW_STYLE_SNIPER_ENABLED:
         if age_info.get("usable_for_freshness"):
             eligible = bool(
@@ -3193,6 +3639,7 @@ def compute_raw_style_score(item: dict) -> dict:
         "age_source": age_info.get("source"),
         "freshness_scored": freshness_scored,
         "validated_real_signals": validated_real_count,
+        "collector_watch_candidate": collectible_watch,
         "eligible": eligible,
     }
 
@@ -3285,6 +3732,26 @@ def collect_raw_style_candidate(item: dict, search: dict | None = None):
     if not profile["eligible"]:
         RAW_STYLE_STATS["blocked"] += 1
         record_raw_style_block(profile.get("raw_style_block_reason"), profile.get("raw_style_score"), item.get("title"))
+        if profile.get("collector_watch_candidate"):
+            watch_result = dict(profile)
+            watch_result.update({
+                "engine": "WATCH",
+                "item": item,
+                "watch_candidate": True,
+                "collector_watch_candidate": True,
+                "_quality_block_reason": "price_high_but_collectible_watch",
+            })
+            print(f"[COLLECTOR_WATCH_CANDIDATE] reason=price_high_but_collectible_watch "
+                  f"score={profile.get('raw_style_score'):.0f} bucket={profile.get('raw_style_bucket')} "
+                  f"price={float(item.get('price') or 0):.0f} signals={profile.get('raw_style_signals', [])[:5]} "
+                  f"title={str(item.get('title') or '')[:60]}")
+            audit_candidate(
+                "candidate", item, search, watch_result,
+                alert_type="WATCH",
+                score=profile.get("raw_style_score"),
+                bucket=profile.get("raw_style_bucket"),
+                signals=profile.get("raw_style_signals"),
+            )
         raw_block_msg = (f"[RAW_STYLE_BLOCK] reason={profile['raw_style_block_reason']} "
                          f"score={profile['raw_style_score']:.0f} signals={profile['raw_style_signals'][:5]} "
                          f"title={str(item.get('title') or '')[:60]}")
@@ -5773,6 +6240,10 @@ def format_message(search, item):
 # ─────────────────────────────────────────
 #  🚀 GŁÓWNA PĘTLA
 # ─────────────────────────────────────────
+BOT_POSITIVE_KNOWLEDGE_BASE = build_bot_positive_knowledge_base()
+FRESH_DISCOVERY_QUERY_POOL = build_fresh_discovery_queries_from_knowledge(BOT_POSITIVE_KNOWLEDGE_BASE)
+TARGET_MARKERS = build_target_markers_from_knowledge(BOT_POSITIVE_KNOWLEDGE_BASE)
+
 print("✅ BOT HIDDEN GEM FINDER URUCHOMIONY")
 
 load_bricklink_cache()
@@ -5864,6 +6335,7 @@ while True:
         print(f"\n🔄 Cykl #{cycle}")
         reset_raw_style_cycle()
         reset_candidate_audit_cycle(cycle)
+        reset_fresh_discovery_cycle()
 
         # Req 8 — session refresh (only when needed, not every cycle)
         _maybe_refresh_session()
@@ -5935,6 +6407,22 @@ while True:
                     existing_search_names.add(taste_search["name"])
                     print(f"  [TASTE_DISCOVERY_QUERY] query={taste_query} reason=manual_taste_pool")
 
+        fresh_queries = select_fresh_discovery_queries()
+        if fresh_queries:
+            existing_search_names = {s.get("name") for s in this_cycle_searches}
+            for fresh_query in fresh_queries:
+                fresh_search = make_fresh_discovery_search(fresh_query)
+                if fresh_search["name"] in existing_search_names:
+                    continue
+                this_cycle_searches.append(fresh_search)
+                existing_search_names.add(fresh_search["name"])
+                print(f"[FRESH_DISCOVERY_QUERY] query={fresh_query} reason=knowledge_rotation")
+
+        print(f"[SEARCH_PLAN] "
+              f"core={[s.get('name') for s in this_cycle_searches if is_core_search(s)][:6]} "
+              f"taste={[s.get('name') for s in this_cycle_searches if s.get('taste_discovery')][:6]} "
+              f"fresh={[s.get('name') for s in this_cycle_searches if s.get('fresh_discovery')]}")
+
         print(f"  [CYCLE] search_count={len(this_cycle_searches)} "
               f"(target={n_searches})")
 
@@ -5986,6 +6474,11 @@ while True:
             # Req 6 — 10% chance: first page only (early stop within search)
             items_to_take = MAX_ALERTS_PER_SEARCH if core_search else (1 if random.random() < 0.10 else MAX_ALERTS_PER_SEARCH)
             qcov["candidates_created"] += min(len(new_items), items_to_take)
+            if search.get("fresh_discovery"):
+                FRESH_DISCOVERY_STATS["queries_run"] += 1
+                print(f"[FRESH_DISCOVERY_RESULT] query={search.get('name')} "
+                      f"seen={qcov.get('items_seen', 0)} candidates={qcov.get('candidates_created', 0)} "
+                      f"blocked={qcov.get('blocked_count', 0)}")
             for item in new_items[:items_to_take]:
                 item["_search_meta"] = {
                     "football_mode":  search.get("football_mode"),
@@ -6237,6 +6730,7 @@ while True:
 
         print_raw_style_summary()
         print_candidate_audit_summary()
+        print_fresh_discovery_summary()
         print_query_coverage_summary()
         print(f"  📊 Cykl #{cycle} zakończony — wysłano: {sent_this_cycle} alertów [CHAOS+BRAND+GRAIL+RAW_STYLE]")
 
