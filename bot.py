@@ -77,11 +77,19 @@ CANDIDATE_AUDIT_TELEGRAM_SUMMARY = os.getenv("CANDIDATE_AUDIT_TELEGRAM_SUMMARY",
 AUDIT_WATCH_TITLES = os.getenv("AUDIT_WATCH_TITLES", "")
 FRESH_DISCOVERY_ENABLED = os.getenv("FRESH_DISCOVERY_ENABLED", "1") == "1"
 FRESH_DISCOVERY_PER_CYCLE = max(0, int(os.getenv("FRESH_DISCOVERY_PER_CYCLE", "1")))
+TARGET_RESCUE_ENABLED = os.getenv("TARGET_RESCUE_ENABLED", "1") == "1"
+TARGET_RESCUE_MIN_STRONG_SIGNALS = int(os.getenv("TARGET_RESCUE_MIN_STRONG_SIGNALS", "3"))
+TARGET_RESCUE_MIN_VALIDATED_SIGNALS = int(os.getenv("TARGET_RESCUE_MIN_VALIDATED_SIGNALS", "4"))
 
 if DETAIL_AGE_VERIFY_ENABLED:
     print("[DETAIL_AGE_VERIFY_ENABLED]")
 else:
     print("[DETAIL_AGE_VERIFY_DISABLED]")
+if TARGET_RESCUE_ENABLED:
+    print(f"[TARGET_RESCUE_ENABLED] min_strong_signals={TARGET_RESCUE_MIN_STRONG_SIGNALS} "
+          f"min_validated_signals={TARGET_RESCUE_MIN_VALIDATED_SIGNALS}")
+else:
+    print("[TARGET_RESCUE_DISABLED]")
 
 # ─────────────────────────────────────────
 #  ⚡ SNIPER MODE
@@ -2206,6 +2214,16 @@ TARGET_AUDIT_STATS = {
     "blocked_logs": 0,
     "top_target_block_reasons": {},
 }
+TARGET_RESCUE_STATS = {
+    "seen": 0,
+    "eligible": 0,
+    "rescued": 0,
+    "sent": 0,
+    "final_blocked": 0,
+    "denied_hard_block": 0,
+    "top_rescue_reasons": {},
+    "top_final_block_reasons": {},
+}
 VERBOSE_LOG_STATS = {
     "printed": 0,
     "suppressed": {
@@ -2637,6 +2655,16 @@ def reset_fresh_discovery_cycle():
         "blocked_logs": 0,
         "top_target_block_reasons": {},
     })
+    TARGET_RESCUE_STATS.update({
+        "seen": 0,
+        "eligible": 0,
+        "rescued": 0,
+        "sent": 0,
+        "final_blocked": 0,
+        "denied_hard_block": 0,
+        "top_rescue_reasons": {},
+        "top_final_block_reasons": {},
+    })
 
 
 def _target_marker_hits(item: dict, result: dict | None = None) -> list[str]:
@@ -2701,6 +2729,219 @@ def _fresh_discovery_audit_event(event: dict):
         reasons[reason] = reasons.get(reason, 0) + 1
 
 
+TARGET_RESCUE_SOFT_REASONS = (
+    "below_raw_style_threshold",
+    "normal_qualifier_false",
+    "no_real_style_signal",
+    "price_above_raw_style_max",
+    "price_high_but_collectible_watch",
+    "no_pattern_low_desirability",
+)
+TARGET_RESCUE_SOFT_PREFIXES = (
+    "profile_filter:no_keyword",
+    "item_score_below_min",
+)
+TARGET_RESCUE_STRONG_FRESH_QUERIES = [
+    "single stitch vintage", "made in usa vintage", "disney cruise line",
+    "nasa vintage", "nutmeg vintage", "vintage nba nutmeg",
+    "screen stars vintage", "hanes beefy", "warner bros vintage",
+    "tour tee vintage", "band tee vintage", "harley davidson vintage",
+    "carhartt detroit", "carhartt santa fe",
+]
+TARGET_RESCUE_AUTH_SIGNALS = [
+    "single stitch", "made in usa", "made in u.s.a", "usa made",
+    "licensed", "official licensed", "copyright", "deadstock", "nos",
+    "screen stars", "hanes beefy", "hanes heavyweight", "fruit of the loom usa",
+    "fruit of the loom made in usa", "jerzees vintage", "russell athletic vintage",
+    "velva sheen", "nutmeg", "nutmeg mills", "salem sportswear", "giant",
+    "winterland", "brockum", "changes", "anvil", "delta pro weight",
+    "stedman", "tultex", "alstyle",
+]
+
+
+def _target_rescue_stat_dict(name: str) -> dict:
+    return TARGET_RESCUE_STATS.setdefault(name, {})
+
+
+def _target_rescue_bump_dict(name: str, key: str):
+    data = _target_rescue_stat_dict(name)
+    key = key or "unknown"
+    data[key] = data.get(key, 0) + 1
+
+
+def _target_rescue_year_signals(text: str) -> list[str]:
+    signals = []
+    for match in re.findall(r"\b(19[8-9][0-9]|200[0-9])\b", text):
+        signals.append(f"year:{match}")
+    for era in ("80s", "90s", "00s"):
+        if raw_contains_phrase(text, era):
+            signals.append(f"era:{era}")
+    if raw_contains_phrase(text, "y2k") and raw_contains_any_phrase(text, [
+        "licensed", "official", "single stitch", "made in usa", "screen stars",
+        "warner", "disney", "space jam", "nutmeg", "tour", "band", "harley",
+    ]):
+        signals.append("era:y2k_context")
+    return signals
+
+
+def get_strong_target_signals(item, result=None) -> list[str]:
+    item = item or {}
+    result = result or {}
+    text = raw_normalize_text(" ".join(str(x or "") for x in (
+        item.get("title"), item.get("brand"), item.get("description"),
+        item.get("category"), result.get("brand"), result.get("category"),
+        " ".join(result.get("raw_style_signals") or []),
+        " ".join(result.get("desirable_signals") or []),
+        " ".join(result.get("taste_signals") or []),
+    )))
+    signals: list[str] = []
+
+    def add(label: str):
+        if label and label not in signals:
+            signals.append(label)
+
+    for phrase in TARGET_RESCUE_AUTH_SIGNALS:
+        if raw_contains_phrase(text, phrase):
+            add(phrase)
+    for label in _target_rescue_year_signals(text):
+        add(label)
+
+    collector_terms = [
+        "disney cruise", "cruise line", "mickey", "donald", "goofy",
+        "warner bros", "looney tunes", "bugs bunny", "taz", "space jam",
+        "cartoon network", "nickelodeon", "star wars", "marvel",
+        "spiderman", "nasa", "space", "kennedy space center",
+        "orlando magic", "chicago bulls", "nascar", "racing",
+        "jeff hamilton", "starter", "majestic vintage",
+        "band tee", "tour tee", "rap tee", "metal tee", "metal longsleeve",
+        "hardcore", "punk", "concert", "festival", "ramones", "metallica",
+        "ac dc", "nirvana", "slayer", "iron maiden",
+        "daytona bike week", "sturgis", "biker", "motorcycle",
+        "carhartt detroit", "carhartt santa fe", "workwear vintage",
+        "stussy vintage", "ed hardy vintage", "affliction vintage",
+        "archive graphic", "designer archive", "ralph lauren vintage knit",
+        "polo sport vintage",
+    ]
+    for phrase in collector_terms:
+        if raw_contains_phrase(text, phrase):
+            add(phrase)
+
+    if raw_contains_phrase(text, "disney") and raw_contains_any_phrase(text, ["vintage", "licensed", "official", "90s", "00s", "cruise"]):
+        add("disney_context")
+    if raw_contains_phrase(text, "nba") and raw_contains_any_phrase(text, ["nutmeg", "starter", "orlando magic", "chicago bulls", "year", "90s"]):
+        add("nba_team_context")
+    if raw_contains_any_phrase(text, ["mlb", "nfl", "nhl"]) and raw_contains_any_phrase(text, ["vintage", "nutmeg", "starter", "licensed", "official", "90s"]):
+        add("league_vintage_context")
+    if raw_contains_phrase(text, "harley davidson") and raw_contains_any_phrase(text, ["daytona", "sturgis", "bike week", "skull", "flame", "eagle", "back print", "made in usa"]):
+        add("harley_strong_context")
+    return signals
+
+
+def _target_rescue_is_soft_reason(block_reason: str | None) -> bool:
+    reason = str(block_reason or "")
+    return reason in TARGET_RESCUE_SOFT_REASONS or any(reason.startswith(prefix) for prefix in TARGET_RESCUE_SOFT_PREFIXES)
+
+
+def _target_rescue_hard_reason(item: dict, result: dict | None, block_reason: str | None, strong_signals: list[str]) -> str | None:
+    text = _raw_presend_text(item or {})
+    reason = str(block_reason or "")
+    hard_reasons = [
+        "non_clothing", "wrong_type", "kids_presend_block", "fast_fashion",
+        "fake_inspired_unofficial", "duplicate_before_send", "already_sent",
+        "missing_price", "missing_id_or_url", "blocked_brand", "global_exclude",
+        "trash_keyword", "price_below_global_min",
+    ]
+    if any(reason == hard or reason.startswith(hard + ":") for hard in hard_reasons):
+        return reason
+    if raw_contains_any_phrase(text, KIDS_TERMS):
+        return "kids_presend_block"
+    if raw_contains_any_phrase(text, HARD_FITTED_TOP_TERMS) or (
+        raw_contains_any_phrase(text, WOMEN_FIT_TERMS)
+        and not raw_contains_any_phrase(text, MENS_UNISEX_TERMS + OVERSIZE_TERMS)
+    ):
+        return "women_or_fitted_presend_block"
+    if raw_contains_any_phrase(text, list(RAW_STYLE_FAST_FASHION)) and len(strong_signals) < 4:
+        return "fast_fashion_no_archive_signal"
+    if raw_contains_any_phrase(text, ["fake", "reprint", "bootleg", "replica"]) and not raw_contains_any_phrase(text, ["licensed", "official", "copyright", "tour"]):
+        return "fake_reprint_presend_block"
+    if raw_contains_any_phrase(text, RAW_STYLE_BASIC_TERMS) and len(strong_signals) < 3:
+        return "basic_blank_no_context"
+    if raw_contains_any_phrase(text, ["sukienka", "spodnica", "spódnica", "bluzka", "crop top", "tank top"]):
+        return "women_basic_type_block"
+    if float((item or {}).get("price") or 0) <= 0:
+        return "missing_price"
+    return None
+
+
+def _target_rescue_collector_combo(item: dict, result: dict | None, strong_signals: list[str]) -> str | None:
+    text = _raw_presend_text(item or {})
+    has_auth = raw_contains_any_phrase(text, TARGET_RESCUE_AUTH_SIGNALS) or bool(_target_rescue_year_signals(text))
+    if raw_contains_phrase(text, "nutmeg") and raw_contains_any_phrase(text, ["nba", "orlando magic", "chicago bulls", "mlb", "nfl", "team", "199"]):
+        return "collector_combo:nutmeg_sports"
+    if raw_contains_any_phrase(text, ["disney", "mickey", "donald", "goofy", "disney cruise", "cruise line"]) and has_auth:
+        return "collector_combo:disney_vintage"
+    if raw_contains_any_phrase(text, ["nasa", "space", "kennedy space center"]) and has_auth:
+        return "collector_combo:nasa_space"
+    if raw_contains_any_phrase(text, ["warner bros", "looney tunes", "space jam", "taz", "bugs bunny"]) and has_auth:
+        return "collector_combo:warner_looney"
+    if raw_contains_any_phrase(text, ["band tee", "tour tee", "metal tee", "metal longsleeve", "concert", "festival"]) and has_auth:
+        return "collector_combo:music_event"
+    if raw_contains_phrase(text, "harley") and raw_contains_any_phrase(text, ["daytona", "sturgis", "bike week", "skull", "flame", "eagle", "back print", "made in usa"]):
+        return "collector_combo:harley_event"
+    if raw_contains_any_phrase(text, ["carhartt detroit", "carhartt santa fe"]) and raw_contains_any_phrase(text, ["workwear", "vintage", "duck", "blanket", "made in usa"]):
+        return "collector_combo:carhartt_workwear"
+    if raw_contains_any_phrase(text, ["designer archive", "archive graphic", "polo sport vintage", "ralph lauren vintage knit"]) and (
+        has_auth or raw_contains_any_phrase(text, ["wool", "leather", "silk", "mohair", "cashmere", "made in italy"])
+    ):
+        return "collector_combo:archive_designer"
+    return None
+
+
+def should_rescue_target_candidate(item, result, block_reason) -> tuple[bool, list[str], str]:
+    if not TARGET_RESCUE_ENABLED:
+        return False, [], "disabled"
+    item = item or {}
+    result = result or {}
+    markers = _target_marker_hits(item, result)
+    if not markers:
+        return False, [], "no_target_marker"
+    TARGET_RESCUE_STATS["seen"] += 1
+    if not _target_rescue_is_soft_reason(block_reason):
+        return False, [], "not_soft_block"
+    strong_signals = get_strong_target_signals(item, result)
+    hard_reason = _target_rescue_hard_reason(item, result, block_reason, strong_signals)
+    if hard_reason:
+        TARGET_RESCUE_STATS["denied_hard_block"] += 1
+        print(f"[TARGET_RESCUE_DENIED] reason=hard_block hard_reason={hard_reason} "
+              f"title={str(item.get('title') or '')[:70]}")
+        return False, strong_signals, f"hard_block:{hard_reason}"
+    validated_count = int(
+        result.get("validated_real_signals")
+        or result.get("_raw_style_validated_signals")
+        or len(validated_real_signal_reasons(item, result, result.get("raw_style_bucket")))
+    )
+    has_auth_signal = raw_contains_any_phrase(" ".join(strong_signals), TARGET_RESCUE_AUTH_SIGNALS) or any(sig.startswith(("year:", "era:")) for sig in strong_signals)
+    combo_reason = _target_rescue_collector_combo(item, result, strong_signals)
+    query = str((item.get("_search_meta") or {}).get("name") or "")
+    query_text = query.replace("Fresh Discovery:", "").strip().lower()
+    strong_query_context = query.startswith("Fresh Discovery:") and any(raw_contains_phrase(query_text, q) for q in TARGET_RESCUE_STRONG_FRESH_QUERIES)
+    rescue_reason = None
+    if validated_count >= TARGET_RESCUE_MIN_VALIDATED_SIGNALS:
+        rescue_reason = "validated_real_signal_floor"
+    elif len(strong_signals) >= TARGET_RESCUE_MIN_STRONG_SIGNALS and has_auth_signal:
+        rescue_reason = "strong_target_auth_combo"
+    elif combo_reason:
+        rescue_reason = combo_reason
+    elif strong_query_context and len(strong_signals) >= TARGET_RESCUE_MIN_STRONG_SIGNALS:
+        rescue_reason = "fresh_discovery_strong_query_context"
+    if not rescue_reason:
+        return False, strong_signals, "not_enough_strong_target_signal"
+    TARGET_RESCUE_STATS["eligible"] += 1
+    TARGET_RESCUE_STATS["rescued"] += 1
+    _target_rescue_bump_dict("top_rescue_reasons", rescue_reason)
+    return True, strong_signals, rescue_reason
+
+
 def print_fresh_discovery_summary():
     print(f"[FRESH_DISCOVERY_SUMMARY] enabled={FRESH_DISCOVERY_STATS['enabled']} "
           f"pool_total={FRESH_DISCOVERY_STATS['pool_total']} queries_run={FRESH_DISCOVERY_STATS['queries_run']} "
@@ -2712,6 +2953,12 @@ def print_fresh_discovery_summary():
           f"target_sent={TARGET_AUDIT_STATS['target_sent']} "
           f"target_blocked={TARGET_AUDIT_STATS['target_blocked']} "
           f"top_target_block_reasons={TARGET_AUDIT_STATS['top_target_block_reasons']}")
+    print(f"[TARGET_RESCUE_SUMMARY] seen={TARGET_RESCUE_STATS['seen']} "
+          f"eligible={TARGET_RESCUE_STATS['eligible']} rescued={TARGET_RESCUE_STATS['rescued']} "
+          f"sent={TARGET_RESCUE_STATS['sent']} final_blocked={TARGET_RESCUE_STATS['final_blocked']} "
+          f"denied_hard_block={TARGET_RESCUE_STATS['denied_hard_block']} "
+          f"top_rescue_reasons={TARGET_RESCUE_STATS['top_rescue_reasons']} "
+          f"top_final_block_reasons={TARGET_RESCUE_STATS['top_final_block_reasons']}")
 
 
 def _raw_item_age(item: dict) -> int:
@@ -3123,6 +3370,11 @@ def _log_weak_descriptors_ignored(text: str, title: str):
 def _presend_block(result: dict, source: str, reason: str) -> tuple[bool, str]:
     result["_presend_block_reason"] = reason
     _presend_bump(source, False, reason)
+    if result.get("_target_rescue"):
+        TARGET_RESCUE_STATS["final_blocked"] += 1
+        _target_rescue_bump_dict("top_final_block_reasons", reason)
+        print(f"[PRESEND_TARGET_RESCUE_BLOCK] title={str((result.get('item') or {}).get('title') or '')[:70]} "
+              f"reason={reason} signals={(result.get('_target_rescue_signals') or [])[:6]}")
     return False, reason
 
 
@@ -3169,6 +3421,15 @@ def telegram_presend_gate(item, result=None, source="MAIN") -> tuple[bool, str]:
             or float(result.get("signal_quality_score") or 0) >= 85
             or score >= 95
         )
+    )
+    target_rescue_signals = result.get("_target_rescue_signals") or []
+    if result.get("_target_rescue") and not target_rescue_signals:
+        target_rescue_signals = get_strong_target_signals(item, result)
+        result["_target_rescue_signals"] = target_rescue_signals
+    target_rescue_presend_ok = bool(
+        result.get("_target_rescue")
+        and len(target_rescue_signals) >= TARGET_RESCUE_MIN_STRONG_SIGNALS
+        and price > 0
     )
 
     if not age_info.get("usable_for_freshness"):
@@ -3261,15 +3522,15 @@ def telegram_presend_gate(item, result=None, source="MAIN") -> tuple[bool, str]:
     if source == "SAFEGUARD" and SAFEGUARD_STRICT_PRESEND_ENABLED and validated < 3 and not strong_grail:
         return _presend_block(result, source, "safeguard_relaxed_not_enough_signal")
 
-    if visible_age is None and result.get("_visible_age_source") == "synthetic_rank" and validated < 3 and not strong_grail:
+    if visible_age is None and result.get("_visible_age_source") == "synthetic_rank" and validated < 3 and not strong_grail and not target_rescue_presend_ok:
         AGE_GATE_STATS["blocked_unknown_age"] += 1
         return _presend_block(result, source, "synthetic_age_not_enough_real_signals")
 
-    if price < 25 and validated < 3 and not strong_grail:
+    if price < 25 and validated < 3 and not strong_grail and not target_rescue_presend_ok:
         return _presend_block(result, source, "cheap_trash_presend_block")
-    if effective_price <= 5 and bucket in ("old_blank", "pop_culture", "sports") and validated < 3 and not strong_grail:
+    if effective_price <= 5 and bucket in ("old_blank", "pop_culture", "sports") and validated < 3 and not strong_grail and not target_rescue_presend_ok:
         return _presend_block(result, source, "cheap_trash_presend_block")
-    if source in {"RAW_STYLE", "STYLE_WATCH", "SAFEGUARD"} and validated < 2 and not strong_grail:
+    if source in {"RAW_STYLE", "STYLE_WATCH", "SAFEGUARD"} and validated < 2 and not strong_grail and not target_rescue_presend_ok:
         return _presend_block(result, source, "not_enough_validated_signals_presend")
 
     if (bucket == "old_blank" or _old_blank_tag_hit(text)) and not strong_grail:
@@ -3280,30 +3541,34 @@ def telegram_presend_gate(item, result=None, source="MAIN") -> tuple[bool, str]:
             and not raw_contains_any_phrase(text, RAW_STYLE_CONTEXT_TERMS)
         )
         no_context = len(real_context_reasons) < 2 or not raw_contains_any_phrase(text, RAW_STYLE_CONTEXT_TERMS)
-        if basic:
+        if basic and not target_rescue_presend_ok:
             AGE_GATE_STATS["blocked_old_blank_no_context"] += 1
             return _presend_block(result, source, "old_blank_no_context_presend_block")
-        if no_context:
+        if no_context and not target_rescue_presend_ok:
             AGE_GATE_STATS["blocked_old_blank_no_context"] += 1
             return _presend_block(result, source, "old_blank_no_context_presend_block")
 
     if source in {"RAW_STYLE", "STYLE_WATCH"} and bucket == "pop_culture":
-        if validated < 2 or not raw_contains_any_phrase(text, RAW_STYLE_POP_VALIDATION_TERMS):
+        if (validated < 2 or not raw_contains_any_phrase(text, RAW_STYLE_POP_VALIDATION_TERMS)) and not target_rescue_presend_ok:
             return _presend_block(result, source, "pop_culture_not_validated_presend")
 
     if source in {"RAW_STYLE", "STYLE_WATCH"} and bucket == "sports":
         has_context = raw_contains_any_phrase(text, RAW_STYLE_CONTEXT_TERMS)
         good_item_type = raw_contains_any_phrase(text, RAW_STYLE_SPORTS_ITEM_TERMS)
         generic_sport = raw_contains_any_phrase(text, ["sportowy t-shirt", "damski t-shirt", "women jersey", "v neck", "v-neck", "small logo"])
-        if not has_context or not good_item_type or generic_sport or validated < 2:
+        if (not has_context or not good_item_type or generic_sport or validated < 2) and not target_rescue_presend_ok:
             return _presend_block(result, source, "sports_not_validated_presend")
 
     if source in {"RAW_STYLE", "STYLE_WATCH"} and bucket == "visual":
         generic_only = raw_contains_any_phrase(text, RAW_STYLE_GENERIC_VISUAL_TERMS) and not raw_contains_any_phrase(text, RAW_STYLE_VISUAL_CONTEXT_TERMS)
-        if generic_only or validated < 2:
+        if (generic_only or validated < 2) and not target_rescue_presend_ok:
             return _presend_block(result, source, "visual_too_generic_presend")
 
     _presend_bump(source, True)
+    if result.get("_target_rescue"):
+        print(f"[PRESEND_TARGET_RESCUE_PASS] title={title[:70]} "
+              f"signals={target_rescue_signals[:6]} reason=target_rescue_strong_signals")
+        return True, "target_rescue_strong_signals"
     return True, "pass"
 
 
@@ -3752,6 +4017,67 @@ def collect_raw_style_candidate(item: dict, search: dict | None = None):
                 bucket=profile.get("raw_style_bucket"),
                 signals=profile.get("raw_style_signals"),
             )
+        rescue_ok, rescue_signals, rescue_reason = should_rescue_target_candidate(
+            item, profile, profile.get("raw_style_block_reason")
+        )
+        if rescue_ok:
+            key = get_item_dedupe_key(item)
+            if already_sent(key):
+                RAW_STYLE_STATS["dedupe_skipped"] += 1
+                print(f"[RAW_STYLE_DEDUPE_SKIP] key={key} title={str(item.get('title') or '')[:60]}")
+                audit_candidate(
+                    "dedupe_skip", item, search, profile,
+                    block_reason="already_sent",
+                    score=profile.get("raw_style_score"),
+                    bucket=profile.get("raw_style_bucket"),
+                    signals=profile.get("raw_style_signals"),
+                )
+                return
+            rescue_score = max(float(profile.get("raw_style_score") or 0), 65.0)
+            rescue_result = {
+                "engine": "RAW_STYLE",
+                "item": item,
+                "raw_style_score": rescue_score,
+                "raw_style_signals": profile.get("raw_style_signals") or [],
+                "raw_style_bucket": profile.get("raw_style_bucket") or "target",
+                "raw_style_real_signal": True,
+                "raw_style_real_signal_count": max(
+                    int(profile.get("raw_style_real_signal_count") or 0),
+                    len(rescue_signals),
+                ),
+                "effective_price": profile.get("effective_price"),
+                "age_min": profile.get("age_min"),
+                "age_source": profile.get("age_source"),
+                "final_score": rescue_score,
+                "tier": "TARGET_RESCUE",
+                "_target_rescue": True,
+                "_target_rescue_reason": rescue_reason,
+                "_target_rescue_signals": rescue_signals,
+                "_original_block_reason": profile.get("raw_style_block_reason"),
+            }
+            current = RAW_STYLE_CYCLE_CANDIDATES.get(key)
+            if not current or rescue_score > float(current.get("raw_style_score") or 0):
+                RAW_STYLE_CYCLE_CANDIDATES[key] = rescue_result
+                query_coverage_record(search.get("name"))["candidates_created"] += 1
+            RAW_STYLE_STATS["candidates"] = max(RAW_STYLE_STATS["candidates"], len(RAW_STYLE_CYCLE_CANDIDATES))
+            print(f"[TARGET_RESCUE_CANDIDATE] title={str(item.get('title') or '')[:70]} "
+                  f"source=RAW_STYLE query={search.get('name')} "
+                  f"original_block_reason={profile.get('raw_style_block_reason')} "
+                  f"strong_signals={rescue_signals[:6]} "
+                  f"validated_signals={profile.get('validated_real_signals')} "
+                  f"rescue_reason={rescue_reason}")
+            if profile.get("raw_style_block_reason") == "price_high_but_collectible_watch":
+                print(f"[COLLECTOR_WATCH_ROUTE] title={str(item.get('title') or '')[:70]} "
+                      f"price={float(item.get('price') or 0):.0f} signals={rescue_signals[:6]} "
+                      f"reason=price_high_but_collectible_watch")
+            audit_candidate(
+                "candidate", item, search, rescue_result,
+                alert_type="RAW_STYLE",
+                score=rescue_result.get("raw_style_score"),
+                bucket=rescue_result.get("raw_style_bucket"),
+                signals=rescue_signals,
+            )
+            return
         raw_block_msg = (f"[RAW_STYLE_BLOCK] reason={profile['raw_style_block_reason']} "
                          f"score={profile['raw_style_score']:.0f} signals={profile['raw_style_signals'][:5]} "
                          f"title={str(item.get('title') or '')[:60]}")
@@ -3898,6 +4224,10 @@ def send_raw_style_candidates(max_cycle_slots: int, sent_this_cycle: int) -> int
                 print(presend_block_msg)
             else:
                 suppress_verbose_log("raw_style_blocks")
+            if result.get("_target_rescue"):
+                print(f"[TARGET_RESCUE_FINAL_BLOCK] title={str(item.get('title') or '')[:70]} "
+                      f"reason={presend_reason} "
+                      f"strong_signals={(result.get('_target_rescue_signals') or [])[:6]}")
             audit_candidate("blocked", item, result=result, block_reason=presend_reason,
                             alert_type="RAW_STYLE", score=result.get("raw_style_score"),
                             bucket=result.get("raw_style_bucket"), signals=result.get("raw_style_signals"))
@@ -3920,6 +4250,11 @@ def send_raw_style_candidates(max_cycle_slots: int, sent_this_cycle: int) -> int
         query_coverage_record((item.get("_search_meta") or {}).get("name"))["alerts_sent"] += 1
         mark_sent(item, result, (item.get("_search_meta") or {}).get("name"))
         print(f"[RAW_STYLE_DEDUPE_MARK] key={key} title={str(item.get('title') or '')[:60]}")
+        if result.get("_target_rescue"):
+            TARGET_RESCUE_STATS["sent"] += 1
+            print(f"[TARGET_RESCUE_SENT] title={str(item.get('title') or '')[:70]} "
+                  f"source=RAW_STYLE score={result.get('raw_style_score', 0):.0f} "
+                  f"strong_signals={(result.get('_target_rescue_signals') or [])[:6]}")
         RAW_STYLE_CYCLE_CANDIDATES.pop(key, None)
         sent += 1
         RAW_STYLE_STATS["sent"] += 1
