@@ -2221,8 +2221,26 @@ TARGET_RESCUE_STATS = {
     "sent": 0,
     "final_blocked": 0,
     "denied_hard_block": 0,
+    "era_spam_denied": 0,
+    "no_anchor_signal_denied": 0,
+    "generic_biker_denied": 0,
     "top_rescue_reasons": {},
     "top_final_block_reasons": {},
+}
+KNOWLEDGE_EXPANSION_STATS = {
+    "designer_seen": 0,
+    "designer_candidates": 0,
+    "designer_sent": 0,
+    "studio_seen": 0,
+    "studio_candidates": 0,
+    "studio_sent": 0,
+    "military_seen": 0,
+    "military_candidates": 0,
+    "military_sent": 0,
+    "music_seen": 0,
+    "music_candidates": 0,
+    "music_sent": 0,
+    "top_block_reasons": {},
 }
 VERBOSE_LOG_STATS = {
     "printed": 0,
@@ -2371,6 +2389,122 @@ CURATED_FRESH_DISCOVERY_SEED = [
     "polo sport vintage",
 ]
 
+EXCLUDED_POSITIVE_BRANDS = [
+    "stone island", "cp company", "c.p. company", "arc'teryx", "arcteryx",
+    "belstaff", "wu-tang", "wu tang", "tupac", "2pac", "snoop dogg",
+    "dr dre", "dr. dre",
+]
+
+DESIGNER_ARCHIVE_TARGETS = [
+    "dolce gabbana", "dolce & gabbana", "d&g", "d and g",
+    "john galliano", "galliano", "jean paul gaultier", "jpg",
+    "moschino", "moschino jeans", "vivienne westwood",
+    "yves saint laurent", "ysl vintage", "issey miyake",
+    "comme des garcons", "comme des garçons", "helmut lang",
+    "raf simons", "dirk bikkembergs", "rrl", "double rl",
+    "polo sport", "polo country", "burberrys", "burberry vintage",
+    "aquascutum",
+]
+DESIGNER_ARCHIVE_CONTEXT_SIGNALS = [
+    "archive", "vintage", "90s", "00s", "y2k", "runway",
+    "made in italy", "made in usa", "wool", "leather", "silk",
+    "knit", "denim", "jacket", "coat", "jeans", "graphic tee",
+    "mesh", "print", "rare", "old tag", "collection", "spellout",
+    "big logo", "newspaper print", "all over print", "gothic",
+    "archive print", "luxury vintage",
+]
+
+MOVIE_TV_STUDIO_TARGETS = [
+    "movie promo", "promo tee", "film promo", "cast and crew",
+    "cast & crew", "crew tee", "staff tee", "studio tour",
+    "theme park", "official licensed", "warner bros studio store",
+    "warner bros", "universal studios", "disney parks", "disney store",
+    "disney cruise line", "mgm", "paramount", "20th century fox",
+    "twentieth century fox", "columbia pictures", "new line cinema",
+    "dreamworks", "pixar", "cartoon network", "nickelodeon",
+    "looney tunes", "the simpsons", "south park", "star wars",
+    "marvel", "dc comics", "batman", "spiderman", "spider-man",
+    "jurassic park", "terminator", "alien", "x-files",
+    "the x files", "sopranos", "the sopranos", "twin peaks",
+]
+MOVIE_TV_STUDIO_CONTEXT_SIGNALS = [
+    "vintage", "80s", "90s", "00s", "single stitch", "made in usa",
+    "official", "licensed", "copyright", "old tag", "event", "promo",
+    "staff", "cast and crew", "cast & crew", "studio tour", "theme park",
+    "big graphic", "back print", "double sided", "all over print",
+    "deadstock", "nos",
+]
+
+US_MILITARY_VINTAGE_TARGETS = [
+    "us army", "u.s. army", "army", "us navy", "u.s. navy", "navy",
+    "us marines", "u.s. marines", "usmc", "marine corps", "air force",
+    "usaf", "coast guard", "military academy", "west point",
+    "navy seals", "seal team", "squadron", "battalion", "division",
+    "air base", "naval base", "army base", "desert storm",
+    "operation desert storm", "operation iraqi freedom", "veteran",
+    "military training", "pt shirt", "military issue", "army football",
+    "navy football",
+]
+US_MILITARY_CONTEXT_SIGNALS = [
+    "vintage", "80s", "90s", "00s", "single stitch", "made in usa",
+    "official", "licensed", "copyright", "old tag", "unit", "base",
+    "squadron", "battalion", "division", "event", "military training",
+    "pt shirt", "big graphic", "back print", "double sided",
+    "deadstock", "nos",
+]
+
+BAND_TARGET_MARKERS = [
+    "led zeppelin", "black sabbath", "deep purple", "the doors",
+    "rolling stones", "the rolling stones", "pink floyd", "ac/dc",
+    "ac dc", "kiss", "aerosmith", "guns n roses", "guns n' roses",
+    "motorhead", "motörhead", "queen", "iron maiden", "metallica",
+    "megadeth", "slayer", "anthrax", "judas priest", "pantera",
+    "ozzy osbourne", "dio", "black label society", "death",
+    "morbid angel", "cannibal corpse", "obituary", "deicide",
+    "sepultura", "possessed", "entombed", "carcass", "napalm death",
+    "bolt thrower", "autopsy", "dismember", "mayhem", "darkthrone",
+    "emperor", "bathory", "venom", "celtic frost", "misfits",
+    "ramones", "sex pistols", "the clash", "bad religion",
+    "dead kennedys", "black flag", "minor threat", "agnostic front",
+    "sick of it all", "madball", "biohazard", "suicidal tendencies",
+    "nirvana", "pearl jam", "soundgarden", "alice in chains",
+    "stone temple pilots", "rage against the machine", "korn",
+    "slipknot", "system of a down", "deftones", "tool",
+    "nine inch nails", "marilyn manson",
+]
+MUSIC_BAND_CONTEXT_SIGNALS = [
+    "tour", "world tour", "concert", "festival", "official",
+    "licensed", "copyright", "single stitch", "made in usa",
+    "giant", "brockum", "winterland", "screen stars", "hanes beefy",
+    "fruit of the loom usa", "changes", "tultex", "anvil", "jerzees",
+    "big print", "back print", "double sided", "all over print",
+]
+
+CONTROLLED_MUSIC_DISCOVERY_QUERIES = [
+    "metal tour tee vintage", "death metal vintage shirt",
+    "black metal vintage shirt", "hardcore band tee vintage",
+    "punk band tee vintage", "90s metal shirt", "single stitch band tee",
+    "giant tag band tee", "winterland vintage shirt",
+    "brockum vintage shirt", "vintage concert tee",
+    "world tour vintage shirt",
+]
+CONTROLLED_STUDIO_DISCOVERY_QUERIES = [
+    "movie promo tee vintage", "cast crew tee vintage",
+    "warner bros studio store", "universal studios vintage",
+    "disney parks vintage", "film crew tee", "studio tour vintage",
+]
+CONTROLLED_MILITARY_DISCOVERY_QUERIES = [
+    "us army vintage tee", "us navy vintage tee", "usmc vintage shirt",
+    "air force vintage tee", "military single stitch",
+    "desert storm vintage shirt", "army pt shirt vintage",
+]
+CONTROLLED_DESIGNER_DISCOVERY_QUERIES = [
+    "dolce gabbana archive", "d&g 00s", "john galliano archive",
+    "galliano vintage", "jean paul gaultier vintage",
+    "moschino jeans vintage", "vivienne westwood archive",
+    "ysl vintage knit", "polo sport vintage", "rrl vintage",
+]
+
 
 def _knowledge_add_unique(target: list[str], value):
     if isinstance(value, (list, tuple, set)):
@@ -2388,6 +2522,7 @@ def _negative_discovery_terms() -> set[str]:
         "GLOBAL_EXCLUDE", "BLOCKED_BRANDS", "RAW_STYLE_FAST_FASHION",
         "RAW_STYLE_NON_CLOTHING", "WOMEN_FIT_TERMS", "FITTED_TOP_TERMS",
         "KIDS_TERMS", "WEAK_DESCRIPTOR_TERMS", "WEAK_NOVELTY_BRANDS",
+        "EXCLUDED_POSITIVE_BRANDS",
     ):
         val = globals().get(name, [])
         for term in (val if isinstance(val, (list, tuple, set)) else []):
@@ -2417,6 +2552,18 @@ def build_bot_positive_knowledge_base() -> dict:
             _knowledge_add_unique(base["brand_terms"], search.get("keywords") or [])
     _knowledge_add_unique(base["manual_seed_terms"], TASTE_DISCOVERY_QUERIES)
     _knowledge_add_unique(base["manual_seed_terms"], CURATED_FRESH_DISCOVERY_SEED)
+    _knowledge_add_unique(base["manual_seed_terms"], CONTROLLED_MUSIC_DISCOVERY_QUERIES)
+    _knowledge_add_unique(base["manual_seed_terms"], CONTROLLED_STUDIO_DISCOVERY_QUERIES)
+    _knowledge_add_unique(base["manual_seed_terms"], CONTROLLED_MILITARY_DISCOVERY_QUERIES)
+    _knowledge_add_unique(base["manual_seed_terms"], CONTROLLED_DESIGNER_DISCOVERY_QUERIES)
+    _knowledge_add_unique(base["brand_terms"], DESIGNER_ARCHIVE_TARGETS)
+    _knowledge_add_unique(base["motif_terms"], DESIGNER_ARCHIVE_CONTEXT_SIGNALS)
+    _knowledge_add_unique(base["motif_terms"], MOVIE_TV_STUDIO_TARGETS)
+    _knowledge_add_unique(base["motif_terms"], MOVIE_TV_STUDIO_CONTEXT_SIGNALS)
+    _knowledge_add_unique(base["motif_terms"], US_MILITARY_VINTAGE_TARGETS)
+    _knowledge_add_unique(base["motif_terms"], US_MILITARY_CONTEXT_SIGNALS)
+    _knowledge_add_unique(base["motif_terms"], BAND_TARGET_MARKERS)
+    _knowledge_add_unique(base["motif_terms"], MUSIC_BAND_CONTEXT_SIGNALS)
     for name in (
         "RAW_STYLE_CONTEXT_TERMS", "RAW_STYLE_POP_VALIDATION_TERMS",
         "RAW_STYLE_VISUAL_CONTEXT_TERMS", "RAW_STYLE_KNOWN_STRONG_MOTIFS",
@@ -2466,6 +2613,12 @@ def build_bot_positive_knowledge_base() -> dict:
           f"motif_terms={len(base['motif_terms'])} "
           f"brand_terms={len(base['brand_terms'])} "
           f"category_terms={len(base['category_terms'])} examples={examples[:8]}")
+    print(f"[KNOWLEDGE_EXPANSION_BUILT] "
+          f"designer_archive_targets={len(DESIGNER_ARCHIVE_TARGETS)} "
+          f"movie_tv_studio_targets={len(MOVIE_TV_STUDIO_TARGETS)} "
+          f"us_military_targets={len(US_MILITARY_VINTAGE_TARGETS)} "
+          f"band_targets={len(BAND_TARGET_MARKERS)} "
+          f"excluded_positive_brands={len(EXCLUDED_POSITIVE_BRANDS)}")
     return base
 
 
@@ -2500,6 +2653,13 @@ def is_discovery_safe_query(query: str) -> bool:
         "sturgis", "warner", "looney", "disney", "space jam", "nasa",
         "nba", "nascar", "tour", "band", "rap", "metal", "polo sport",
         "stussy", "ed hardy", "affliction", "rrl", "double rl",
+        "movie promo", "cast crew", "studio", "universal studios",
+        "disney parks", "film crew", "us army", "us navy", "usmc",
+        "air force", "military", "desert storm", "pt shirt",
+        "dolce", "gabbana", "galliano", "gaultier", "moschino",
+        "vivienne", "ysl", "d g", "00s", "90s", "metal tour", "death metal",
+        "black metal", "hardcore band", "punk band", "concert tee",
+        "winterland", "brockum", "giant tag",
     ]
     return any(raw_contains_phrase(q, term) for term in context_terms) and len(q) >= 7
 
@@ -2662,8 +2822,26 @@ def reset_fresh_discovery_cycle():
         "sent": 0,
         "final_blocked": 0,
         "denied_hard_block": 0,
+        "era_spam_denied": 0,
+        "no_anchor_signal_denied": 0,
+        "generic_biker_denied": 0,
         "top_rescue_reasons": {},
         "top_final_block_reasons": {},
+    })
+    KNOWLEDGE_EXPANSION_STATS.update({
+        "designer_seen": 0,
+        "designer_candidates": 0,
+        "designer_sent": 0,
+        "studio_seen": 0,
+        "studio_candidates": 0,
+        "studio_sent": 0,
+        "military_seen": 0,
+        "military_candidates": 0,
+        "military_sent": 0,
+        "music_seen": 0,
+        "music_candidates": 0,
+        "music_sent": 0,
+        "top_block_reasons": {},
     })
 
 
@@ -2680,36 +2858,109 @@ def _target_marker_hits(item: dict, result: dict | None = None) -> list[str]:
     return hits[:8]
 
 
+def _knowledge_expansion_groups(item: dict, result: dict | None = None) -> list[str]:
+    result = result or {}
+    text = " ".join(str(x or "") for x in (
+        item.get("title"), item.get("brand"), item.get("description"),
+        item.get("category"), result.get("category"), result.get("brand"),
+        result.get("brand_detected"),
+    ))
+    groups = []
+    if raw_contains_any_phrase(text, DESIGNER_ARCHIVE_TARGETS):
+        groups.append("designer_archive")
+    if raw_contains_any_phrase(text, MOVIE_TV_STUDIO_TARGETS):
+        groups.append("movie_tv_studio")
+    if raw_contains_any_phrase(text, US_MILITARY_VINTAGE_TARGETS):
+        groups.append("us_military")
+    if raw_contains_any_phrase(text, BAND_TARGET_MARKERS):
+        groups.append("music_band")
+    return groups
+
+
+def _knowledge_expansion_context_reason(item: dict, result: dict | None, groups: list[str]) -> str | None:
+    result = result or {}
+    text = " ".join(str(x or "") for x in (
+        item.get("title"), item.get("brand"), item.get("description"),
+        item.get("category"), " ".join(result.get("raw_style_signals") or []),
+        " ".join(result.get("desirable_signals") or []),
+        " ".join(result.get("taste_signals") or []),
+    ))
+    year_signals = [sig for sig in _target_rescue_year_signals(raw_normalize_text(text)) if sig != "era_context"]
+    strict_auth = bool(year_signals) or raw_contains_any_phrase(text, [
+        "single stitch", "made in usa", "made in u.s.a", "official",
+        "licensed", "copyright", "old tag", "deadstock", "nos",
+    ])
+    if "designer_archive" in groups and not raw_contains_any_phrase(text, DESIGNER_ARCHIVE_CONTEXT_SIGNALS):
+        return "designer_brand_without_archive_context"
+    if "movie_tv_studio" in groups and not (strict_auth or raw_contains_any_phrase(text, MOVIE_TV_STUDIO_CONTEXT_SIGNALS)):
+        return "studio_marker_without_auth_context"
+    if "us_military" in groups and not (strict_auth or raw_contains_any_phrase(text, US_MILITARY_CONTEXT_SIGNALS)):
+        return "military_marker_without_auth_context"
+    if "music_band" in groups and not (strict_auth or raw_contains_any_phrase(text, MUSIC_BAND_CONTEXT_SIGNALS)):
+        return "band_name_without_auth_context"
+    return None
+
+
+def _knowledge_expansion_bump(groups: list[str], stage: str, reason: str | None = None):
+    mapping = {
+        "designer_archive": "designer",
+        "movie_tv_studio": "studio",
+        "us_military": "military",
+        "music_band": "music",
+    }
+    for group in groups:
+        prefix = mapping.get(group)
+        if not prefix:
+            continue
+        if stage == "seen":
+            key = f"{prefix}_seen"
+        elif stage == "candidate":
+            key = f"{prefix}_candidates"
+        elif stage == "sent":
+            key = f"{prefix}_sent"
+        else:
+            continue
+        KNOWLEDGE_EXPANSION_STATS[key] = KNOWLEDGE_EXPANSION_STATS.get(key, 0) + 1
+    if reason:
+        block_reasons = KNOWLEDGE_EXPANSION_STATS["top_block_reasons"]
+        block_reasons[reason] = block_reasons.get(reason, 0) + 1
+
+
 def _target_audit_event(event: dict):
     markers = event.get("matched_markers") or []
     if not markers:
         return
+    groups = event.get("matched_groups") or []
     stage = event.get("stage")
     query = event.get("query")
     title = str(event.get("title") or "")[:70]
     if stage == "seen":
         TARGET_AUDIT_STATS["target_seen"] += 1
+        _knowledge_expansion_bump(groups, "seen")
         if TARGET_AUDIT_STATS["seen_logs"] < 20:
             TARGET_AUDIT_STATS["seen_logs"] += 1
             print(f"[TARGET_SEEN] query={query} title={title} brand={event.get('brand')} "
                   f"price={event.get('price')} size={event.get('size')} "
                   f"age_source={event.get('age_source')} age_min={event.get('age')} "
-                  f"matched_markers={markers[:5]}")
+                  f"matched_markers={markers[:5]} matched_groups={groups[:4]}")
     elif stage == "candidate":
         TARGET_AUDIT_STATS["target_candidates"] += 1
+        _knowledge_expansion_bump(groups, "candidate")
     elif stage == "sent":
         TARGET_AUDIT_STATS["target_sent"] += 1
+        _knowledge_expansion_bump(groups, "sent")
         print(f"[TARGET_SENT] query={query} title={title} source={event.get('alert_type') or event.get('engine')} "
-              f"score={event.get('score')} matched_markers={markers[:5]}")
+              f"score={event.get('score')} matched_markers={markers[:5]} matched_groups={groups[:4]}")
     elif stage in ("blocked", "quality_block", "final_skip", "rank_not_selected", "dedupe_skip"):
         TARGET_AUDIT_STATS["target_blocked"] += 1
-        reason = event.get("block_reason") or stage
+        reason = event.get("context_block_reason") or event.get("block_reason") or stage
+        _knowledge_expansion_bump(groups, "blocked", reason)
         reasons = TARGET_AUDIT_STATS["top_target_block_reasons"]
         reasons[reason] = reasons.get(reason, 0) + 1
         if TARGET_AUDIT_STATS["blocked_logs"] < 15:
             TARGET_AUDIT_STATS["blocked_logs"] += 1
             print(f"[TARGET_BLOCKED] query={query} title={title} score={event.get('score')} "
-                  f"reason={reason} matched_markers={markers[:5]}")
+                  f"reason={reason} matched_markers={markers[:5]} matched_groups={groups[:4]}")
 
 
 def _fresh_discovery_audit_event(event: dict):
@@ -2747,6 +2998,16 @@ TARGET_RESCUE_STRONG_FRESH_QUERIES = [
     "screen stars vintage", "hanes beefy", "warner bros vintage",
     "tour tee vintage", "band tee vintage", "harley davidson vintage",
     "carhartt detroit", "carhartt santa fe",
+    "movie promo tee vintage", "cast crew tee vintage",
+    "warner bros studio store", "universal studios vintage",
+    "disney parks vintage", "us army vintage tee", "us navy vintage tee",
+    "usmc vintage shirt", "air force vintage tee", "military single stitch",
+    "desert storm vintage shirt", "metal tour tee vintage",
+    "death metal vintage shirt", "hardcore band tee vintage",
+    "punk band tee vintage", "single stitch band tee",
+    "dolce gabbana archive", "john galliano archive",
+    "jean paul gaultier vintage", "moschino jeans vintage",
+    "vivienne westwood archive", "ysl vintage knit",
 ]
 TARGET_RESCUE_AUTH_SIGNALS = [
     "single stitch", "made in usa", "made in u.s.a", "usa made",
@@ -2756,6 +3017,30 @@ TARGET_RESCUE_AUTH_SIGNALS = [
     "velva sheen", "nutmeg", "nutmeg mills", "salem sportswear", "giant",
     "winterland", "brockum", "changes", "anvil", "delta pro weight",
     "stedman", "tultex", "alstyle",
+]
+ERA_CONTEXT_GROUP = [
+    "80s", "90s", "00s", "y2k", "2000s", "vintage", "retro",
+    "archive", "streetwear", "swag", "opium", "japan style",
+    "japanstyle", "avant garde", "avantgarde",
+]
+TARGET_RESCUE_HARLEY_ANCHORS = [
+    "harley davidson", "harley-davidson", "sturgis", "daytona",
+    "bike week", "h.o.g", "hog", "skull", "flame", "eagle",
+    "big logo", "back print", "double sided", "made in usa",
+    "thermal", "waffle", "longsleeve", "long sleeve",
+    "leather jacket", "racing jacket",
+]
+TARGET_RESCUE_REAL_ANCHOR_TERMS = [
+    "single stitch", "made in usa", "made in u.s.a", "usa made",
+    "licensed", "official", "copyright", "screen stars", "hanes beefy",
+    "hanes heavyweight", "fruit of the loom usa", "jerzees vintage",
+    "velva sheen", "nutmeg", "nutmeg mills", "changes", "salem",
+    "salem sportswear", "brockum", "winterland", "giant",
+    "warner bros", "looney tunes", "taz", "bugs bunny", "space jam",
+    "disney cruise", "cruise line", "mickey", "nasa", "kennedy space center",
+    "nba", "nfl", "mlb", "nhl", "nascar", "racing",
+    "carhartt detroit", "carhartt santa fe", "rrl", "double rl",
+    "polo sport",
 ]
 
 
@@ -2773,15 +3058,56 @@ def _target_rescue_year_signals(text: str) -> list[str]:
     signals = []
     for match in re.findall(r"\b(19[8-9][0-9]|200[0-9])\b", text):
         signals.append(f"year:{match}")
-    for era in ("80s", "90s", "00s"):
-        if raw_contains_phrase(text, era):
-            signals.append(f"era:{era}")
-    if raw_contains_phrase(text, "y2k") and raw_contains_any_phrase(text, [
-        "licensed", "official", "single stitch", "made in usa", "screen stars",
-        "warner", "disney", "space jam", "nutmeg", "tour", "band", "harley",
-    ]):
-        signals.append("era:y2k_context")
+    if any(raw_contains_phrase(text, term) for term in ERA_CONTEXT_GROUP):
+        signals.append("era_context")
     return signals
+
+
+def _target_rescue_has_anchor(text: str, strong_signals: list[str]) -> bool:
+    joined = raw_normalize_text(" ".join(strong_signals))
+    if any(sig.startswith("year:") for sig in strong_signals):
+        return True
+    if raw_contains_any_phrase(joined, [
+        "designer archive context", "movie tv studio context",
+        "us military vintage context", "music band auth context",
+    ]):
+        return True
+    if raw_contains_any_phrase(text, TARGET_RESCUE_REAL_ANCHOR_TERMS):
+        return True
+    if raw_contains_any_phrase(joined, TARGET_RESCUE_REAL_ANCHOR_TERMS):
+        return True
+    if raw_contains_phrase(text, "disney") and raw_contains_any_phrase(text, ["mickey", "cruise line", "licensed", "copyright", "199", "200"]):
+        return True
+    if raw_contains_any_phrase(text, ["warner", "looney", "space jam"]) and raw_contains_any_phrase(text, ["taz", "bugs bunny", "licensed", "copyright", "199", "200"]):
+        return True
+    if raw_contains_phrase(text, "nasa") and raw_contains_any_phrase(text, ["space", "kennedy", "199", "made in usa", "single stitch"]):
+        return True
+    if raw_contains_any_phrase(text, ["nba", "nfl", "mlb", "nhl"]) and raw_contains_any_phrase(text, ["nutmeg", "starter", "team", "orlando magic", "chicago bulls", "199"]):
+        return True
+    if raw_contains_phrase(text, "nascar") and raw_contains_any_phrase(text, ["racing", "jeff hamilton", "199", "oreo", "chevrolet"]):
+        return True
+    if raw_contains_any_phrase(text, ["rrl", "double rl", "polo sport"]) and raw_contains_any_phrase(text, ["vintage", "archive", "western", "knit", "wool"]):
+        return True
+    return False
+
+
+def _target_rescue_is_generic_biker(text: str) -> bool:
+    has_biker_word = raw_contains_any_phrase(text, ["harley", "biker", "motorcycle", "motorcycles"])
+    if not has_biker_word:
+        return False
+    return not raw_contains_any_phrase(text, TARGET_RESCUE_HARLEY_ANCHORS)
+
+
+def _has_real_year_or_auth_context(text: str, context_terms: list[str]) -> bool:
+    year_signals = [sig for sig in _target_rescue_year_signals(text) if sig != "era_context"]
+    return bool(
+        year_signals
+        or raw_contains_any_phrase(text, [
+            "single stitch", "made in usa", "made in u.s.a", "official",
+            "licensed", "copyright", "old tag", "deadstock", "nos",
+        ])
+        or raw_contains_any_phrase(text, context_terms)
+    )
 
 
 def get_strong_target_signals(item, result=None) -> list[str]:
@@ -2814,9 +3140,8 @@ def get_strong_target_signals(item, result=None) -> list[str]:
         "orlando magic", "chicago bulls", "nascar", "racing",
         "jeff hamilton", "starter", "majestic vintage",
         "band tee", "tour tee", "rap tee", "metal tee", "metal longsleeve",
-        "hardcore", "punk", "concert", "festival", "ramones", "metallica",
-        "ac dc", "nirvana", "slayer", "iron maiden",
-        "daytona bike week", "sturgis", "biker", "motorcycle",
+        "hardcore", "punk", "concert", "festival",
+        "daytona bike week", "sturgis",
         "carhartt detroit", "carhartt santa fe", "workwear vintage",
         "stussy vintage", "ed hardy vintage", "affliction vintage",
         "archive graphic", "designer archive", "ralph lauren vintage knit",
@@ -2832,8 +3157,20 @@ def get_strong_target_signals(item, result=None) -> list[str]:
         add("nba_team_context")
     if raw_contains_any_phrase(text, ["mlb", "nfl", "nhl"]) and raw_contains_any_phrase(text, ["vintage", "nutmeg", "starter", "licensed", "official", "90s"]):
         add("league_vintage_context")
-    if raw_contains_phrase(text, "harley davidson") and raw_contains_any_phrase(text, ["daytona", "sturgis", "bike week", "skull", "flame", "eagle", "back print", "made in usa"]):
+    if raw_contains_any_phrase(text, ["harley davidson", "harley-davidson"]) and raw_contains_any_phrase(text, TARGET_RESCUE_HARLEY_ANCHORS):
         add("harley_strong_context")
+    if raw_contains_any_phrase(text, DESIGNER_ARCHIVE_TARGETS):
+        if _has_real_year_or_auth_context(text, DESIGNER_ARCHIVE_CONTEXT_SIGNALS):
+            add("designer_archive_context")
+    if raw_contains_any_phrase(text, MOVIE_TV_STUDIO_TARGETS):
+        if _has_real_year_or_auth_context(text, MOVIE_TV_STUDIO_CONTEXT_SIGNALS):
+            add("movie_tv_studio_context")
+    if raw_contains_any_phrase(text, US_MILITARY_VINTAGE_TARGETS):
+        if _has_real_year_or_auth_context(text, US_MILITARY_CONTEXT_SIGNALS):
+            add("us_military_vintage_context")
+    if raw_contains_any_phrase(text, BAND_TARGET_MARKERS):
+        if _has_real_year_or_auth_context(text, MUSIC_BAND_CONTEXT_SIGNALS):
+            add("music_band_auth_context")
     return signals
 
 
@@ -2875,7 +3212,8 @@ def _target_rescue_hard_reason(item: dict, result: dict | None, block_reason: st
 
 def _target_rescue_collector_combo(item: dict, result: dict | None, strong_signals: list[str]) -> str | None:
     text = _raw_presend_text(item or {})
-    has_auth = raw_contains_any_phrase(text, TARGET_RESCUE_AUTH_SIGNALS) or bool(_target_rescue_year_signals(text))
+    year_signals = [sig for sig in _target_rescue_year_signals(text) if sig != "era_context"]
+    has_auth = raw_contains_any_phrase(text, TARGET_RESCUE_AUTH_SIGNALS) or bool(year_signals)
     if raw_contains_phrase(text, "nutmeg") and raw_contains_any_phrase(text, ["nba", "orlando magic", "chicago bulls", "mlb", "nfl", "team", "199"]):
         return "collector_combo:nutmeg_sports"
     if raw_contains_any_phrase(text, ["disney", "mickey", "donald", "goofy", "disney cruise", "cruise line"]) and has_auth:
@@ -2894,6 +3232,14 @@ def _target_rescue_collector_combo(item: dict, result: dict | None, strong_signa
         has_auth or raw_contains_any_phrase(text, ["wool", "leather", "silk", "mohair", "cashmere", "made in italy"])
     ):
         return "collector_combo:archive_designer"
+    if raw_contains_any_phrase(text, DESIGNER_ARCHIVE_TARGETS) and _has_real_year_or_auth_context(text, DESIGNER_ARCHIVE_CONTEXT_SIGNALS):
+        return "designer_archive_context"
+    if raw_contains_any_phrase(text, MOVIE_TV_STUDIO_TARGETS) and _has_real_year_or_auth_context(text, MOVIE_TV_STUDIO_CONTEXT_SIGNALS):
+        return "movie_tv_studio_context"
+    if raw_contains_any_phrase(text, US_MILITARY_VINTAGE_TARGETS) and _has_real_year_or_auth_context(text, US_MILITARY_CONTEXT_SIGNALS):
+        return "us_military_vintage_context"
+    if raw_contains_any_phrase(text, BAND_TARGET_MARKERS) and _has_real_year_or_auth_context(text, MUSIC_BAND_CONTEXT_SIGNALS):
+        return "music_band_auth_context"
     return None
 
 
@@ -2909,6 +3255,21 @@ def should_rescue_target_candidate(item, result, block_reason) -> tuple[bool, li
     if not _target_rescue_is_soft_reason(block_reason):
         return False, [], "not_soft_block"
     strong_signals = get_strong_target_signals(item, result)
+    text = _raw_presend_text(item)
+    non_era_signals = [sig for sig in strong_signals if sig != "era_context"]
+    if strong_signals and not non_era_signals:
+        TARGET_RESCUE_STATS["era_spam_denied"] += 1
+        print(f"[TARGET_RESCUE_DENIED] reason=era_spam_only title={str(item.get('title') or '')[:70]}")
+        return False, strong_signals, "era_spam_only"
+    if _target_rescue_is_generic_biker(text):
+        TARGET_RESCUE_STATS["generic_biker_denied"] += 1
+        print(f"[TARGET_RESCUE_DENIED] reason=generic_biker_rescue_block "
+              f"title={str(item.get('title') or '')[:70]}")
+        return False, strong_signals, "generic_biker_rescue_block"
+    if not _target_rescue_has_anchor(text, strong_signals):
+        TARGET_RESCUE_STATS["no_anchor_signal_denied"] += 1
+        print(f"[TARGET_RESCUE_DENIED] reason=no_anchor_signal title={str(item.get('title') or '')[:70]}")
+        return False, strong_signals, "no_anchor_signal"
     hard_reason = _target_rescue_hard_reason(item, result, block_reason, strong_signals)
     if hard_reason:
         TARGET_RESCUE_STATS["denied_hard_block"] += 1
@@ -2920,7 +3281,7 @@ def should_rescue_target_candidate(item, result, block_reason) -> tuple[bool, li
         or result.get("_raw_style_validated_signals")
         or len(validated_real_signal_reasons(item, result, result.get("raw_style_bucket")))
     )
-    has_auth_signal = raw_contains_any_phrase(" ".join(strong_signals), TARGET_RESCUE_AUTH_SIGNALS) or any(sig.startswith(("year:", "era:")) for sig in strong_signals)
+    has_auth_signal = raw_contains_any_phrase(" ".join(strong_signals), TARGET_RESCUE_AUTH_SIGNALS) or any(sig.startswith("year:") for sig in strong_signals)
     combo_reason = _target_rescue_collector_combo(item, result, strong_signals)
     query = str((item.get("_search_meta") or {}).get("name") or "")
     query_text = query.replace("Fresh Discovery:", "").strip().lower()
@@ -2957,8 +3318,25 @@ def print_fresh_discovery_summary():
           f"eligible={TARGET_RESCUE_STATS['eligible']} rescued={TARGET_RESCUE_STATS['rescued']} "
           f"sent={TARGET_RESCUE_STATS['sent']} final_blocked={TARGET_RESCUE_STATS['final_blocked']} "
           f"denied_hard_block={TARGET_RESCUE_STATS['denied_hard_block']} "
+          f"era_spam_denied={TARGET_RESCUE_STATS['era_spam_denied']} "
+          f"no_anchor_signal_denied={TARGET_RESCUE_STATS['no_anchor_signal_denied']} "
+          f"generic_biker_denied={TARGET_RESCUE_STATS['generic_biker_denied']} "
           f"top_rescue_reasons={TARGET_RESCUE_STATS['top_rescue_reasons']} "
           f"top_final_block_reasons={TARGET_RESCUE_STATS['top_final_block_reasons']}")
+    print(f"[KNOWLEDGE_EXPANSION_SUMMARY] "
+          f"designer_seen={KNOWLEDGE_EXPANSION_STATS['designer_seen']} "
+          f"designer_candidates={KNOWLEDGE_EXPANSION_STATS['designer_candidates']} "
+          f"designer_sent={KNOWLEDGE_EXPANSION_STATS['designer_sent']} "
+          f"studio_seen={KNOWLEDGE_EXPANSION_STATS['studio_seen']} "
+          f"studio_candidates={KNOWLEDGE_EXPANSION_STATS['studio_candidates']} "
+          f"studio_sent={KNOWLEDGE_EXPANSION_STATS['studio_sent']} "
+          f"military_seen={KNOWLEDGE_EXPANSION_STATS['military_seen']} "
+          f"military_candidates={KNOWLEDGE_EXPANSION_STATS['military_candidates']} "
+          f"military_sent={KNOWLEDGE_EXPANSION_STATS['military_sent']} "
+          f"music_seen={KNOWLEDGE_EXPANSION_STATS['music_seen']} "
+          f"music_candidates={KNOWLEDGE_EXPANSION_STATS['music_candidates']} "
+          f"music_sent={KNOWLEDGE_EXPANSION_STATS['music_sent']} "
+          f"top_block_reasons={KNOWLEDGE_EXPANSION_STATS['top_block_reasons']}")
 
 
 def _raw_item_age(item: dict) -> int:
@@ -3716,6 +4094,12 @@ def audit_candidate(stage: str, item: dict, search: dict | None = None, result: 
     markers = _target_marker_hits(item, result)
     if markers:
         event["matched_markers"] = markers
+        groups = _knowledge_expansion_groups(item, result)
+        if groups:
+            event["matched_groups"] = groups
+            context_reason = _knowledge_expansion_context_reason(item, result, groups)
+            if context_reason and stage in ("blocked", "quality_block", "final_skip", "rank_not_selected", "dedupe_skip"):
+                event["context_block_reason"] = context_reason
         _target_audit_event(event)
     write_candidate_audit(event)
 
