@@ -2436,11 +2436,11 @@ MOVIE_TV_STUDIO_CONTEXT_SIGNALS = [
 ]
 
 US_MILITARY_VINTAGE_TARGETS = [
-    "us army", "u.s. army", "army", "us navy", "u.s. navy", "navy",
+    "us army", "u.s. army", "army", "us navy", "u.s. navy",
     "us marines", "u.s. marines", "usmc", "marine corps", "air force",
     "usaf", "coast guard", "military academy", "west point",
     "navy seals", "seal team", "squadron", "battalion", "division",
-    "air base", "naval base", "army base", "desert storm",
+    "air base", "naval base", "naval academy", "army base", "desert storm",
     "operation desert storm", "operation iraqi freedom", "veteran",
     "military training", "pt shirt", "military issue", "army football",
     "navy football",
@@ -2872,6 +2872,8 @@ def _knowledge_expansion_groups(item: dict, result: dict | None = None) -> list[
         groups.append("movie_tv_studio")
     if raw_contains_any_phrase(text, US_MILITARY_VINTAGE_TARGETS):
         groups.append("us_military")
+    elif raw_contains_phrase(text, "navy"):
+        result["_knowledge_expansion_context_reason"] = "military_color_false_positive"
     if raw_contains_any_phrase(text, BAND_TARGET_MARKERS):
         groups.append("music_band")
     return groups
@@ -2894,6 +2896,8 @@ def _knowledge_expansion_context_reason(item: dict, result: dict | None, groups:
         return "designer_brand_without_archive_context"
     if "movie_tv_studio" in groups and not (strict_auth or raw_contains_any_phrase(text, MOVIE_TV_STUDIO_CONTEXT_SIGNALS)):
         return "studio_marker_without_auth_context"
+    if "us_military" not in groups and result.get("_knowledge_expansion_context_reason") == "military_color_false_positive":
+        return "military_color_false_positive"
     if "us_military" in groups and not (strict_auth or raw_contains_any_phrase(text, US_MILITARY_CONTEXT_SIGNALS)):
         return "military_marker_without_auth_context"
     if "music_band" in groups and not (strict_auth or raw_contains_any_phrase(text, MUSIC_BAND_CONTEXT_SIGNALS)):
