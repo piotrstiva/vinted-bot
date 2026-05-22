@@ -292,7 +292,6 @@ _ALL_BRANDS = sorted([
     "nirvana", "metallica", "ramones", "acdc", "ac/dc",
     "pink floyd", "slipknot", "grateful dead",
     "led zeppelin", "black sabbath", "iron maiden",
-    "wu-tang", "wu tang", "tupac",
     "rolling stones", "david bowie",
     "pearl jam", "soundgarden", "alice in chains",
     "rage against", "system of a down",
@@ -307,14 +306,12 @@ LUXURY_BRANDS = {
 
 # Brands that guarantee minimum confidence 6.0 when detected
 STRONG_BRANDS = {
-    "arc'teryx", "arcteryx", "arc teryx",
-    "stone island", "cp company", "patagonia",
+    "patagonia",
     "supreme", "palace", "stussy", "bape",
     "fear of god", "essentials",
-    "corteiz", "crtz", "broken planet", "denim tears", "represent",
-    "carhartt", "carhartt wip", "salomon",
-    "the north face", "tnf", "helly hansen",
-    "nike", "adidas", "new balance", "asics",
+    "carhartt",
+    "helly hansen",
+    "asics",
     "levi's", "levis", "levi", "wrangler", "diesel",
     "ralph lauren", "polo ralph lauren",
     "gucci", "louis vuitton", "prada", "hermes",
@@ -356,7 +353,6 @@ GRAIL_ELIGIBLE_BRANDS = {
     "nirvana", "metallica", "ramones", "acdc", "ac/dc",
     "pink floyd", "slipknot", "grateful dead",
     "led zeppelin", "black sabbath", "iron maiden",
-    "wu-tang", "wu tang", "tupac",
     "rolling stones", "david bowie",
     "pearl jam", "soundgarden",
 }
@@ -639,7 +635,6 @@ BAND_KEYWORDS = [
     "nirvana", "metallica", "ramones", "acdc", "ac/dc",
     "pink floyd", "slipknot", "grateful dead",
     "led zeppelin", "black sabbath", "iron maiden",
-    "wu-tang", "wu tang", "tupac",
     "rolling stones", "david bowie", "pearl jam",
     "soundgarden", "alice in chains", "sex pistols",
     "rage against", "system of a down", "korn",
@@ -844,9 +839,8 @@ ENGINE_PRIORITY = {
 DESIRABLE_OUTDOOR = [
     "gore-tex", "goretex", "gtx", "summit series", "hyvent",
     "dryvent", "nuptse", "mountain jacket", "shell jacket",
-    "beta ar", "alpha sv", "atom lt", "technical jacket",
+    "technical jacket",
     "softshell", "hard shell", "windstopper", "polartec",
-    "xt-6", "xt6", "acs pro", "speedcross",
 ]
 
 DESIRABLE_NIKE = [
@@ -919,7 +913,7 @@ GENERIC_LOW_DESIRABILITY = [
 ]
 
 CONDITIONAL_STRONG_BRANDS = [
-    "nike", "adidas", "asics", "salomon",
+    "nike", "adidas", "asics",
     "the north face", "tnf", "columbia",
     "helly hansen", "puma", "reebok",
 ]
@@ -1506,8 +1500,8 @@ def compute_desirability_score(item: dict, result: dict) -> dict:
         or any(k in title_l for k in ["t-shirt", "tshirt", "tee", "koszulka", "top"])
     )
 
-    outdoor_brands = {"salomon", "the north face", "tnf", "columbia", "helly hansen", "arc'teryx", "arcteryx", "arc teryx", "patagonia"}
-    denim_brands = {"levi's", "levis", "levi", "diesel", "wrangler", "carhartt", "carhartt wip", "true religion", "g-star", "g star"}
+    outdoor_brands = {"the north face", "tnf", "columbia", "helly hansen", "patagonia"}
+    denim_brands = {"levi's", "levis", "levi", "diesel", "wrangler", "carhartt", "true religion", "g-star", "g star"}
     designer_brands = LUXURY_BRANDS | {"gaultier", "helmut lang", "jil sander", "margiela", "cavalli", "dolce gabbana", "d&g", "yohji", "issey miyake", "comme des garcons", "vivienne westwood"}
 
     if brand_l in outdoor_brands:
@@ -1723,8 +1717,6 @@ def apply_desirability_profile(result: dict, profile: dict) -> dict:
         "outdoor:gore-tex",
         "outdoor:acg",
         "outdoor:summit",
-        "outdoor:xt-6",
-        "outdoor:xt6",
     ]
     for needle in strong_signal_needles:
         if needle in signal_text:
@@ -2796,29 +2788,15 @@ class ChaosEngine:
 
 # Heurystyczne ceny rynkowe per brand+category (gdy brak DB)
 _HEURISTIC_PRICES: dict[str, dict[str, float]] = {
-    "arc'teryx":     {"jacket": 700, "hoodie": 450, "sneakers": 500, "default": 400},
-    "arcteryx":      {"jacket": 700, "hoodie": 450, "default": 400},
-    "arc teryx":     {"jacket": 700, "hoodie": 450, "default": 400},
-    "stone island":  {"jacket": 800, "hoodie": 500, "tshirt": 350, "default": 450},
-    "cp company":    {"jacket": 600, "hoodie": 400, "default": 350},
     "patagonia":     {"jacket": 500, "hoodie": 350, "default": 280},
     "supreme":       {"jacket": 600, "hoodie": 350, "tshirt": 280, "default": 300},
     "palace":        {"jacket": 500, "hoodie": 300, "tshirt": 250, "default": 250},
     "stussy":        {"jacket": 350, "hoodie": 250, "tshirt": 180, "default": 200},
     "corteiz":       {"jacket": 500, "hoodie": 300, "tshirt": 200, "default": 250},
-    "broken planet": {"hoodie": 400, "tshirt": 250, "default": 300},
-    "represent":     {"jacket": 600, "hoodie": 400, "tshirt": 300, "default": 350},
     "carhartt":      {"jacket": 350, "hoodie": 220, "tshirt": 130, "default": 180},
-    "carhartt wip":  {"jacket": 400, "hoodie": 280, "default": 220},
     "dickies":       {"jacket": 200, "cargo": 150, "default": 120},
-    "salomon":       {"sneakers": 380, "jacket": 450, "default": 280},
-    "the north face":{"jacket": 400, "hoodie": 280, "default": 250},
-    "tnf":           {"jacket": 400, "hoodie": 280, "default": 250},
     "helly hansen":  {"jacket": 350, "hoodie": 220, "default": 200},
-    "new balance":   {"sneakers": 220, "jacket": 220, "default": 160},
     "asics":         {"sneakers": 200, "default": 150},
-    "nike":          {"sneakers": 250, "jacket": 220, "hoodie": 180, "tshirt": 120, "default": 160},
-    "adidas":        {"sneakers": 220, "jacket": 200, "hoodie": 160, "tshirt": 110, "default": 140},
     "levi's":        {"jeans": 160, "jacket": 220, "default": 140},
     "levis":         {"jeans": 160, "jacket": 220, "default": 140},
     "levi":          {"jeans": 150, "jacket": 200, "default": 130},
@@ -2855,9 +2833,6 @@ _HEURISTIC_PRICES: dict[str, dict[str, float]] = {
     "rolling stones": {"tshirt": 200, "hoodie": 150, "default": 160},
     "black sabbath":  {"tshirt": 200, "hoodie": 150, "default": 160},
     "iron maiden":    {"tshirt": 200, "hoodie": 150, "default": 160},
-    "wu-tang":        {"tshirt": 300, "hoodie": 220, "default": 240},
-    "wu tang":        {"tshirt": 300, "hoodie": 220, "default": 240},
-    "tupac":          {"tshirt": 250, "hoodie": 180, "default": 200},
     "slipknot":       {"tshirt": 180, "hoodie": 140, "default": 150},
     # Vintage tag brands
     "hanes beefy":    {"tshirt": 100, "default": 80},
@@ -3049,7 +3024,7 @@ _GRAIL_KEYWORDS = [
     "tour", "promo", "band", "band tee", "movie", "film",
     "rap tee", "harley davidson", "harley", "bootleg", "concert tee",
     "deadstock", "grateful dead", "nirvana", "metallica",
-    "ac/dc", "acdc", "wu-tang", "wu tang",
+    "ac/dc", "acdc",
 ]
 
 _GRAIL_BRANDS = [
