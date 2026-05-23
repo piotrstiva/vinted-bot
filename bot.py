@@ -82,9 +82,10 @@ TARGET_RESCUE_MIN_STRONG_SIGNALS = int(os.getenv("TARGET_RESCUE_MIN_STRONG_SIGNA
 TARGET_RESCUE_MIN_VALIDATED_SIGNALS = int(os.getenv("TARGET_RESCUE_MIN_VALIDATED_SIGNALS", "4"))
 POP_CULTURE_MAX_SEND_PER_CYCLE = int(os.getenv("POP_CULTURE_MAX_SEND_PER_CYCLE", "1"))
 POP_CULTURE_QUERY_COOLDOWN_CYCLES = int(os.getenv("POP_CULTURE_QUERY_COOLDOWN_CYCLES", "2"))
-POP_CULTURE_MAX_SEARCHES_PER_10_CYCLES = int(os.getenv("POP_CULTURE_MAX_SEARCHES_PER_10_CYCLES", "2"))
+POP_CULTURE_MAX_SEARCHES_PER_10_CYCLES = int(os.getenv("POP_CULTURE_MAX_SEARCHES_PER_10_CYCLES", "1"))
 MAX_SENDS_PER_LANE_PER_CYCLE = int(os.getenv("MAX_SENDS_PER_LANE_PER_CYCLE", "2"))
 WATCH_ALERTS_ENABLED = os.getenv("WATCH_ALERTS_ENABLED", "0") == "1"
+SAFEGUARD_RELAX_ALERTS_ENABLED = os.getenv("SAFEGUARD_RELAX_ALERTS_ENABLED", "0") == "1"
 
 if DETAIL_AGE_VERIFY_ENABLED:
     print("[DETAIL_AGE_VERIFY_ENABLED]")
@@ -2315,6 +2316,8 @@ ALERT_ARBITER_STATS = {
     "by_source": {},
     "by_reason": {},
     "watch_examples": [],
+    "non_pop_watch_examples": [],
+    "lane_examples": {},
 }
 SEARCH_LANE_BALANCE_STATS = {
     "selected_by_lane": {},
@@ -3128,6 +3131,8 @@ def reset_fresh_discovery_cycle():
         "by_source": {},
         "by_reason": {},
         "watch_examples": [],
+        "non_pop_watch_examples": [],
+        "lane_examples": {},
     })
     SEARCH_LANE_BALANCE_STATS.update({
         "selected_by_lane": {},
@@ -3210,6 +3215,8 @@ POP_CULTURE_MARKERS = list(set(MOVIE_TV_STUDIO_TARGETS + [
 WORKWEAR_MARKERS = [
     "carhartt", "dickies", "ben davis", "lee storm rider",
     "storm rider", "workwear", "duck canvas", "chore coat",
+    "l.l.bean", "ll bean", "l l bean", "woolrich", "filson",
+    "barbour", "eddie bauer", "lee riders",
 ]
 WORKWEAR_MODEL_ANCHORS = [
     "detroit jacket", "michigan jacket", "michigan coat", "santa fe",
@@ -3869,6 +3876,22 @@ def print_fresh_discovery_summary():
     print(f"[WATCH_SUMMARY] count={ALERT_ARBITER_STATS['watch']} "
           f"by_lane={SEARCH_LANE_BALANCE_STATS['watch_by_lane']} "
           f"top_examples={ALERT_ARBITER_STATS['watch_examples']}")
+    print(f"[NON_POP_WATCH_SUMMARY] "
+          f"designer_watch={SEARCH_LANE_BALANCE_STATS['watch_by_lane'].get('designer_archive', 0)} "
+          f"workwear_watch={SEARCH_LANE_BALANCE_STATS['watch_by_lane'].get('workwear', 0)} "
+          f"music_watch={SEARCH_LANE_BALANCE_STATS['watch_by_lane'].get('music_band', 0)} "
+          f"military_watch={SEARCH_LANE_BALANCE_STATS['watch_by_lane'].get('military', 0)} "
+          f"top_examples={ALERT_ARBITER_STATS['non_pop_watch_examples']}")
+    for lane in ("designer_archive", "workwear", "music_band", "military"):
+        seen = int(LANE_POLICY_STATS[lane]["seen"])
+        candidates = int(LANE_POLICY_STATS[lane]["candidates"])
+        watch = int(SEARCH_LANE_BALANCE_STATS["watch_by_lane"].get(lane, 0))
+        sent = int(LANE_POLICY_STATS[lane]["sent"])
+        if seen > 0 and watch == 0 and sent == 0:
+            print(f"[LANE_STARVED_DIAGNOSTIC] lane={lane} seen={seen} "
+                  f"candidates={candidates} watch=0 sent=0 "
+                  f"top_block_reasons={LANE_POLICY_STATS['top_block_reasons']} "
+                  f"top_examples={ALERT_ARBITER_STATS['lane_examples'].get(lane, [])}")
     print(f"[SEARCH_LANE_BALANCE_SUMMARY] "
           f"selected_by_lane={SEARCH_LANE_BALANCE_STATS['selected_by_lane']} "
           f"sent_by_lane={SEARCH_LANE_BALANCE_STATS['sent_by_lane']} "
@@ -4362,12 +4385,33 @@ def _pop_culture_high_auth(lane_info: dict) -> bool:
     joined = " ".join(hard)
     return bool(
         len(hard) >= 2
+        or any(str(x).startswith("year:") for x in lane_info.get("hard_auth_signals") or [])
+        or raw_contains_phrase(joined, "copyright")
         or raw_contains_any_phrase(joined, [
             "single stitch", "made in usa", "screen stars", "hanes beefy",
             "fruit of the loom usa", "nutmeg", "changes", "salem", "giant",
             "brockum", "winterland", "promo", "cast and crew", "staff tee",
             "studio tour", "warner bros studio store", "disney cruise line",
         ])
+    )
+
+
+def _pop_culture_high_auth_plus(text: str, lane_info: dict) -> bool:
+    text_n = raw_normalize_text(text)
+    hard = [raw_normalize_text(x) for x in (lane_info.get("hard_auth_signals") or [])]
+    joined = " ".join(hard)
+    has_year = bool(re.search(r"\b(19[8-9][0-9]|200[0-9])\b", text_n)) or "copyright" in text_n
+    has_old_auth = raw_contains_any_phrase(joined + " " + text_n, [
+        "old tag", "screen stars", "hanes beefy", "fruit of the loom usa",
+        "nutmeg", "changes", "salem", "giant", "brockum", "winterland",
+        "warner bros studio store", "disney parks", "disney cruise",
+        "disney store", "cast and crew", "staff tee", "movie promo",
+        "studio tour", "promo",
+    ])
+    return bool(
+        raw_contains_any_phrase(joined + " " + text_n, ["single stitch", "made in usa", "made in u s a"])
+        or raw_contains_any_phrase(text_n, ["warner bros studio store", "disney parks", "disney cruise", "cast and crew", "staff tee", "movie promo", "studio tour"])
+        or (has_year and has_old_auth)
     )
 
 
@@ -4447,6 +4491,15 @@ def _alert_arbiter_bump(decision: dict):
         title = str((decision.get("item") or {}).get("title") or "")[:70]
         if title and len(examples) < 8:
             examples.append({"lane": lane, "reason": reason, "title": title})
+        if lane in {"designer_archive", "workwear", "music_band", "military"}:
+            non_pop = ALERT_ARBITER_STATS["non_pop_watch_examples"]
+            if title and len(non_pop) < 8:
+                non_pop.append({"lane": lane, "reason": reason, "title": title})
+    title = str((decision.get("item") or {}).get("title") or "")[:70]
+    if title and lane in LANES:
+        lane_examples = ALERT_ARBITER_STATS["lane_examples"].setdefault(lane, [])
+        if len(lane_examples) < 5:
+            lane_examples.append({"outcome": outcome, "reason": reason, "title": title})
 
 
 def _arbiter_negative_signals(item: dict, result: dict, lane_info: dict) -> list[str]:
@@ -4474,6 +4527,12 @@ def _arbiter_negative_signals(item: dict, result: dict, lane_info: dict) -> list
         negatives.append("keyword_spam_without_auth")
     if raw_contains_any_phrase(text, ["kids", "children", "youth", "dzieci", "junior"]) or re.search(r"\b(9[8-9]|1[0-5][0-9]|16[0-4])\b", raw_normalize_text(text)):
         negatives.append("kids_or_youth_size")
+    if raw_contains_any_phrase(text, ["army green", "military style", "camo", "camouflage"]) and not raw_contains_any_phrase(text, [
+        "us army", "u.s. army", "us navy", "u.s. navy", "usmc", "marines",
+        "air force", "usaf", "desert storm", "pt shirt", "squadron",
+        "battalion", "division", "single stitch", "made in usa",
+    ]):
+        negatives.append("generic_military_style")
     return list(dict.fromkeys(negatives))
 
 
@@ -4509,26 +4568,40 @@ def decide_alert_outcome(item, result=None, source=None, query=None) -> dict:
     if "vintage_auth" in matched and hard_auth:
         add_alert("vintage_auth_route")
     if "music_band" in matched:
+        music_context = _arbiter_hits(text, ["tour", "concert", "world tour", "festival"]) + _lane_year_signals(text)
         music_auth = _arbiter_hits(text, [
-            "tour", "concert", "world tour", "festival", "single stitch",
-            "made in usa", "made in u.s.a", "giant", "brockum", "winterland",
+            "single stitch", "made in usa", "made in u.s.a", "giant", "brockum", "winterland",
             "screen stars", "hanes beefy", "fruit of the loom usa", "changes",
             "tultex", "anvil", "jerzees",
-        ]) + _lane_year_signals(text)
+        ])
         if music_auth:
             add_alert("music_band_auth_route")
+        elif music_context:
+            add_watch("music_band_watch_context")
         else:
             add_watch("band_name_without_auth_context")
     if "designer_archive" in matched:
         designer_context = _arbiter_hits(text, DESIGNER_ARCHIVE_CONTEXT_SIGNALS)
         if len(designer_context) >= 2:
             add_alert("designer_archive_context_route")
+        elif designer_context:
+            add_watch("designer_archive_watch_context")
         else:
             add_watch("designer_brand_without_archive_context")
     if "workwear" in matched:
-        workwear_anchors = _arbiter_hits(text, WORKWEAR_MODEL_ANCHORS + ["ben davis vintage"])
-        if workwear_anchors:
+        workwear_context = _arbiter_hits(text, WORKWEAR_MODEL_ANCHORS + [
+            "ben davis vintage", "canvas", "duck", "cordura", "fire resistant",
+            "fr", "chore", "active", "detroit", "santa fe", "michigan",
+            "double knee", "carpenter", "blanket lined", "made in usa",
+            "union made", "faded", "distressed", "workwear", "90s", "00s",
+            "anorak", "chore coat", "storm rider", "heavy flannel",
+            "wool flannel",
+        ])
+        weak_workwear = raw_contains_any_phrase(text, ["carhartt hoodie", "nimbus", "wip basic"])
+        if len(workwear_context) >= 2 and not weak_workwear:
             add_alert("workwear_model_anchor_route")
+        elif workwear_context:
+            add_watch("workwear_possible_model_context")
         else:
             add_watch("workwear_brand_without_model_anchor")
     if "sport_racing" in matched:
@@ -4543,7 +4616,8 @@ def decide_alert_outcome(item, result=None, source=None, query=None) -> dict:
             add_watch("sport_racing_without_auth_context")
     if "pop_culture" in matched:
         pop_level = int(levels.get("pop_culture", 0) or 0)
-        if pop_level >= 3:
+        pop_high_auth = _pop_culture_high_auth(lane_info)
+        if pop_level >= 3 and pop_high_auth:
             add_alert("pop_culture_auth_route")
         else:
             pop_reason = _lane_policy_presend_block_reason(item, result, lane_info, source) or "pop_culture_marker_without_auth_context"
@@ -4551,8 +4625,13 @@ def decide_alert_outcome(item, result=None, source=None, query=None) -> dict:
     if "military" in matched:
         branch = raw_contains_any_phrase(text, ["us army", "u.s. army", "us navy", "u.s. navy", "usmc", "marines", "air force", "usaf"])
         military_context = _arbiter_hits(text, US_MILITARY_CONTEXT_SIGNALS) + _lane_year_signals(text)
-        if branch and military_context:
+        military_alert_auth = raw_contains_any_phrase(text, ["single stitch", "made in usa", "made in u.s.a", "old tag"]) or (
+            branch and raw_contains_any_phrase(text, ["unit", "base", "squadron", "battalion", "division", "pt shirt", "desert storm"])
+        )
+        if military_alert_auth and military_context:
             add_alert("us_military_vintage_context_route")
+        elif branch or military_context:
+            add_watch("military_watch_context")
         else:
             add_watch("military_marker_without_auth_context")
 
@@ -4563,11 +4642,18 @@ def decide_alert_outcome(item, result=None, source=None, query=None) -> dict:
         add_watch("no_target_lane_match")
     if (source in {"CHAOS", "SAFEGUARD", "FALLBACK"} or str(result.get("engine") or "") == "CHAOS") and not alert_reasons:
         add_watch("broad_discovery_watch_only")
+    if source == "SAFEGUARD" and not SAFEGUARD_RELAX_ALERTS_ENABLED:
+        print(f"[SAFEGUARD_RELAX_WATCH_ONLY] title={str(item.get('title') or '')[:70]}")
+        if alert_reasons and not (len(hard_auth) >= 3 or _pop_culture_high_auth_plus(text, lane_info)):
+            watch_reasons.extend(alert_reasons)
+            alert_reasons = []
+            add_watch("safeguard_relaxed_watch_only")
 
     exceptional_auth = len(hard_auth) >= 3 or any("single stitch" in str(x) or "made in usa" in str(x) for x in hard_auth)
     severe_negative = any(reason in negatives for reason in [
         "kids_presend_block", "kids_or_youth_size", "non_clothing",
         "fake_reprint_or_style_only", "fast_fashion_presend_block",
+        "generic_military_style",
     ])
     if negatives and alert_reasons and not exceptional_auth:
         outcome = ITEM_OUTCOME_WATCH
@@ -4578,7 +4664,7 @@ def decide_alert_outcome(item, result=None, source=None, query=None) -> dict:
     elif alert_reasons:
         if (
             "pop_culture" in matched
-            and not _pop_culture_high_auth(lane_info)
+            and not _pop_culture_high_auth_plus(text, lane_info)
             and LANE_SENT_COUNT_PER_CYCLE.get("pop_culture", 0) >= POP_CULTURE_MAX_SEND_PER_CYCLE
         ):
             outcome = ITEM_OUTCOME_WATCH
@@ -4587,9 +4673,10 @@ def decide_alert_outcome(item, result=None, source=None, query=None) -> dict:
             LANE_POLICY_STATS["pop_culture_budget_blocked"] += 1
             print(f"[POP_CULTURE_SEND_BUDGET_BLOCK] source={source} "
                   f"title={str(item.get('title') or '')[:70]}")
-        elif primary in LANES and LANE_SENT_COUNT_PER_CYCLE.get(primary, 0) >= MAX_SENDS_PER_LANE_PER_CYCLE:
+        elif primary in LANES and LANE_SENT_COUNT_PER_CYCLE.get(primary, 0) >= MAX_SENDS_PER_LANE_PER_CYCLE and not _pop_culture_high_auth_plus(text, lane_info):
             outcome = ITEM_OUTCOME_WATCH
             reason = "lane_send_cap_watch"
+            print(f"[LANE_SEND_CAP_WATCH] lane={primary} title={str(item.get('title') or '')[:70]} reason={reason}")
         else:
             outcome = ITEM_OUTCOME_ALERT
             reason = alert_reasons[0]
