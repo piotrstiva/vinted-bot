@@ -82,6 +82,9 @@ TARGET_RESCUE_MIN_STRONG_SIGNALS = int(os.getenv("TARGET_RESCUE_MIN_STRONG_SIGNA
 TARGET_RESCUE_MIN_VALIDATED_SIGNALS = int(os.getenv("TARGET_RESCUE_MIN_VALIDATED_SIGNALS", "4"))
 POP_CULTURE_MAX_SEND_PER_CYCLE = int(os.getenv("POP_CULTURE_MAX_SEND_PER_CYCLE", "1"))
 POP_CULTURE_QUERY_COOLDOWN_CYCLES = int(os.getenv("POP_CULTURE_QUERY_COOLDOWN_CYCLES", "2"))
+POP_CULTURE_MAX_SEARCHES_PER_10_CYCLES = int(os.getenv("POP_CULTURE_MAX_SEARCHES_PER_10_CYCLES", "2"))
+MAX_SENDS_PER_LANE_PER_CYCLE = int(os.getenv("MAX_SENDS_PER_LANE_PER_CYCLE", "2"))
+WATCH_ALERTS_ENABLED = os.getenv("WATCH_ALERTS_ENABLED", "0") == "1"
 
 if DETAIL_AGE_VERIFY_ENABLED:
     print("[DETAIL_AGE_VERIFY_ENABLED]")
@@ -94,6 +97,8 @@ else:
     print("[TARGET_RESCUE_DISABLED]")
 print("[LANE_POLICY_GATE_ENABLED] "
       "sources_covered=[RAW_STYLE,TARGET_RESCUE,CHAOS,BRAND,GRAIL,SAFEGUARD,FALLBACK,STYLE_WATCH]")
+print("[ALERT_ARBITER_ENABLED] "
+      "sources_covered=[RAW_STYLE,TARGET_RESCUE,CHAOS,BRAND,GRAIL,SAFEGUARD,FALLBACK,STYLE_WATCH,COLLECTOR_WATCH]")
 
 # ─────────────────────────────────────────
 #  ⚡ SNIPER MODE
@@ -2268,6 +2273,9 @@ LANES = [
     "vintage_auth", "pop_culture", "designer_archive", "music_band",
     "workwear", "military", "sport_racing",
 ]
+ITEM_OUTCOME_DISCARD = "discard"
+ITEM_OUTCOME_WATCH = "watch"
+ITEM_OUTCOME_ALERT = "alert"
 LANE_POLICY_STATS = {
     lane: {"seen": 0, "candidates": 0, "sent": 0, "blocked": 0}
     for lane in LANES
@@ -2297,6 +2305,22 @@ POP_CULTURE_AUTH_STATS = {
     "blocked_women_basic": 0,
     "blocked_outerwear_no_auth": 0,
     "budget_blocked": 0,
+}
+ALERT_ARBITER_STATS = {
+    "checked": 0,
+    "alert": 0,
+    "watch": 0,
+    "discard": 0,
+    "by_lane": {},
+    "by_source": {},
+    "by_reason": {},
+    "watch_examples": [],
+}
+SEARCH_LANE_BALANCE_STATS = {
+    "selected_by_lane": {},
+    "sent_by_lane": {},
+    "watch_by_lane": {},
+    "pop_culture_searches_last_10": 0,
 }
 VERBOSE_LOG_STATS = {
     "printed": 0,
@@ -2407,6 +2431,7 @@ def _raw_hits(text: str, phrases: list[str]) -> list[str]:
 
 CURATED_FRESH_DISCOVERY_SEED = [
     "single stitch vintage",
+    "vintage single stitch tee",
     "made in usa vintage",
     "90s vintage t shirt",
     "vintage graphic tee",
@@ -2443,6 +2468,16 @@ CURATED_FRESH_DISCOVERY_SEED = [
     "designer archive",
     "ralph lauren vintage knit",
     "polo sport vintage",
+    "carhartt active jacket",
+    "carhartt michigan",
+    "carhartt chore coat",
+    "carhartt double knee",
+    "lee storm rider",
+    "ben davis vintage",
+    "jeff hamilton jacket",
+    "nascar vintage jacket",
+    "starter jacket vintage",
+    "chalk line jacket",
 ]
 
 EXCLUDED_POSITIVE_BRANDS = [
@@ -2542,7 +2577,7 @@ CONTROLLED_MUSIC_DISCOVERY_QUERIES = [
     "punk band tee vintage", "90s metal shirt", "single stitch band tee",
     "giant tag band tee", "winterland vintage shirt",
     "brockum vintage shirt", "vintage concert tee",
-    "world tour vintage shirt",
+    "world tour vintage shirt", "band tee vintage tour",
 ]
 CONTROLLED_STUDIO_DISCOVERY_QUERIES = [
     "movie promo tee vintage", "cast crew tee vintage",
@@ -2557,7 +2592,7 @@ CONTROLLED_MILITARY_DISCOVERY_QUERIES = [
 CONTROLLED_DESIGNER_DISCOVERY_QUERIES = [
     "dolce gabbana archive", "d&g 00s", "john galliano archive",
     "galliano vintage", "jean paul gaultier vintage",
-    "moschino jeans vintage", "vivienne westwood archive",
+    "issey miyake vintage", "moschino jeans vintage", "vivienne westwood archive",
     "ysl vintage knit", "polo sport vintage", "rrl vintage",
 ]
 
@@ -2872,6 +2907,34 @@ def fresh_discovery_query_lane(query: str) -> str:
     return "vintage_auth"
 
 
+def _search_lane_balance_bump(lane: str, kind: str):
+    lane = lane if lane in LANES else "none"
+    key = f"{kind}_by_lane"
+    if key not in SEARCH_LANE_BALANCE_STATS:
+        return
+    bucket = SEARCH_LANE_BALANCE_STATS[key]
+    bucket[lane] = bucket.get(lane, 0) + 1
+
+
+def _pop_culture_search_allowed(state: dict, current_cycle: int) -> bool:
+    history = [
+        int(x) for x in (state.get("pop_culture_search_cycles") or [])
+        if int(x) > current_cycle - 10
+    ]
+    SEARCH_LANE_BALANCE_STATS["pop_culture_searches_last_10"] = len(history)
+    return len(history) < POP_CULTURE_MAX_SEARCHES_PER_10_CYCLES
+
+
+def _record_pop_culture_search(state: dict, current_cycle: int):
+    history = [
+        int(x) for x in (state.get("pop_culture_search_cycles") or [])
+        if int(x) > current_cycle - 10
+    ]
+    history.append(current_cycle)
+    state["pop_culture_search_cycles"] = history[-10:]
+    SEARCH_LANE_BALANCE_STATS["pop_culture_searches_last_10"] = len(state["pop_culture_search_cycles"])
+
+
 def select_fresh_discovery_queries() -> list[str]:
     if not FRESH_DISCOVERY_ENABLED or not FRESH_DISCOVERY_QUERY_POOL:
         return []
@@ -2894,7 +2957,11 @@ def select_fresh_discovery_queries() -> list[str]:
             break
         non_pop = [lane for lane in available_lanes if lane != "pop_culture"]
         pop_last = int(lane_last_run.get("pop_culture", -9999) or -9999)
-        if current_cycle - pop_last < POP_CULTURE_QUERY_COOLDOWN_CYCLES and non_pop:
+        if (
+            (current_cycle - pop_last < POP_CULTURE_QUERY_COOLDOWN_CYCLES
+             or not _pop_culture_search_allowed(state, current_cycle))
+            and non_pop
+        ):
             available_lanes = non_pop
         available_lanes.sort(key=lambda lane: int(lane_last_run.get(lane, -9999) or -9999))
         lane = available_lanes[0]
@@ -2912,6 +2979,9 @@ def select_fresh_discovery_queries() -> list[str]:
         selected_lanes.add(lane)
         previous_lane_run = int(lane_last_run.get(lane, -9999) or -9999)
         lane_last_run[lane] = current_cycle
+        if lane == "pop_culture":
+            _record_pop_culture_search(state, current_cycle)
+        _search_lane_balance_bump(lane, "selected")
         print(f"[QUERY_LANE_ASSIGNMENT] query={chosen} lane={lane} source=fresh")
         print(f"[LANE_ROTATION] selected_lane={lane} query={chosen} "
               f"since_last_lane_run={current_cycle - previous_lane_run}")
@@ -2951,7 +3021,11 @@ def select_taste_discovery_queries(count: int) -> list[str]:
             break
         non_pop = [lane for lane in available_lanes if lane != "pop_culture"]
         pop_last = int(lane_last_run.get("pop_culture", -9999) or -9999)
-        if current_cycle - pop_last < POP_CULTURE_QUERY_COOLDOWN_CYCLES and non_pop:
+        if (
+            (current_cycle - pop_last < POP_CULTURE_QUERY_COOLDOWN_CYCLES
+             or not _pop_culture_search_allowed(state, current_cycle))
+            and non_pop
+        ):
             available_lanes = non_pop
         available_lanes.sort(key=lambda lane: int(lane_last_run.get(lane, -9999) or -9999))
         lane = available_lanes[0]
@@ -2959,6 +3033,9 @@ def select_taste_discovery_queries(count: int) -> list[str]:
         selected.append(query)
         selected_lanes.add(lane)
         lane_last_run[lane] = current_cycle
+        if lane == "pop_culture":
+            _record_pop_culture_search(state, current_cycle)
+        _search_lane_balance_bump(lane, "selected")
         print(f"[QUERY_LANE_ASSIGNMENT] query={query} lane={lane} source=taste")
         print(f"[LANE_ROTATION_APPLIED] source=taste selected_lane={lane} query={query}")
     state["taste_lane_last_run"] = lane_last_run
@@ -3041,6 +3118,22 @@ def reset_fresh_discovery_cycle():
         "blocked_women_basic": 0,
         "blocked_outerwear_no_auth": 0,
         "budget_blocked": 0,
+    })
+    ALERT_ARBITER_STATS.update({
+        "checked": 0,
+        "alert": 0,
+        "watch": 0,
+        "discard": 0,
+        "by_lane": {},
+        "by_source": {},
+        "by_reason": {},
+        "watch_examples": [],
+    })
+    SEARCH_LANE_BALANCE_STATS.update({
+        "selected_by_lane": {},
+        "sent_by_lane": {},
+        "watch_by_lane": {},
+        "pop_culture_searches_last_10": 0,
     })
 
 
@@ -3767,6 +3860,20 @@ def print_fresh_discovery_summary():
           f"blocked_women_basic={POP_CULTURE_AUTH_STATS['blocked_women_basic']} "
           f"blocked_outerwear_no_auth={POP_CULTURE_AUTH_STATS['blocked_outerwear_no_auth']} "
           f"budget_blocked={POP_CULTURE_AUTH_STATS['budget_blocked']}")
+    print(f"[ALERT_ARBITER_SUMMARY] checked={ALERT_ARBITER_STATS['checked']} "
+          f"alert={ALERT_ARBITER_STATS['alert']} watch={ALERT_ARBITER_STATS['watch']} "
+          f"discard={ALERT_ARBITER_STATS['discard']} "
+          f"by_lane={ALERT_ARBITER_STATS['by_lane']} "
+          f"by_source={ALERT_ARBITER_STATS['by_source']} "
+          f"by_reason={ALERT_ARBITER_STATS['by_reason']}")
+    print(f"[WATCH_SUMMARY] count={ALERT_ARBITER_STATS['watch']} "
+          f"by_lane={SEARCH_LANE_BALANCE_STATS['watch_by_lane']} "
+          f"top_examples={ALERT_ARBITER_STATS['watch_examples']}")
+    print(f"[SEARCH_LANE_BALANCE_SUMMARY] "
+          f"selected_by_lane={SEARCH_LANE_BALANCE_STATS['selected_by_lane']} "
+          f"sent_by_lane={SEARCH_LANE_BALANCE_STATS['sent_by_lane']} "
+          f"watch_by_lane={SEARCH_LANE_BALANCE_STATS['watch_by_lane']} "
+          f"pop_culture_searches_last_10={SEARCH_LANE_BALANCE_STATS['pop_culture_searches_last_10']}")
     print(f"[CHAOS_AUTH_BLOCK_SUMMARY] blocked={LANE_POLICY_STATS['chaos_auth_blocked']} "
           f"by_reason={LANE_POLICY_STATS['chaos_auth_block_reasons']} "
           f"examples={LANE_POLICY_STATS['chaos_auth_examples']}")
@@ -4322,6 +4429,205 @@ def _pop_culture_auth_block_bump(reason: str):
         POP_CULTURE_AUTH_STATS["blocked_no_auth"] += 1
 
 
+def _alert_arbiter_bump(decision: dict):
+    outcome = decision.get("outcome") or ITEM_OUTCOME_DISCARD
+    lane = decision.get("primary_lane") or "none"
+    source = decision.get("source") or "UNKNOWN"
+    reason = decision.get("reason") or outcome
+    ALERT_ARBITER_STATS["checked"] += 1
+    ALERT_ARBITER_STATS[outcome] = ALERT_ARBITER_STATS.get(outcome, 0) + 1
+    ALERT_ARBITER_STATS["by_lane"][lane] = ALERT_ARBITER_STATS["by_lane"].get(lane, 0) + 1
+    ALERT_ARBITER_STATS["by_source"][source] = ALERT_ARBITER_STATS["by_source"].get(source, 0) + 1
+    ALERT_ARBITER_STATS["by_reason"][reason] = ALERT_ARBITER_STATS["by_reason"].get(reason, 0) + 1
+    if outcome == ITEM_OUTCOME_WATCH:
+        SEARCH_LANE_BALANCE_STATS["watch_by_lane"][lane] = (
+            SEARCH_LANE_BALANCE_STATS["watch_by_lane"].get(lane, 0) + 1
+        )
+        examples = ALERT_ARBITER_STATS["watch_examples"]
+        title = str((decision.get("item") or {}).get("title") or "")[:70]
+        if title and len(examples) < 8:
+            examples.append({"lane": lane, "reason": reason, "title": title})
+
+
+def _arbiter_negative_signals(item: dict, result: dict, lane_info: dict) -> list[str]:
+    text = _raw_presend_text(item or {})
+    negatives = list(_lane_policy_hard_blocks(item, result, result.get("engine") or "ARB"))
+    if not _raw_is_clothing(text, item or {}):
+        negatives.append("non_clothing")
+    if raw_contains_any_phrase(text, [
+        "elbenwald", "logoshirt", "h&m", "hm", "primark", "zara",
+        "bershka", "pull&bear", "pull and bear", "reserved", "sinsay",
+        "cropp", "house", "pepco",
+    ]):
+        negatives.append("modern_merch_or_fast_fashion_brand")
+    if raw_contains_any_phrase(text, [
+        "baby tee", "crop", "cropped", "v-neck", "v neck", "tank top",
+        "fitted", "bluzka", "top damski",
+    ]):
+        negatives.append("women_basic_fitted")
+    if raw_contains_any_phrase(text, RAW_STYLE_BASIC_TERMS):
+        negatives.append("generic_blank_basic")
+    if raw_contains_any_phrase(text, ["fake", "reprint", "inspired", "vintage style", "vintage vibe"]):
+        negatives.append("fake_reprint_or_style_only")
+    weak_hits = [term for term in WEAK_DESCRIPTOR_TERMS if raw_contains_phrase(text, term)]
+    if len(weak_hits) >= 3 and len(lane_info.get("hard_auth_signals") or []) < 2:
+        negatives.append("keyword_spam_without_auth")
+    if raw_contains_any_phrase(text, ["kids", "children", "youth", "dzieci", "junior"]) or re.search(r"\b(9[8-9]|1[0-5][0-9]|16[0-4])\b", raw_normalize_text(text)):
+        negatives.append("kids_or_youth_size")
+    return list(dict.fromkeys(negatives))
+
+
+def _arbiter_hits(text: str, phrases: list[str]) -> list[str]:
+    return [phrase for phrase in phrases if raw_contains_phrase(text, phrase)]
+
+
+def decide_alert_outcome(item, result=None, source=None, query=None) -> dict:
+    item = item or {}
+    result = result or {}
+    source = source or result.get("engine") or "UNKNOWN"
+    text = _raw_presend_text(item)
+    lane_info = result.get("_lane_info") or classify_item_lanes(item, result)
+    result["_lane_info"] = lane_info
+    matched = lane_info.get("matched_lanes") or []
+    primary = lane_info.get("primary_lane") or "none"
+    levels = lane_info.get("lane_levels") or {}
+    hard_auth = list(dict.fromkeys((lane_info.get("hard_auth_signals") or []) + validated_real_signal_reasons(item, result, result.get("raw_style_bucket"))))
+    context = lane_info.get("context_signals") or []
+    markers = lane_info.get("markers") or []
+    negatives = _arbiter_negative_signals(item, result, lane_info)
+    watch_reasons: list[str] = []
+    alert_reasons: list[str] = []
+
+    def add_alert(reason: str):
+        if reason not in alert_reasons:
+            alert_reasons.append(reason)
+
+    def add_watch(reason: str):
+        if reason not in watch_reasons:
+            watch_reasons.append(reason)
+
+    if "vintage_auth" in matched and hard_auth:
+        add_alert("vintage_auth_route")
+    if "music_band" in matched:
+        music_auth = _arbiter_hits(text, [
+            "tour", "concert", "world tour", "festival", "single stitch",
+            "made in usa", "made in u.s.a", "giant", "brockum", "winterland",
+            "screen stars", "hanes beefy", "fruit of the loom usa", "changes",
+            "tultex", "anvil", "jerzees",
+        ]) + _lane_year_signals(text)
+        if music_auth:
+            add_alert("music_band_auth_route")
+        else:
+            add_watch("band_name_without_auth_context")
+    if "designer_archive" in matched:
+        designer_context = _arbiter_hits(text, DESIGNER_ARCHIVE_CONTEXT_SIGNALS)
+        if len(designer_context) >= 2:
+            add_alert("designer_archive_context_route")
+        else:
+            add_watch("designer_brand_without_archive_context")
+    if "workwear" in matched:
+        workwear_anchors = _arbiter_hits(text, WORKWEAR_MODEL_ANCHORS + ["ben davis vintage"])
+        if workwear_anchors:
+            add_alert("workwear_model_anchor_route")
+        else:
+            add_watch("workwear_brand_without_model_anchor")
+    if "sport_racing" in matched:
+        sport_auth = _arbiter_hits(text, [
+            "jeff hamilton", "jh design", "nascar", "racing jacket",
+            "chalk line", "starter", "logo 7", "nutmeg", "salem sportswear",
+            "daytona", "sturgis", "bike week", "single stitch", "made in usa",
+        ]) + _lane_year_signals(text)
+        if sport_auth and (hard_auth or len(sport_auth) >= 2):
+            add_alert("sport_racing_collector_route")
+        else:
+            add_watch("sport_racing_without_auth_context")
+    if "pop_culture" in matched:
+        pop_level = int(levels.get("pop_culture", 0) or 0)
+        if pop_level >= 3:
+            add_alert("pop_culture_auth_route")
+        else:
+            pop_reason = _lane_policy_presend_block_reason(item, result, lane_info, source) or "pop_culture_marker_without_auth_context"
+            add_watch(pop_reason)
+    if "military" in matched:
+        branch = raw_contains_any_phrase(text, ["us army", "u.s. army", "us navy", "u.s. navy", "usmc", "marines", "air force", "usaf"])
+        military_context = _arbiter_hits(text, US_MILITARY_CONTEXT_SIGNALS) + _lane_year_signals(text)
+        if branch and military_context:
+            add_alert("us_military_vintage_context_route")
+        else:
+            add_watch("military_marker_without_auth_context")
+
+    score = float(result.get("final_score") or result.get("raw_style_score") or result.get("signal_quality_score") or 0)
+    if not matched and (result.get("_target_rescue") or score >= 85):
+        add_watch("broad_discovery_needs_auth")
+    if not matched and not watch_reasons:
+        add_watch("no_target_lane_match")
+    if (source in {"CHAOS", "SAFEGUARD", "FALLBACK"} or str(result.get("engine") or "") == "CHAOS") and not alert_reasons:
+        add_watch("broad_discovery_watch_only")
+
+    exceptional_auth = len(hard_auth) >= 3 or any("single stitch" in str(x) or "made in usa" in str(x) for x in hard_auth)
+    severe_negative = any(reason in negatives for reason in [
+        "kids_presend_block", "kids_or_youth_size", "non_clothing",
+        "fake_reprint_or_style_only", "fast_fashion_presend_block",
+    ])
+    if negatives and alert_reasons and not exceptional_auth:
+        outcome = ITEM_OUTCOME_WATCH
+        reason = "positive_negative_conflict_watch"
+    elif severe_negative and not exceptional_auth:
+        outcome = ITEM_OUTCOME_DISCARD
+        reason = negatives[0]
+    elif alert_reasons:
+        if (
+            "pop_culture" in matched
+            and not _pop_culture_high_auth(lane_info)
+            and LANE_SENT_COUNT_PER_CYCLE.get("pop_culture", 0) >= POP_CULTURE_MAX_SEND_PER_CYCLE
+        ):
+            outcome = ITEM_OUTCOME_WATCH
+            reason = "pop_culture_send_budget_watch"
+            POP_CULTURE_AUTH_STATS["budget_blocked"] += 1
+            LANE_POLICY_STATS["pop_culture_budget_blocked"] += 1
+            print(f"[POP_CULTURE_SEND_BUDGET_BLOCK] source={source} "
+                  f"title={str(item.get('title') or '')[:70]}")
+        elif primary in LANES and LANE_SENT_COUNT_PER_CYCLE.get(primary, 0) >= MAX_SENDS_PER_LANE_PER_CYCLE:
+            outcome = ITEM_OUTCOME_WATCH
+            reason = "lane_send_cap_watch"
+        else:
+            outcome = ITEM_OUTCOME_ALERT
+            reason = alert_reasons[0]
+    elif watch_reasons or markers:
+        outcome = ITEM_OUTCOME_WATCH
+        reason = watch_reasons[0] if watch_reasons else "marker_only_watch"
+    else:
+        outcome = ITEM_OUTCOME_DISCARD
+        reason = "no_alert_reason"
+
+    decision = {
+        "outcome": outcome,
+        "reason": reason,
+        "primary_lane": primary,
+        "matched_lanes": matched,
+        "signals": list(dict.fromkeys((result.get("raw_style_signals") or []) + (result.get("taste_signals") or []) + (result.get("desirable_signals") or [])))[:12],
+        "hard_auth_signals": hard_auth[:12],
+        "negative_signals": negatives[:12],
+        "watch_reasons": watch_reasons[:8],
+        "alert_reasons": alert_reasons[:8],
+        "source": source,
+        "engine": result.get("engine") or source,
+        "markers": markers[:12],
+        "context_signals": context[:12],
+        "item": item,
+        "query": query or (item.get("_search_meta") or {}).get("name"),
+    }
+    if "pop_culture" in matched:
+        if outcome == ITEM_OUTCOME_ALERT:
+            POP_CULTURE_AUTH_STATS["auth_pass"] += 1
+        else:
+            _pop_culture_auth_block_bump(reason)
+    _alert_arbiter_bump(decision)
+    _lane_policy_enforcement_bump(outcome == ITEM_OUTCOME_ALERT, source, primary, reason)
+    result["_alert_arbiter_decision"] = {k: v for k, v in decision.items() if k != "item"}
+    return decision
+
+
 def enforce_lane_policy_before_send(item, result, source, query=None) -> tuple[bool, str, dict]:
     item = item or {}
     result = result or {}
@@ -4398,15 +4704,9 @@ def enforce_lane_policy_before_send(item, result, source, query=None) -> tuple[b
 
 
 def lane_send_budget_allows(item: dict, result: dict, source: str) -> tuple[bool, str]:
-    lane_info = result.get("_lane_info") or classify_item_lanes(item, result)
-    result["_lane_info"] = lane_info
-    if "pop_culture" in (lane_info.get("matched_lanes") or []) and not _pop_culture_high_auth(lane_info):
-        if LANE_SENT_COUNT_PER_CYCLE.get("pop_culture", 0) >= POP_CULTURE_MAX_SEND_PER_CYCLE:
-            LANE_POLICY_STATS["pop_culture_budget_blocked"] += 1
-            POP_CULTURE_AUTH_STATS["budget_blocked"] += 1
-            print(f"[POP_CULTURE_SEND_BUDGET_BLOCK] source={source} "
-                  f"title={str(item.get('title') or '')[:70]}")
-            return False, "pop_culture_send_budget_block"
+    # Final send budgets are enforced by decide_alert_outcome() so every
+    # Telegram skip has an arbiter outcome.
+    result["_lane_info"] = result.get("_lane_info") or classify_item_lanes(item, result)
     return True, "pass"
 
 
@@ -4418,6 +4718,7 @@ def lane_record_send(item: dict, result: dict):
         LANE_SENT_COUNT_PER_CYCLE["pop_culture"] = LANE_SENT_COUNT_PER_CYCLE.get("pop_culture", 0) + 1
     if primary in LANES:
         LANE_SENT_COUNT_PER_CYCLE[primary] = LANE_SENT_COUNT_PER_CYCLE.get(primary, 0) + 1
+        _search_lane_balance_bump(primary, "sent")
 
 
 def telegram_presend_gate(item, result=None, source="MAIN") -> tuple[bool, str]:
@@ -5623,9 +5924,24 @@ def send_message(text, photo_url=None, item_link=None):
 # ─────────────────────────────────────────
 def send_alert_message(text, item: dict, result: dict, source: str, key: str, photo_url=None, item_link=None, query=None) -> bool:
     title = str((item or {}).get("title") or "")[:60]
-    allowed, lane_reason, lane_info = enforce_lane_policy_before_send(item, result, source, query=query)
-    if not allowed:
+    decision = decide_alert_outcome(item, result, source, query=query)
+    if decision.get("outcome") != ITEM_OUTCOME_ALERT:
+        print(f"[ALERT_ARBITER_BLOCK] outcome={decision.get('outcome')} "
+              f"reason={decision.get('reason')} lane={decision.get('primary_lane')} "
+              f"source={source} title={title} "
+              f"signals={(decision.get('signals') or [])[:5]} "
+              f"hard_auth={(decision.get('hard_auth_signals') or [])[:5]} "
+              f"negatives={(decision.get('negative_signals') or [])[:5]}")
+        qname = query or (item.get("_search_meta") or {}).get("name")
+        if qname:
+            query_coverage_record(qname)["blocked_count"] += 1
+        audit_candidate("final_skip", item, result=result, block_reason=decision.get("reason"),
+                        alert_type=_alert_type(result, source), score=result.get("final_score"))
         return False
+    print(f"[ALERT_ARBITER_PASS] lane={decision.get('primary_lane')} "
+          f"reason={decision.get('reason')} source={source} title={title} "
+          f"alert_reasons={(decision.get('alert_reasons') or [])[:5]} "
+          f"hard_auth={(decision.get('hard_auth_signals') or [])[:5]}")
     print(f"[SEND_ATTEMPT] source={source} key={key} title={title}")
     ok = send_message(text, photo_url=photo_url, item_link=item_link)
     if ok:
@@ -7841,8 +8157,13 @@ while True:
             if planned_search.get("taste_discovery") or planned_search.get("fresh_discovery"):
                 continue
             planned_query = planned_search.get("name") or "unknown"
+            planned_lane = fresh_discovery_query_lane(planned_query)
+            _search_lane_balance_bump(planned_lane, "selected")
+            if planned_search.get("legacy_deprioritized"):
+                print(f"[LEGACY_FALLBACK_WATCH_ONLY] query={planned_query} "
+                      f"reason=broad_discovery_not_direct_alert")
             print(f"[QUERY_LANE_ASSIGNMENT] query={planned_query} "
-                  f"lane={fresh_discovery_query_lane(planned_query)} source=core")
+                  f"lane={planned_lane} source=core")
 
         print(f"  [CYCLE] search_count={len(this_cycle_searches)} "
               f"(target={n_searches})")
