@@ -1678,6 +1678,10 @@ LEGACY_DEPRIORITIZED_SEARCH_NAMES = {
     "Arc'teryx", "Arc'teryx Beta", "Salomon", "Salomon XT-6",
     "Designer Sunglasses", "Funko Pop",
 }
+LEGACY_FALLBACK_WATCH_ONLY_QUERIES = LEGACY_DEPRIORITIZED_SEARCH_NAMES | {
+    "Old Jeans Vintage", "Leather Jacket Vintage", "Vintage T-Shirt",
+    "Stussy", "Corteiz", "ASICS", "New Balance",
+}
 for _search in SEARCHES:
     if _search.get("name") in LEGACY_DEPRIORITIZED_SEARCH_NAMES:
         _search["layer"] = "legacy_audit"
@@ -2318,6 +2322,18 @@ ALERT_ARBITER_STATS = {
     "watch_examples": [],
     "non_pop_watch_examples": [],
     "lane_examples": {},
+}
+EARLY_HIDDEN_GEM_STATS = {
+    "checked": 0,
+    "watch": 0,
+    "alert_candidate": 0,
+    "discard": 0,
+    "by_lane": {},
+    "watch_by_lane": {},
+    "top_examples": [],
+    "non_pop_watch_examples": [],
+    "retained_after_filter": 0,
+    "legacy": {},
 }
 SEARCH_LANE_BALANCE_STATS = {
     "selected_by_lane": {},
@@ -3134,6 +3150,18 @@ def reset_fresh_discovery_cycle():
         "non_pop_watch_examples": [],
         "lane_examples": {},
     })
+    EARLY_HIDDEN_GEM_STATS.update({
+        "checked": 0,
+        "watch": 0,
+        "alert_candidate": 0,
+        "discard": 0,
+        "by_lane": {},
+        "watch_by_lane": {},
+        "top_examples": [],
+        "non_pop_watch_examples": [],
+        "retained_after_filter": 0,
+        "legacy": {},
+    })
     SEARCH_LANE_BALANCE_STATS.update({
         "selected_by_lane": {},
         "sent_by_lane": {},
@@ -3873,15 +3901,34 @@ def print_fresh_discovery_summary():
           f"by_lane={ALERT_ARBITER_STATS['by_lane']} "
           f"by_source={ALERT_ARBITER_STATS['by_source']} "
           f"by_reason={ALERT_ARBITER_STATS['by_reason']}")
-    print(f"[WATCH_SUMMARY] count={ALERT_ARBITER_STATS['watch']} "
+    print(f"[EARLY_HIDDEN_GEM_SUMMARY] checked={EARLY_HIDDEN_GEM_STATS['checked']} "
+          f"watch={EARLY_HIDDEN_GEM_STATS['watch']} "
+          f"alert_candidate={EARLY_HIDDEN_GEM_STATS['alert_candidate']} "
+          f"discard={EARLY_HIDDEN_GEM_STATS['discard']} "
+          f"retained_after_filter={EARLY_HIDDEN_GEM_STATS['retained_after_filter']} "
+          f"by_lane={EARLY_HIDDEN_GEM_STATS['by_lane']}")
+    total_watch = (
+        ALERT_ARBITER_STATS["watch"]
+        + EARLY_HIDDEN_GEM_STATS["watch"]
+        + EARLY_HIDDEN_GEM_STATS["alert_candidate"]
+    )
+    watch_examples = (
+        EARLY_HIDDEN_GEM_STATS["top_examples"]
+        + ALERT_ARBITER_STATS["watch_examples"]
+    )[:10]
+    non_pop_examples = (
+        EARLY_HIDDEN_GEM_STATS["non_pop_watch_examples"]
+        + ALERT_ARBITER_STATS["non_pop_watch_examples"]
+    )[:10]
+    print(f"[WATCH_SUMMARY] count={total_watch} "
           f"by_lane={SEARCH_LANE_BALANCE_STATS['watch_by_lane']} "
-          f"top_examples={ALERT_ARBITER_STATS['watch_examples']}")
+          f"top_examples={watch_examples}")
     print(f"[NON_POP_WATCH_SUMMARY] "
           f"designer_watch={SEARCH_LANE_BALANCE_STATS['watch_by_lane'].get('designer_archive', 0)} "
           f"workwear_watch={SEARCH_LANE_BALANCE_STATS['watch_by_lane'].get('workwear', 0)} "
           f"music_watch={SEARCH_LANE_BALANCE_STATS['watch_by_lane'].get('music_band', 0)} "
           f"military_watch={SEARCH_LANE_BALANCE_STATS['watch_by_lane'].get('military', 0)} "
-          f"top_examples={ALERT_ARBITER_STATS['non_pop_watch_examples']}")
+          f"top_examples={non_pop_examples}")
     for lane in ("designer_archive", "workwear", "music_band", "military"):
         seen = int(LANE_POLICY_STATS[lane]["seen"])
         candidates = int(LANE_POLICY_STATS[lane]["candidates"])
@@ -3892,6 +3939,17 @@ def print_fresh_discovery_summary():
                   f"candidates={candidates} watch=0 sent=0 "
                   f"top_block_reasons={LANE_POLICY_STATS['top_block_reasons']} "
                   f"top_examples={ALERT_ARBITER_STATS['lane_examples'].get(lane, [])}")
+            print(f"[WATCH_PIPELINE_GAP] lane={lane} seen={seen} "
+                  f"reason=no_early_watch_created "
+                  f"top_block_reasons={LANE_POLICY_STATS['top_block_reasons']}")
+    if AUDIT_STATS.get("seen", 0) > 0 and (ALERT_ARBITER_STATS["checked"] + EARLY_HIDDEN_GEM_STATS["checked"]) == 0:
+        print(f"[ARBITER_NOT_REACHED_WARNING] seen_items={AUDIT_STATS.get('seen', 0)} "
+              f"reason=old_pipeline_filtered_before_arbiter")
+    for legacy_query, legacy_stats in EARLY_HIDDEN_GEM_STATS["legacy"].items():
+        print(f"[LEGACY_FALLBACK_WATCH_ONLY] query={legacy_query} "
+              f"items_seen={legacy_stats.get('items_seen', 0)} "
+              f"watch_created={legacy_stats.get('watch_created', 0)} "
+              f"alert_candidates={legacy_stats.get('alert_candidates', 0)}")
     print(f"[SEARCH_LANE_BALANCE_SUMMARY] "
           f"selected_by_lane={SEARCH_LANE_BALANCE_STATS['selected_by_lane']} "
           f"sent_by_lane={SEARCH_LANE_BALANCE_STATS['sent_by_lane']} "
@@ -4502,6 +4560,162 @@ def _alert_arbiter_bump(decision: dict):
             lane_examples.append({"outcome": outcome, "reason": reason, "title": title})
 
 
+def _early_hidden_gem_bump(decision: dict, query: str | None = None):
+    outcome = decision.get("outcome") or ITEM_OUTCOME_DISCARD
+    lane = decision.get("lane") or "none"
+    reason = decision.get("reason") or outcome
+    EARLY_HIDDEN_GEM_STATS["checked"] += 1
+    EARLY_HIDDEN_GEM_STATS[outcome] = EARLY_HIDDEN_GEM_STATS.get(outcome, 0) + 1
+    EARLY_HIDDEN_GEM_STATS["by_lane"][lane] = EARLY_HIDDEN_GEM_STATS["by_lane"].get(lane, 0) + 1
+    title = str((decision.get("item") or {}).get("title") or "")[:70]
+    if outcome in {ITEM_OUTCOME_WATCH, "alert_candidate"}:
+        EARLY_HIDDEN_GEM_STATS["watch_by_lane"][lane] = (
+            EARLY_HIDDEN_GEM_STATS["watch_by_lane"].get(lane, 0) + 1
+        )
+        SEARCH_LANE_BALANCE_STATS["watch_by_lane"][lane] = (
+            SEARCH_LANE_BALANCE_STATS["watch_by_lane"].get(lane, 0) + 1
+        )
+        examples = EARLY_HIDDEN_GEM_STATS["top_examples"]
+        if title and len(examples) < 10:
+            examples.append({"lane": lane, "outcome": outcome, "reason": reason, "title": title})
+        if lane in {"designer_archive", "workwear", "music_band", "military"}:
+            non_pop = EARLY_HIDDEN_GEM_STATS["non_pop_watch_examples"]
+            if title and len(non_pop) < 10:
+                non_pop.append({"lane": lane, "outcome": outcome, "reason": reason, "title": title})
+    if query in LEGACY_FALLBACK_WATCH_ONLY_QUERIES:
+        legacy = EARLY_HIDDEN_GEM_STATS["legacy"].setdefault(
+            query, {"items_seen": 0, "watch_created": 0, "alert_candidates": 0}
+        )
+        legacy["items_seen"] += 1
+        if outcome == ITEM_OUTCOME_WATCH:
+            legacy["watch_created"] += 1
+        elif outcome == "alert_candidate":
+            legacy["alert_candidates"] += 1
+
+
+def evaluate_item_for_hidden_gem(item, query=None, source=None) -> dict:
+    item = item or {}
+    result = {"engine": source or "EARLY"}
+    text = _raw_presend_text(item)
+    lane_info = classify_item_lanes(item, result)
+    matched = lane_info.get("matched_lanes") or []
+    primary = lane_info.get("primary_lane") or "none"
+    levels = lane_info.get("lane_levels") or {}
+    hard_auth = list(dict.fromkeys((lane_info.get("hard_auth_signals") or []) + validated_real_signal_reasons(item, result)))
+    negatives = _arbiter_negative_signals(item, result, lane_info)
+    signals = list(dict.fromkeys((lane_info.get("markers") or []) + (lane_info.get("context_signals") or [])))
+    watch_reason = ""
+    alert_reason = ""
+
+    if "vintage_auth" in matched and hard_auth:
+        alert_reason = "vintage_auth_route"
+    elif "pop_culture" in matched:
+        if int(levels.get("pop_culture", 0) or 0) >= 3 and _pop_culture_high_auth(lane_info):
+            alert_reason = "pop_culture_auth_route"
+        else:
+            watch_reason = _lane_policy_presend_block_reason(item, result, lane_info, source or "EARLY") or "pop_culture_marker_without_auth_context"
+    elif "designer_archive" in matched:
+        designer_context = _arbiter_hits(text, DESIGNER_ARCHIVE_CONTEXT_SIGNALS)
+        if len(designer_context) >= 2:
+            alert_reason = "designer_archive_context_route"
+        elif designer_context:
+            watch_reason = "designer_archive_watch_context"
+        else:
+            watch_reason = "designer_brand_without_archive_context"
+    elif "workwear" in matched:
+        workwear_context = _arbiter_hits(text, WORKWEAR_MODEL_ANCHORS + [
+            "ben davis vintage", "canvas", "duck", "cordura", "fire resistant",
+            "fr", "chore", "active", "detroit", "santa fe", "michigan",
+            "double knee", "carpenter", "blanket lined", "made in usa",
+            "union made", "faded", "distressed", "workwear", "90s", "00s",
+            "anorak", "chore coat", "storm rider", "heavy flannel",
+            "wool flannel",
+        ])
+        if len(workwear_context) >= 2:
+            alert_reason = "workwear_model_anchor_route"
+        elif workwear_context:
+            watch_reason = "workwear_possible_model_context"
+        else:
+            watch_reason = "workwear_brand_without_model_anchor"
+    elif "music_band" in matched:
+        music_auth = _arbiter_hits(text, [
+            "single stitch", "made in usa", "made in u.s.a", "giant",
+            "brockum", "winterland", "screen stars", "hanes beefy",
+            "fruit of the loom usa", "changes", "tultex", "anvil", "jerzees",
+        ])
+        music_context = _arbiter_hits(text, ["tour", "concert", "world tour", "festival"]) + _lane_year_signals(text)
+        if music_auth:
+            alert_reason = "music_band_auth_route"
+        elif music_context:
+            watch_reason = "music_band_watch_context"
+        else:
+            watch_reason = "band_name_without_auth_context"
+    elif "military" in matched:
+        branch = raw_contains_any_phrase(text, ["us army", "u.s. army", "us navy", "u.s. navy", "usmc", "marines", "air force", "usaf"])
+        military_context = _arbiter_hits(text, US_MILITARY_CONTEXT_SIGNALS) + _lane_year_signals(text)
+        if branch and military_context and raw_contains_any_phrase(text, ["single stitch", "made in usa", "old tag", "pt shirt", "base", "squadron", "battalion", "division", "desert storm"]):
+            alert_reason = "us_military_vintage_context_route"
+        elif branch or military_context:
+            watch_reason = "military_watch_context"
+        else:
+            watch_reason = "military_marker_without_auth_context"
+    elif "sport_racing" in matched:
+        sport_auth = _arbiter_hits(text, ["jeff hamilton", "jh design", "nascar", "racing jacket", "chalk line", "starter", "logo 7", "nutmeg", "salem sportswear"]) + _lane_year_signals(text)
+        if sport_auth and (hard_auth or len(sport_auth) >= 2):
+            alert_reason = "sport_racing_collector_route"
+        elif sport_auth:
+            watch_reason = "sport_racing_watch_context"
+
+    severe_negative = any(reason in negatives for reason in [
+        "kids_presend_block", "kids_or_youth_size", "non_clothing",
+        "fake_reprint_or_style_only", "fast_fashion_presend_block",
+        "generic_military_style",
+    ])
+    exceptional_auth = len(hard_auth) >= 3 or any("single stitch" in str(x) or "made in usa" in str(x) for x in hard_auth)
+    if severe_negative and not exceptional_auth:
+        outcome = ITEM_OUTCOME_DISCARD
+        reason = negatives[0]
+    elif alert_reason:
+        outcome = "alert_candidate"
+        reason = alert_reason
+    elif watch_reason or matched:
+        outcome = ITEM_OUTCOME_WATCH
+        reason = watch_reason or "marker_only_watch"
+    else:
+        outcome = ITEM_OUTCOME_DISCARD
+        reason = "no_hidden_gem_signal"
+
+    decision = {
+        "outcome": outcome,
+        "lane": primary,
+        "matched_lanes": matched,
+        "signals": signals[:12],
+        "hard_auth_signals": hard_auth[:12],
+        "negative_signals": negatives[:12],
+        "reason": reason,
+        "watch_reason": watch_reason,
+        "alert_reason": alert_reason,
+        "source": source or "EARLY",
+        "query": query,
+        "item": item,
+    }
+    _early_hidden_gem_bump(decision, query=query)
+    if outcome != ITEM_OUTCOME_DISCARD or VERBOSE_ITEM_DEBUG:
+        print(f"[EARLY_HIDDEN_GEM] outcome={outcome} lane={primary} reason={reason} "
+              f"query={query} title={str(item.get('title') or '')[:70]}")
+    return {k: v for k, v in decision.items() if k != "item"}
+
+
+def retain_early_watch_after_filter(item, later_block_reason: str):
+    early = (item or {}).get("_early_hidden_gem") or {}
+    if early.get("outcome") not in {ITEM_OUTCOME_WATCH, "alert_candidate"}:
+        return
+    EARLY_HIDDEN_GEM_STATS["retained_after_filter"] += 1
+    print(f"[WATCH_RETAINED_AFTER_FILTER] lane={early.get('lane')} "
+          f"early_reason={early.get('reason')} later_block_reason={later_block_reason} "
+          f"title={str((item or {}).get('title') or '')[:70]}")
+
+
 def _arbiter_negative_signals(item: dict, result: dict, lane_info: dict) -> list[str]:
     text = _raw_presend_text(item or {})
     negatives = list(_lane_policy_hard_blocks(item, result, result.get("engine") or "ARB"))
@@ -4686,6 +4900,16 @@ def decide_alert_outcome(item, result=None, source=None, query=None) -> dict:
     else:
         outcome = ITEM_OUTCOME_DISCARD
         reason = "no_alert_reason"
+
+    early_decision = result.get("_early_hidden_gem") or item.get("_early_hidden_gem") or {}
+    final_upgrade_auth = len(hard_auth) >= 3 or any(
+        ("single stitch" in str(sig).lower() or "made in usa" in str(sig).lower())
+        for sig in hard_auth
+    )
+    if outcome == ITEM_OUTCOME_ALERT and early_decision.get("outcome") != "alert_candidate" and not final_upgrade_auth:
+        outcome = ITEM_OUTCOME_WATCH
+        reason = "engine_alert_without_early_candidate_watch"
+        add_watch(reason)
 
     decision = {
         "outcome": outcome,
@@ -5682,6 +5906,7 @@ def send_raw_style_candidates(max_cycle_slots: int, sent_this_cycle: int) -> int
                 print(f"[TARGET_RESCUE_FINAL_BLOCK] title={str(item.get('title') or '')[:70]} "
                       f"reason={presend_reason} "
                       f"strong_signals={(result.get('_target_rescue_signals') or [])[:6]}")
+            retain_early_watch_after_filter(item, presend_reason)
             audit_candidate("blocked", item, result=result, block_reason=presend_reason,
                             alert_type="RAW_STYLE", score=result.get("raw_style_score"),
                             bucket=result.get("raw_style_bucket"), signals=result.get("raw_style_signals"))
@@ -6011,6 +6236,8 @@ def send_message(text, photo_url=None, item_link=None):
 # ─────────────────────────────────────────
 def send_alert_message(text, item: dict, result: dict, source: str, key: str, photo_url=None, item_link=None, query=None) -> bool:
     title = str((item or {}).get("title") or "")[:60]
+    if item and result is not None and item.get("_early_hidden_gem") and not result.get("_early_hidden_gem"):
+        result["_early_hidden_gem"] = item.get("_early_hidden_gem")
     decision = decide_alert_outcome(item, result, source, query=query)
     if decision.get("outcome") != ITEM_OUTCOME_ALERT:
         print(f"[ALERT_ARBITER_BLOCK] outcome={decision.get('outcome')} "
@@ -6022,6 +6249,7 @@ def send_alert_message(text, item: dict, result: dict, source: str, key: str, ph
         qname = query or (item.get("_search_meta") or {}).get("name")
         if qname:
             query_coverage_record(qname)["blocked_count"] += 1
+        retain_early_watch_after_filter(item, decision.get("reason") or "alert_arbiter_block")
         audit_candidate("final_skip", item, result=result, block_reason=decision.get("reason"),
                         alert_type=_alert_type(result, source), score=result.get("final_score"))
         return False
@@ -7429,6 +7657,21 @@ def check_search(search, seen, market_price):
         items = parse_items_from_html(r.text)
         print(f"[{search['name']}] Ofert na stronie: {len(items)}")
 
+        for parsed_item in items:
+            if not parsed_item or parsed_item.get("_early_hidden_gem"):
+                continue
+            parsed_probe = dict(parsed_item)
+            parsed_probe["link"] = parsed_item.get("url", "")
+            parsed_probe["url"] = parsed_item.get("url", "")
+            parsed_probe["age_min"] = parse_item_age_minutes(parsed_item)
+            parsed_probe["_search_meta"] = {"name": search.get("name")}
+            early_hidden_gem = evaluate_item_for_hidden_gem(
+                parsed_probe,
+                query=search.get("name"),
+                source="PARSED",
+            )
+            parsed_item["_early_hidden_gem"] = early_hidden_gem
+
         fallback_mode   = search.get("_fallback_mode", False)
         hard_cutoff_min = 120 if fallback_mode else 360
 
@@ -7436,6 +7679,7 @@ def check_search(search, seen, market_price):
         for it in items:
             age = parse_item_age_minutes(it)
             if age is None or age > hard_cutoff_min:
+                retain_early_watch_after_filter(it, f"age_window_excluded:{age}")
                 continue
             tiered_items.append(it)
 
@@ -7522,47 +7766,59 @@ def check_search(search, seen, market_price):
                 query_coverage_record(search.get("name"))["items_seen"] += 1
                 verbose_item_log("audit_seen", f"[AUDIT_SEEN] query={search.get('name')} title={title[:60]}")
 
+                early_hidden_gem = item.get("_early_hidden_gem") or evaluate_item_for_hidden_gem(
+                    seen_audit_item,
+                    query=search.get("name"),
+                    source="PARSED",
+                )
+                seen_audit_item["_early_hidden_gem"] = early_hidden_gem
+                item["_early_hidden_gem"] = early_hidden_gem
+
+                def _block_after_early(reason: str, stage: str = "blocked", score=None):
+                    retain_early_watch_after_filter(seen_audit_item, reason)
+                    audit_candidate(stage, seen_audit_item, search, block_reason=reason, score=score)
+
                 if not item_id or not href:
-                    audit_candidate("blocked", seen_audit_item, search, block_reason="missing_id_or_url")
+                    _block_after_early("missing_id_or_url")
                     item_micro_delay(title)
                     continue
 
                 _seen_ts = seen.get(item_id)
                 if _seen_ts and (time.time() - _seen_ts) < 6 * 3600:
                     cnt_seen += 1
-                    audit_candidate("dedupe_skip", seen_audit_item, search, block_reason="seen_ttl")
+                    _block_after_early("seen_ttl", stage="dedupe_skip")
                     item_micro_delay(title)
                     continue
 
                 all_ids.append(item_id)
 
                 if not title or not href:
-                    audit_candidate("blocked", seen_audit_item, search, block_reason="missing_title_or_url")
+                    _block_after_early("missing_title_or_url")
                     item_micro_delay(title)
                     continue
 
                 _dedup_key = f"{title.lower().strip()}_{int(price or 0)}"
                 if _dedup_key in _seen_title_price:
                     cnt_seen += 1
-                    audit_candidate("dedupe_skip", seen_audit_item, search, block_reason="duplicate_title_price_in_search")
+                    _block_after_early("duplicate_title_price_in_search", stage="dedupe_skip")
                     item_micro_delay(title)
                     continue
                 _seen_title_price.add(_dedup_key)
 
                 title_lower = title.lower()
                 if any(ex in title_lower for ex in GLOBAL_EXCLUDE):
-                    audit_candidate("blocked", seen_audit_item, search, block_reason="global_exclude")
+                    _block_after_early("global_exclude")
                     item_micro_delay(title)
                     continue
 
                 if any(b in title_lower for b in BLOCKED_BRANDS):
-                    audit_candidate("blocked", seen_audit_item, search, block_reason="blocked_brand")
+                    _block_after_early("blocked_brand")
                     item_micro_delay(title)
                     continue
 
                 exclude_kw = search.get("exclude_keywords", [])
                 if exclude_kw and any(ek in title_lower for ek in exclude_kw):
-                    audit_candidate("blocked", seen_audit_item, search, block_reason="search_exclude_keyword")
+                    _block_after_early("search_exclude_keyword")
                     item_micro_delay(title)
                     continue
 
@@ -7571,24 +7827,25 @@ def check_search(search, seen, market_price):
                 raw_probe_item["url"] = href
                 raw_probe_item["age_min"] = age_min
                 raw_probe_item["_search_meta"] = {"name": search.get("name")}
+                raw_probe_item["_early_hidden_gem"] = early_hidden_gem
                 collect_raw_style_candidate(raw_probe_item, search)
 
                 if not price or price < search.get("min_price", 1):
                     cnt_price += 1
-                    audit_candidate("blocked", seen_audit_item, search, block_reason="price_below_search_min")
+                    _block_after_early("price_below_search_min")
                     item_micro_delay(title)
                     continue
 
                 if price < 18:
                     cnt_price += 1
-                    audit_candidate("blocked", seen_audit_item, search, block_reason="price_below_global_min")
+                    _block_after_early("price_below_global_min")
                     item_micro_delay(title)
                     continue
 
                 _non_latin = sum(1 for c in title if ord(c) > 591)
                 if _non_latin > len(title) * 0.3:
                     cnt_rejected += 1
-                    audit_candidate("blocked", seen_audit_item, search, block_reason="non_latin_title")
+                    _block_after_early("non_latin_title")
                     item_micro_delay(title)
                     continue
 
@@ -7602,15 +7859,15 @@ def check_search(search, seen, market_price):
                         cnt_profile_rej += 1
                         for reason in _reject_log:
                             reject_reasons[reason] = reject_reasons.get(reason, 0) + 1
-                        audit_candidate("blocked", seen_audit_item, search, block_reason="profile_filter:" + ",".join(_reject_log[:3]))
+                        _block_after_early("profile_filter:" + ",".join(_reject_log[:3]))
                         item_micro_delay(title)
                         continue
 
                 # ── Req 3 — HUMAN VIBE SKIP (10–15% random) ──────────
-                if human_vibe_skip(title, pct=0.12):
+                if early_hidden_gem.get("outcome") == ITEM_OUTCOME_DISCARD and human_vibe_skip(title, pct=0.12):
                     cnt_vibe_skip += 1
                     reject_reasons["vibe_skip"] = reject_reasons.get("vibe_skip", 0) + 1
-                    audit_candidate("blocked", seen_audit_item, search, block_reason="vibe_skip")
+                    _block_after_early("vibe_skip")
                     item_micro_delay(title)
                     continue
 
@@ -7640,7 +7897,7 @@ def check_search(search, seen, market_price):
                     if any(x in title_lower for x in TRASH_KEYWORDS_ITEM):
                         cnt_rejected += 1
                         reject_reasons["trash_keyword"] = reject_reasons.get("trash_keyword", 0) + 1
-                        audit_candidate("blocked", seen_audit_item, search, block_reason="trash_keyword")
+                        _block_after_early("trash_keyword")
                         item_micro_delay(title)
                         continue
 
@@ -7667,7 +7924,7 @@ def check_search(search, seen, market_price):
                         min_score = 2
                     if item_score < min_score:
                         cnt_kw += 1
-                        audit_candidate("blocked", seen_audit_item, search, block_reason=f"item_score_below_min:{item_score}<{min_score}", score=item_score)
+                        _block_after_early(f"item_score_below_min:{item_score}<{min_score}", score=item_score)
                         item_micro_delay(title)
                         continue
 
@@ -7680,7 +7937,7 @@ def check_search(search, seen, market_price):
                     and price < 40
                 ):
                     cnt_rejected += 1
-                    audit_candidate("blocked", seen_audit_item, search, block_reason="cheap_unbranded_not_vintage")
+                    _block_after_early("cheap_unbranded_not_vintage")
                     item_micro_delay(title)
                     continue
 
@@ -7744,7 +8001,7 @@ def check_search(search, seen, market_price):
                     )
                 if not qualifies:
                     cnt_rejected += 1
-                    audit_candidate("blocked", seen_audit_item, search, block_reason="normal_qualifier_false", score=_item_score_val)
+                    _block_after_early("normal_qualifier_false", score=_item_score_val)
                     item_micro_delay(title)
                     continue
 
@@ -7777,6 +8034,7 @@ def check_search(search, seen, market_price):
                     "ts": time.time(),
                     "age_min": age_min,
                     "_features": features,
+                    "_early_hidden_gem": early_hidden_gem,
                 })
                 audit_candidate("candidate", seen_audit_item, search, {
                     "engine": "PRE_ENGINE",
@@ -7850,6 +8108,12 @@ def check_search(search, seen, market_price):
                             f"title={title[:60]} signals={real_signal_reasons[:5]}",
                         )
                         continue
+                    early_hidden_gem = item.get("_early_hidden_gem") or evaluate_item_for_hidden_gem(
+                        item,
+                        query=search.get("name"),
+                        source="SAFEGUARD",
+                    )
+                    item["_early_hidden_gem"] = early_hidden_gem
                     SAFEGUARD_STATS["added"] += 1
                     found.append({
                         "id": item_id, "title": title, "link": href,
@@ -7866,6 +8130,7 @@ def check_search(search, seen, market_price):
                         "item_score": 1, "ts": time.time(),
                         "age_min": parse_item_age_minutes(item),
                         "_features": features,
+                        "_early_hidden_gem": early_hidden_gem,
                     })
                     processed_items += 1
                     if len(found) >= MAX_FOUND:
@@ -8401,6 +8666,7 @@ while True:
                     else:
                         print(f"[PRESEND_BLOCK] source={presend_source} reason={presend_reason} "
                               f"validated_signals={validated_signals} title={str(item.get('title') or '')[:60]}")
+                    retain_early_watch_after_filter(item, presend_reason)
                     audit_candidate("blocked", item, result=result, block_reason=presend_reason,
                                     alert_type=alert_type, score=result.get("final_score"),
                                     bucket=result.get("taste_bucket") or result.get("raw_style_bucket") or result.get("tier"),
@@ -8524,6 +8790,7 @@ while True:
                         SAFEGUARD_STATS["blocked_presend"] += 1
                         print(f"[SAFEGUARD_PRESEND_BLOCK] reason={presend_reason} "
                               f"validated_signals={validated_signals} title={str(item.get('title') or '')[:60]}")
+                        retain_early_watch_after_filter(item, presend_reason)
                         audit_candidate("blocked", item, result=result, block_reason=presend_reason,
                                         alert_type=alert_type, score=result.get("final_score"),
                                         bucket=result.get("taste_bucket") or result.get("raw_style_bucket") or result.get("tier"),
