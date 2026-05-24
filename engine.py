@@ -47,7 +47,7 @@ NO_MARKET_DATA_CAP_LOG_LIMIT = int(os.getenv("NO_MARKET_DATA_CAP_LOG_LIMIT", "10
 WATCH_ALERTS_ENABLED = os.getenv("WATCH_ALERTS_ENABLED", "0") == "1"
 WATCH_MAX_PER_CYCLE = int(os.getenv("WATCH_MAX_PER_CYCLE", "2"))
 TASTE_WATCH_ENABLED = os.getenv("TASTE_WATCH_ENABLED", "1") == "1"
-TASTE_WATCH_SEND_ENABLED = os.getenv("TASTE_WATCH_SEND_ENABLED", "1") == "1"
+TASTE_WATCH_SEND_ENABLED = os.getenv("TASTE_WATCH_SEND_ENABLED", "0") == "1"
 TASTE_WATCH_MAX_PER_CYCLE = int(os.getenv("TASTE_WATCH_MAX_PER_CYCLE", "2"))
 DEBUG_PIPELINE  = os.getenv("DEBUG_PIPELINE", "0") == "1"   # Part 7 — verbose pipeline log
 
@@ -4222,6 +4222,14 @@ class Engine:
                       f"signals={(r.get('taste_signals') or [])[:5]} "
                       f"title={str((r.get('item') or {}).get('title') or '')[:60]}")
             selected.extend(added_taste)
+        else:
+            for r in fallback_pool:
+                if r.get("taste_watch_candidate") or r.get("style_watch_sent"):
+                    r["send_alert"] = False
+                    r["send"] = False
+                    r["style_watch_sent"] = False
+                    print(f"  [TASTE_WATCH_SEND_DISABLED] title={str((r.get('item') or {}).get('title') or '')[:60]} "
+                          f"reason=watch_not_alert")
 
         if WATCH_ALERTS_ENABLED:
             watch_pool = []
@@ -4238,11 +4246,12 @@ class Engine:
             ), reverse=True)
             added_watch = watch_pool[:max(WATCH_MAX_PER_CYCLE, 0)]
             for r in added_watch:
-                r["send_alert"] = True
-                r["send"] = True
-            selected.extend(added_watch)
+                r["send_alert"] = False
+                r["send"] = False
+                print(f"  [WATCH_SEND_BLOCK] title={str((r.get('item') or {}).get('title') or '')[:60]} "
+                      f"source=ENGINE reason=watch_not_alert")
             if added_watch:
-                print(f"  [WATCH_SEND] enabled=1 selected={len(added_watch)} max={WATCH_MAX_PER_CYCLE}")
+                print(f"  [WATCH_SEND] enabled=1 watch_only={len(added_watch)} max={WATCH_MAX_PER_CYCLE}")
 
         brand_counts: dict[str, int] = {}
         sent_ids: set[str] = set()
@@ -4251,6 +4260,12 @@ class Engine:
         for pos, r in enumerate(selected, start=1):
             item_id  = str(r.get("item", {}).get("id", ""))
             is_grail = r.get("is_grail", False)
+            if r.get("watch_candidate") and not r.get("send_alert"):
+                print(f"  [WATCH_SEND_BLOCK] title={str((r.get('item') or {}).get('title') or '')[:60]} "
+                      f"source=ENGINE_FINAL reason=watch_not_alert")
+                r["send"] = False
+                r["send_alert"] = False
+                continue
 
             # Session-level dedup
             if item_id and item_id in sent_ids:
