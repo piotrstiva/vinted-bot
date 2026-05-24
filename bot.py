@@ -7,6 +7,7 @@ import base64
 import random
 import unicodedata
 import sys
+import hashlib
 from urllib.parse import quote_plus, urlparse
 from statistics import median
 from bs4 import BeautifulSoup
@@ -87,6 +88,49 @@ MAX_SENDS_PER_LANE_PER_CYCLE = int(os.getenv("MAX_SENDS_PER_LANE_PER_CYCLE", "2"
 WATCH_ALERTS_ENABLED = os.getenv("WATCH_ALERTS_ENABLED", "0") == "1"
 SAFEGUARD_RELAX_ALERTS_ENABLED = os.getenv("SAFEGUARD_RELAX_ALERTS_ENABLED", "0") == "1"
 
+
+def _file_sha256_short(path: str) -> str:
+    try:
+        with open(path, "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()[:12]
+    except Exception:
+        return "missing"
+
+
+def _resolve_engine_file_for_hash() -> str:
+    base = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
+    for candidate in ("engine.py", "engine (7).py"):
+        path = os.path.join(base, candidate)
+        if os.path.exists(path):
+            return path
+    return os.path.join(base, "engine.py")
+
+
+def print_build_trace():
+    bot_path = os.path.abspath(__file__) if "__file__" in globals() else sys.argv[0]
+    engine_path = _resolve_engine_file_for_hash()
+    git_commit = (
+        os.getenv("RAILWAY_GIT_COMMIT_SHA")
+        or os.getenv("GIT_COMMIT")
+        or os.getenv("SOURCE_VERSION")
+        or "unknown"
+    )
+    deploy_time = (
+        os.getenv("RAILWAY_DEPLOYMENT_STARTED_AT")
+        or os.getenv("DEPLOY_TIME")
+        or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    )
+    taste_watch_send_enabled = os.getenv("TASTE_WATCH_SEND_ENABLED", "0") == "1"
+    print(f"[BUILD_TRACE] git_commit={git_commit} deploy_time={deploy_time} "
+          f"bot_file_hash={_file_sha256_short(bot_path)} "
+          f"engine_file_hash={_file_sha256_short(engine_path)} "
+          f"arbiter_enabled=1 early_arbiter_enabled=1 lane_policy_enabled=1 "
+          f"watch_alerts_enabled={int(WATCH_ALERTS_ENABLED)} "
+          f"taste_watch_send_enabled={int(taste_watch_send_enabled)} "
+          f"railway_env_loaded=true")
+
+
+print_build_trace()
 if DETAIL_AGE_VERIFY_ENABLED:
     print("[DETAIL_AGE_VERIFY_ENABLED]")
 else:
@@ -100,6 +144,8 @@ print("[LANE_POLICY_GATE_ENABLED] "
       "sources_covered=[RAW_STYLE,TARGET_RESCUE,CHAOS,BRAND,GRAIL,SAFEGUARD,FALLBACK,STYLE_WATCH]")
 print("[ALERT_ARBITER_ENABLED] "
       "sources_covered=[RAW_STYLE,TARGET_RESCUE,CHAOS,BRAND,GRAIL,SAFEGUARD,FALLBACK,STYLE_WATCH,COLLECTOR_WATCH]")
+print("[SEND_PATH_AUDIT] item_alert_send_function=send_alert_message direct_send_paths_blocked=0 "
+      "sources_covered=[RAW_STYLE,TARGET_RESCUE,CHAOS,BRAND,GRAIL,SAFEGUARD,FALLBACK,TASTE_WATCH,STYLE_WATCH,COLLECTOR_WATCH]")
 
 # ─────────────────────────────────────────
 #  ⚡ SNIPER MODE
@@ -1682,6 +1728,19 @@ LEGACY_FALLBACK_WATCH_ONLY_QUERIES = LEGACY_DEPRIORITIZED_SEARCH_NAMES | {
     "Old Jeans Vintage", "Leather Jacket Vintage", "Vintage T-Shirt",
     "Stussy", "Corteiz", "ASICS", "New Balance",
 }
+CURATED_FALLBACK_SEARCH_NAMES = [
+    "Single Stitch Vintage",
+    "Made In USA Vintage",
+    "Band Tee Vintage Tour",
+    "Harley Davidson Vintage",
+    "Jeff Hamilton Jacket",
+    "Taste Discovery: screen stars",
+    "Taste Discovery: hanes beefy",
+    "Taste Discovery: fruit of the loom usa",
+    "Taste Discovery: carhartt active jacket",
+    "Taste Discovery: rrl",
+    "Taste Discovery: us army vintage tee",
+]
 for _search in SEARCHES:
     if _search.get("name") in LEGACY_DEPRIORITIZED_SEARCH_NAMES:
         _search["layer"] = "legacy_audit"
@@ -2334,6 +2393,22 @@ EARLY_HIDDEN_GEM_STATS = {
     "non_pop_watch_examples": [],
     "retained_after_filter": 0,
     "legacy": {},
+}
+SEND_PROVENANCE_STATS = {
+    "send_attempts": 0,
+    "send_success": 0,
+    "send_blocks": 0,
+    "blocked_missing_early_arbiter": 0,
+    "blocked_missing_final_arbiter": 0,
+    "blocked_missing_lane_policy": 0,
+    "blocked_final_not_alert": 0,
+    "blocked_lane_policy": 0,
+    "watch_send_blocks": 0,
+    "legacy_query_watch_only": 0,
+    "provenance_count": 0,
+    "alerts_by_source": {},
+    "alerts_by_engine": {},
+    "alerts_by_lane": {},
 }
 SEARCH_LANE_BALANCE_STATS = {
     "selected_by_lane": {},
@@ -3162,6 +3237,22 @@ def reset_fresh_discovery_cycle():
         "retained_after_filter": 0,
         "legacy": {},
     })
+    SEND_PROVENANCE_STATS.update({
+        "send_attempts": 0,
+        "send_success": 0,
+        "send_blocks": 0,
+        "blocked_missing_early_arbiter": 0,
+        "blocked_missing_final_arbiter": 0,
+        "blocked_missing_lane_policy": 0,
+        "blocked_final_not_alert": 0,
+        "blocked_lane_policy": 0,
+        "watch_send_blocks": 0,
+        "legacy_query_watch_only": 0,
+        "provenance_count": 0,
+        "alerts_by_source": {},
+        "alerts_by_engine": {},
+        "alerts_by_lane": {},
+    })
     SEARCH_LANE_BALANCE_STATS.update({
         "selected_by_lane": {},
         "sent_by_lane": {},
@@ -3950,6 +4041,25 @@ def print_fresh_discovery_summary():
               f"items_seen={legacy_stats.get('items_seen', 0)} "
               f"watch_created={legacy_stats.get('watch_created', 0)} "
               f"alert_candidates={legacy_stats.get('alert_candidates', 0)}")
+    print(f"[SEND_PROVENANCE_SUMMARY] send_attempts={SEND_PROVENANCE_STATS['send_attempts']} "
+          f"send_success={SEND_PROVENANCE_STATS['send_success']} "
+          f"send_blocks={SEND_PROVENANCE_STATS['send_blocks']} "
+          f"blocked_missing_early_arbiter={SEND_PROVENANCE_STATS['blocked_missing_early_arbiter']} "
+          f"blocked_missing_final_arbiter={SEND_PROVENANCE_STATS['blocked_missing_final_arbiter']} "
+          f"blocked_missing_lane_policy={SEND_PROVENANCE_STATS['blocked_missing_lane_policy']} "
+          f"blocked_final_not_alert={SEND_PROVENANCE_STATS['blocked_final_not_alert']} "
+          f"blocked_lane_policy={SEND_PROVENANCE_STATS['blocked_lane_policy']} "
+          f"watch_send_blocks={SEND_PROVENANCE_STATS['watch_send_blocks']} "
+          f"legacy_query_watch_only={SEND_PROVENANCE_STATS['legacy_query_watch_only']} "
+          f"fallback_pool=curated "
+          f"alerts_by_source={SEND_PROVENANCE_STATS['alerts_by_source']} "
+          f"alerts_by_engine={SEND_PROVENANCE_STATS['alerts_by_engine']} "
+          f"alerts_by_lane={SEND_PROVENANCE_STATS['alerts_by_lane']}")
+    if (
+        SEND_PROVENANCE_STATS["send_success"] > 0
+        and SEND_PROVENANCE_STATS["provenance_count"] < SEND_PROVENANCE_STATS["send_success"]
+    ):
+        print("[CRITICAL_SEND_PROVENANCE_GAP]")
     print(f"[SEARCH_LANE_BALANCE_SUMMARY] "
           f"selected_by_lane={SEARCH_LANE_BALANCE_STATS['selected_by_lane']} "
           f"sent_by_lane={SEARCH_LANE_BALANCE_STATS['sent_by_lane']} "
@@ -6235,31 +6345,112 @@ def send_message(text, photo_url=None, item_link=None):
 #  💰 WYCIĄGANIE CENY
 # ─────────────────────────────────────────
 def send_alert_message(text, item: dict, result: dict, source: str, key: str, photo_url=None, item_link=None, query=None) -> bool:
+    item = item or {}
+    result = result or {}
     title = str((item or {}).get("title") or "")[:60]
-    if item and result is not None and item.get("_early_hidden_gem") and not result.get("_early_hidden_gem"):
+    qname = query or (item.get("_search_meta") or {}).get("name")
+    engine = str(result.get("engine") or source or "UNKNOWN")
+    if item and item.get("_early_hidden_gem") and not result.get("_early_hidden_gem"):
         result["_early_hidden_gem"] = item.get("_early_hidden_gem")
     decision = decide_alert_outcome(item, result, source, query=query)
-    if decision.get("outcome") != ITEM_OUTCOME_ALERT:
-        print(f"[ALERT_ARBITER_BLOCK] outcome={decision.get('outcome')} "
-              f"reason={decision.get('reason')} lane={decision.get('primary_lane')} "
-              f"source={source} title={title} "
-              f"signals={(decision.get('signals') or [])[:5]} "
-              f"hard_auth={(decision.get('hard_auth_signals') or [])[:5]} "
-              f"negatives={(decision.get('negative_signals') or [])[:5]}")
-        qname = query or (item.get("_search_meta") or {}).get("name")
+    lane_allowed, lane_reason, lane_info = enforce_lane_policy_before_send(item, result, source, query=query)
+    early = result.get("_early_hidden_gem") or item.get("_early_hidden_gem") or {}
+    final_outcome = decision.get("outcome")
+    final_reason = decision.get("reason") or "unknown"
+    lane = lane_info.get("primary_lane") or decision.get("primary_lane") or "none"
+    hard_auth = decision.get("hard_auth_signals") or lane_info.get("hard_auth_signals") or []
+
+    legacy_watch_only = qname in LEGACY_FALLBACK_WATCH_ONLY_QUERIES
+    if legacy_watch_only and not hard_auth:
+        lane_allowed = False
+        lane_reason = "legacy_not_direct_alert_source"
+        SEND_PROVENANCE_STATS["legacy_query_watch_only"] += 1
+        print(f"[LEGACY_QUERY_WATCH_ONLY] query={qname} title={title} reason=legacy_not_direct_alert_source")
+
+    provenance = {
+        "query": qname,
+        "source": source,
+        "engine": engine,
+        "early_arbiter_called": bool(early),
+        "early_outcome": early.get("outcome"),
+        "early_reason": early.get("reason"),
+        "final_arbiter_called": bool(decision),
+        "final_outcome": final_outcome,
+        "final_reason": final_reason,
+        "lane_policy_called": bool(lane_info),
+        "lane_policy_allowed": bool(lane_allowed),
+        "lane_policy_reason": lane_reason,
+        "lane": lane,
+        "send_allowed_by": "final_arbiter+lane_policy" if final_outcome == ITEM_OUTCOME_ALERT and lane_allowed else "blocked",
+    }
+    result["_send_provenance"] = provenance
+    SEND_PROVENANCE_STATS["provenance_count"] += 1
+    print(f"[SEND_PROVENANCE] title={title} query={qname} source={source} engine={engine} "
+          f"lane={lane} early_called={int(provenance['early_arbiter_called'])} "
+          f"early_outcome={provenance['early_outcome']} early_reason={provenance['early_reason']} "
+          f"final_called={int(provenance['final_arbiter_called'])} "
+          f"final_outcome={final_outcome} final_reason={final_reason} "
+          f"lane_policy_called={int(provenance['lane_policy_called'])} "
+          f"lane_policy_allowed={int(lane_allowed)} lane_policy_reason={lane_reason} "
+          f"send_allowed_by={provenance['send_allowed_by']}")
+
+    def _send_bypass_block(reason: str):
+        SEND_PROVENANCE_STATS["send_blocks"] += 1
+        if reason in {
+            "early_arbiter_missing",
+            "final_arbiter_missing",
+            "lane_policy_missing",
+            "final_outcome_not_alert",
+            "lane_policy_not_allowed",
+        }:
+            if reason == "early_arbiter_missing":
+                SEND_PROVENANCE_STATS["blocked_missing_early_arbiter"] += 1
+            elif reason == "final_arbiter_missing":
+                SEND_PROVENANCE_STATS["blocked_missing_final_arbiter"] += 1
+            elif reason == "lane_policy_missing":
+                SEND_PROVENANCE_STATS["blocked_missing_lane_policy"] += 1
+            elif reason == "final_outcome_not_alert":
+                SEND_PROVENANCE_STATS["blocked_final_not_alert"] += 1
+            elif reason == "lane_policy_not_allowed":
+                SEND_PROVENANCE_STATS["blocked_lane_policy"] += 1
+        print(f"[SEND_BYPASS_BLOCK] reason={reason} title={title} source={source} engine={engine}")
         if qname:
             query_coverage_record(qname)["blocked_count"] += 1
-        retain_early_watch_after_filter(item, decision.get("reason") or "alert_arbiter_block")
-        audit_candidate("final_skip", item, result=result, block_reason=decision.get("reason"),
+        retain_early_watch_after_filter(item, final_reason)
+        audit_candidate("final_skip", item, result=result, block_reason=reason,
                         alert_type=_alert_type(result, source), score=result.get("final_score"))
         return False
+
+    if not provenance["early_arbiter_called"]:
+        return _send_bypass_block("early_arbiter_missing")
+    if not provenance["final_arbiter_called"]:
+        return _send_bypass_block("final_arbiter_missing")
+    if not provenance["lane_policy_called"]:
+        return _send_bypass_block("lane_policy_missing")
+    if final_outcome == ITEM_OUTCOME_WATCH:
+        SEND_PROVENANCE_STATS["watch_send_blocks"] += 1
+        print(f"[WATCH_SEND_BLOCK] title={title} source={source} engine={engine} reason=watch_not_alert")
+    if final_outcome != ITEM_OUTCOME_ALERT:
+        print(f"[FINAL_ARBITER_SEND_BLOCK] outcome={final_outcome} reason={final_reason} "
+              f"title={title} source={source} engine={engine}")
+        return _send_bypass_block("final_outcome_not_alert")
+    if not lane_allowed:
+        print(f"[LANE_POLICY_SEND_BLOCK] reason={lane_reason} title={title} "
+              f"source={source} engine={engine} lane={lane}")
+        return _send_bypass_block("lane_policy_not_allowed")
+
     print(f"[ALERT_ARBITER_PASS] lane={decision.get('primary_lane')} "
           f"reason={decision.get('reason')} source={source} title={title} "
           f"alert_reasons={(decision.get('alert_reasons') or [])[:5]} "
           f"hard_auth={(decision.get('hard_auth_signals') or [])[:5]}")
+    SEND_PROVENANCE_STATS["send_attempts"] += 1
     print(f"[SEND_ATTEMPT] source={source} key={key} title={title}")
     ok = send_message(text, photo_url=photo_url, item_link=item_link)
     if ok:
+        SEND_PROVENANCE_STATS["send_success"] += 1
+        SEND_PROVENANCE_STATS["alerts_by_source"][source] = SEND_PROVENANCE_STATS["alerts_by_source"].get(source, 0) + 1
+        SEND_PROVENANCE_STATS["alerts_by_engine"][engine] = SEND_PROVENANCE_STATS["alerts_by_engine"].get(engine, 0) + 1
+        SEND_PROVENANCE_STATS["alerts_by_lane"][lane] = SEND_PROVENANCE_STATS["alerts_by_lane"].get(lane, 0) + 1
         print(f"[SEND_SUCCESS] source={source} key={key} telegram_status={LAST_TELEGRAM_STATUS or 200} title={title}")
         return True
     error = LAST_TELEGRAM_ERROR or "send_message_returned_false"
@@ -6531,7 +6722,7 @@ def send_telegram_photo(chat_id, photo_path_or_url, caption) -> bool:
 
 def build_startup_message() -> str:
     raw_status = "ON" if RAW_STYLE_SNIPER_ENABLED else "OFF"
-    watch_enabled = os.getenv("TASTE_WATCH_ENABLED", "1") == "1" or os.getenv("TASTE_WATCH_SEND_ENABLED", "1") == "1"
+    watch_enabled = os.getenv("TASTE_WATCH_ENABLED", "1") == "1" or os.getenv("TASTE_WATCH_SEND_ENABLED", "0") == "1"
     watch_status = "ON" if watch_enabled else "OFF"
     grail_status = "ON"
     flip_status = "ON"
@@ -8726,8 +8917,14 @@ while True:
         if sent_this_cycle == 0 and not _cycle_403_stop:
             print(f"  ⚠️ FALLBACK MODE — brak wyników, rozszerzam okno do 120 min")
             fallback_items: list = []
-            _fallback_searches = list(SEARCHES)
-            random.shuffle(_fallback_searches)
+            _search_by_name = {s.get("name"): s for s in SEARCHES}
+            _fallback_searches = [
+                _search_by_name[name]
+                for name in CURATED_FALLBACK_SEARCH_NAMES
+                if name in _search_by_name
+            ]
+            print(f"[FALLBACK_POOL_USED] pool=curated count={len(_fallback_searches)} "
+                  f"queries={[s.get('name') for s in _fallback_searches]}")
 
             for search in _fallback_searches[:5]:   # ograniczone w fallback
                 if _cycle_403_stop:
