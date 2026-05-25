@@ -1820,6 +1820,60 @@ TASTE_DISCOVERY_QUERIES = [
     "army pt shirt vintage",
 ]
 
+DISABLED_ACTIVE_SEARCH_PATTERNS = [
+    "broken planet", "represent", "corteiz", "denim tears",
+    "essentials fear of god", "salomon", "salomon xt 6", "salomon xt-6",
+    "asics", "new balance", "new balance 1906r", "cargo pants",
+    "baggy jeans", "designer sunglasses", "funko pop", "lego star wars",
+    "vintage nike", "vintage adidas", "umbro shirt",
+    "generic leather jacket vintage", "leather jacket vintage",
+    "generic old jeans vintage", "old jeans vintage",
+    "arc teryx", "arcteryx", "arc'teryx",
+]
+DISABLED_EXACT_ACTIVE_SEARCH_KEYS = {
+    "generic vintage t shirt", "generic vintage tee", "vintage t shirt",
+    "vintage tee", "vintage t-shirt",
+}
+
+TARGETED_BROAD_QUERY_POOLS = {
+    "vintage_auth": [
+        "single stitch vintage tee", "made in usa t shirt", "screen stars t shirt",
+        "hanes beefy vintage", "fruit of the loom usa t shirt",
+        "jerzees made in usa", "tultex vintage shirt",
+    ],
+    "music_band": [
+        "band tee vintage tour", "90s metal shirt", "death metal vintage shirt",
+        "hardcore band tee vintage", "punk band tee vintage", "giant tag band tee",
+        "brockum vintage shirt", "winterland vintage shirt", "metal tour shirt",
+    ],
+    "designer_archive": [
+        "dolce gabbana archive", "d and g 00s", "galliano vintage",
+        "john galliano archive", "jean paul gaultier vintage",
+        "moschino jeans vintage", "vivienne westwood archive",
+        "issey miyake vintage", "rrl vintage",
+    ],
+    "workwear": [
+        "carhartt detroit", "carhartt active jacket", "carhartt santa fe",
+        "carhartt double knee", "carhartt chore coat", "lee storm rider",
+        "ben davis vintage", "ll bean made in usa", "woolrich vintage",
+        "filson vintage",
+    ],
+    "military": [
+        "us army vintage tee", "us navy vintage tee", "usmc vintage shirt",
+        "air force vintage tee", "desert storm vintage shirt",
+        "army pt shirt vintage", "military single stitch",
+    ],
+    "sport_racing": [
+        "jeff hamilton jacket", "jh design racing jacket", "nascar vintage jacket",
+        "chase authentics vintage", "chalk line jacket", "starter vintage jacket",
+        "nutmeg nba vintage", "salem sportswear", "daytona bike week vintage",
+    ],
+    "pop_culture": [
+        "warner bros studio store", "disney parks vintage",
+        "movie promo tee vintage",
+    ],
+}
+
 
 def make_taste_discovery_search(query: str) -> dict:
     encoded = quote_plus(query)
@@ -2431,6 +2485,8 @@ ALERT_CANDIDATE_STATS = {
     "blocked_by_reason": {},
     "by_lane": {},
     "top_missed": [],
+    "dedupe_missed": [],
+    "dedupe_count": 0,
 }
 SPEED_MODE_STATS = {
     "search_count": 0,
@@ -2463,6 +2519,16 @@ SEARCH_LANE_BALANCE_STATS = {
     "watch_by_lane": {},
     "pop_culture_searches_last_10": 0,
 }
+SEARCH_EFFICIENCY_STATS = {
+    "active_allowed": 0,
+    "active_blocked": 0,
+    "cooled_down": 0,
+    "bad_noise": 0,
+    "blocked_legacy": [],
+    "cooled_down_queries": [],
+}
+QUERY_PERFORMANCE: dict[str, dict] = {}
+QUERY_PERFORMANCE_COOLDOWNS: dict[str, float] = {}
 VERBOSE_LOG_STATS = {
     "printed": 0,
     "suppressed": {
@@ -2568,6 +2634,116 @@ def raw_contains_exact_token(text: str, token: str) -> bool:
 
 def _raw_hits(text: str, phrases: list[str]) -> list[str]:
     return [phrase for phrase in phrases if raw_contains_phrase(text, phrase)]
+
+
+def _active_search_key(query_name) -> str:
+    name = str(query_name or "")
+    if ":" in name:
+        prefix, rest = name.split(":", 1)
+        if raw_normalize_text(prefix) in {"taste discovery", "fresh discovery"}:
+            name = rest
+    return raw_normalize_text(name)
+
+
+def active_search_allowed(query_name, source=None) -> tuple[bool, str]:
+    key = _active_search_key(query_name)
+    if key in DISABLED_EXACT_ACTIVE_SEARCH_KEYS:
+        SEARCH_EFFICIENCY_STATS["active_blocked"] += 1
+        blocked = SEARCH_EFFICIENCY_STATS["blocked_legacy"]
+        q = str(query_name or "")
+        if len(blocked) < 12 and q not in blocked:
+            blocked.append(q)
+        print(f"[ACTIVE_SEARCH_BLOCKED] query={q} source={source or 'unknown'} "
+              f"reason=legacy_or_noisy_query")
+        query_performance_record(q)["legacy_blocks"] += 1
+        return False, "legacy_or_noisy_query"
+    for pattern in DISABLED_ACTIVE_SEARCH_PATTERNS:
+        if raw_contains_phrase(key, pattern):
+            SEARCH_EFFICIENCY_STATS["active_blocked"] += 1
+            blocked = SEARCH_EFFICIENCY_STATS["blocked_legacy"]
+            q = str(query_name or "")
+            if len(blocked) < 12 and q not in blocked:
+                blocked.append(q)
+            print(f"[ACTIVE_SEARCH_BLOCKED] query={q} source={source or 'unknown'} "
+                  f"reason=legacy_or_noisy_query")
+            query_performance_record(q)["legacy_blocks"] += 1
+            return False, "legacy_or_noisy_query"
+    SEARCH_EFFICIENCY_STATS["active_allowed"] += 1
+    return True, "allowed"
+
+
+def query_performance_record(name: str) -> dict:
+    return QUERY_PERFORMANCE.setdefault(str(name or "unknown"), {
+        "searches_run": 0,
+        "items_seen": 0,
+        "early_alert_candidates": 0,
+        "eligible_candidates": 0,
+        "sends": 0,
+        "watch": 0,
+        "bad_noise_count": 0,
+        "legacy_blocks": 0,
+        "score_sum": 0.0,
+        "score_count": 0,
+        "lane": "vintage_auth",
+    })
+
+
+def query_performance_score(name: str) -> float:
+    stats = query_performance_record(name)
+    return (
+        stats.get("sends", 0) * 10
+        + stats.get("eligible_candidates", 0) * 4
+        + stats.get("early_alert_candidates", 0) * 2
+        + stats.get("watch", 0)
+        - stats.get("bad_noise_count", 0) * 2
+        - stats.get("legacy_blocks", 0) * 5
+    )
+
+
+def query_is_cooled_down(name: str) -> bool:
+    until = float(QUERY_PERFORMANCE_COOLDOWNS.get(str(name or ""), 0) or 0)
+    return until > time.time()
+
+
+def maybe_query_performance_cooldown(name: str):
+    stats = query_performance_record(name)
+    if query_is_cooled_down(name):
+        return
+    high_noise = int(stats.get("bad_noise_count", 0) or 0) >= 8
+    if (
+        int(stats.get("searches_run", 0) or 0) >= 3
+        and int(stats.get("sends", 0) or 0) == 0
+        and int(stats.get("eligible_candidates", 0) or 0) == 0
+        and high_noise
+    ):
+        QUERY_PERFORMANCE_COOLDOWNS[str(name or "unknown")] = time.time() + 24 * 3600
+        SEARCH_EFFICIENCY_STATS["cooled_down"] += 1
+        cooled = SEARCH_EFFICIENCY_STATS["cooled_down_queries"]
+        if len(cooled) < 12:
+            cooled.append(str(name or "unknown"))
+        print(f"[QUERY_PERFORMANCE_COOLDOWN] query={name} "
+              f"reason=low_yield_high_noise stats={stats}")
+
+
+def query_performance_bump(name: str, field: str, amount: int = 1, lane: str | None = None):
+    stats = query_performance_record(name)
+    stats[field] = stats.get(field, 0) + int(amount or 1)
+    if field == "bad_noise_count":
+        SEARCH_EFFICIENCY_STATS["bad_noise"] = SEARCH_EFFICIENCY_STATS.get("bad_noise", 0) + int(amount or 1)
+    if lane:
+        stats["lane"] = lane
+    if field in {"bad_noise_count", "searches_run", "eligible_candidates", "sends"}:
+        maybe_query_performance_cooldown(name)
+
+
+def query_performance_score_add(name: str, score):
+    stats = query_performance_record(name)
+    try:
+        score_f = float(score or 0)
+    except Exception:
+        score_f = 0.0
+    stats["score_sum"] = stats.get("score_sum", 0.0) + score_f
+    stats["score_count"] = stats.get("score_count", 0) + 1
 
 
 CURATED_FRESH_DISCOVERY_SEED = [
@@ -3031,7 +3207,7 @@ def _fresh_discovery_save_index(index: int):
 
 def fresh_discovery_query_lane(query: str) -> str:
     q = raw_normalize_text(query)
-    if raw_contains_any_phrase(q, ["single stitch", "made in usa", "screen stars", "hanes beefy", "fruit of the loom", "jerzees", "old tag"]):
+    if raw_contains_any_phrase(q, ["single stitch", "made in usa", "screen stars", "hanes beefy", "fruit of the loom", "jerzees", "tultex", "old tag"]):
         return "vintage_auth"
     if raw_contains_any_phrase(q, ["warner", "looney", "disney", "space jam", "star wars", "movie promo", "cast crew", "studio", "universal"]):
         return "pop_culture"
@@ -3039,13 +3215,109 @@ def fresh_discovery_query_lane(query: str) -> str:
         return "music_band"
     if raw_contains_any_phrase(q, ["dolce", "gabbana", "d and g", "galliano", "gaultier", "moschino", "vivienne", "ysl", "designer", "archive", "rrl"]):
         return "designer_archive"
-    if raw_contains_any_phrase(q, ["carhartt", "detroit", "santa fe", "workwear", "duck canvas"]):
+    if raw_contains_any_phrase(q, ["carhartt", "detroit", "santa fe", "workwear", "duck canvas", "lee storm rider", "ben davis", "ll bean", "woolrich", "filson"]):
         return "workwear"
     if raw_contains_any_phrase(q, ["us army", "us navy", "usmc", "air force", "military", "desert storm", "pt shirt"]):
         return "military"
-    if raw_contains_any_phrase(q, ["nascar", "racing", "nba", "nutmeg", "orlando magic", "world series"]):
+    if raw_contains_any_phrase(q, ["nascar", "racing", "nba", "nutmeg", "orlando magic", "world series", "jeff hamilton", "jh design", "chase authentics", "chalk line", "starter", "salem sportswear", "daytona bike week"]):
         return "sport_racing"
     return "vintage_auth"
+
+
+def _targeted_broad_searches() -> list[dict]:
+    searches: list[dict] = []
+    for lane, queries in TARGETED_BROAD_QUERY_POOLS.items():
+        for query in queries:
+            if query_is_cooled_down(f"Fresh Discovery: {query}") or query_is_cooled_down(query):
+                continue
+            search = make_fresh_discovery_search(query)
+            search["name"] = f"Target Discovery: {query}"
+            search["target_lane"] = lane
+            search["planner_source"] = "targeted_broad"
+            search["core_search"] = True
+            searches.append(search)
+    searches.sort(key=lambda s: (
+        -query_performance_score(s.get("name") or ""),
+        s.get("target_lane") or "",
+        s.get("name") or "",
+    ))
+    return searches
+
+
+def _search_lane(search: dict) -> str:
+    return search.get("target_lane") or fresh_discovery_query_lane(search.get("name") or "")
+
+
+def optimize_active_search_plan(searches: list[dict], target_count: int) -> list[dict]:
+    blocked_legacy: list[str] = []
+    cooled_down: list[str] = []
+    selected: list[dict] = []
+    selected_names: set[str] = set()
+    lane_counts: dict[str, int] = {}
+    pop_limit = max(1, target_count // 10)
+
+    def consider(search: dict, source: str) -> bool:
+        name = search.get("name") or "unknown"
+        allowed, reason = active_search_allowed(name, source=source)
+        if not allowed:
+            if len(blocked_legacy) < 12:
+                blocked_legacy.append(name)
+            return False
+        if query_is_cooled_down(name):
+            SEARCH_EFFICIENCY_STATS["cooled_down"] += 1
+            if len(cooled_down) < 12:
+                cooled_down.append(name)
+            return False
+        if name in selected_names:
+            return False
+        lane = _search_lane(search)
+        if lane == "pop_culture" and lane_counts.get("pop_culture", 0) >= pop_limit:
+            return False
+        selected.append(search)
+        selected_names.add(name)
+        lane_counts[lane] = lane_counts.get(lane, 0) + 1
+        if search.get("planner_source") == "targeted_broad":
+            _search_lane_balance_bump(lane, "selected")
+        return True
+
+    for search in searches:
+        if len(selected) >= target_count:
+            break
+        consider(search, source=search.get("layer") or search.get("planner_source") or "cycle")
+
+    targeted = _targeted_broad_searches()
+    lane_order = ["vintage_auth", "music_band", "designer_archive", "workwear", "military", "sport_racing", "pop_culture"]
+    while len(selected) < target_count:
+        wanted_lane = min(lane_order, key=lambda lane: (
+            lane_counts.get(lane, 0),
+            1 if lane == "pop_culture" else 0,
+            -max((query_performance_score(s.get("name") or "") for s in targeted if _search_lane(s) == lane and s.get("name") not in selected_names), default=-999),
+        ))
+        lane_candidates = [
+            s for s in targeted
+            if _search_lane(s) == wanted_lane and s.get("name") not in selected_names
+        ]
+        if not lane_candidates:
+            lane_candidates = [s for s in targeted if s.get("name") not in selected_names]
+        if not lane_candidates:
+            break
+        lane_candidates.sort(key=lambda s: (
+            -query_performance_score(s.get("name") or ""),
+            s.get("name") or "",
+        ))
+        before = len(selected)
+        for candidate in lane_candidates:
+            if consider(candidate, source="targeted_broad"):
+                break
+        if len(selected) == before:
+            break
+
+    SEARCH_EFFICIENCY_STATS["blocked_legacy"] = blocked_legacy[:12]
+    SEARCH_EFFICIENCY_STATS["cooled_down_queries"] = cooled_down[:12]
+    print(f"[SEARCH_PLAN_OPTIMIZED] queries={[s.get('name') for s in selected]} "
+          f"selected_by_lane={lane_counts} blocked_legacy={blocked_legacy[:8]} "
+          f"cooled_down={cooled_down[:8]}")
+    return selected[:target_count]
 
 
 def _search_lane_balance_bump(lane: str, kind: str):
@@ -3293,6 +3565,8 @@ def reset_fresh_discovery_cycle():
         "blocked_by_reason": {},
         "by_lane": {},
         "top_missed": [],
+        "dedupe_missed": [],
+        "dedupe_count": 0,
     })
     SPEED_MODE_STATS.update({
         "search_count": 0,
@@ -3324,6 +3598,14 @@ def reset_fresh_discovery_cycle():
         "sent_by_lane": {},
         "watch_by_lane": {},
         "pop_culture_searches_last_10": 0,
+    })
+    SEARCH_EFFICIENCY_STATS.update({
+        "active_allowed": 0,
+        "active_blocked": 0,
+        "cooled_down": 0,
+        "bad_noise": 0,
+        "blocked_legacy": [],
+        "cooled_down_queries": [],
     })
 
 
@@ -3989,6 +4271,38 @@ def should_rescue_target_candidate(item, result, block_reason) -> tuple[bool, li
     return True, strong_signals, rescue_reason
 
 
+def lane_search_efficiency_snapshot() -> dict:
+    by_lane: dict[str, dict] = {}
+    for query, stats in QUERY_PERFORMANCE.items():
+        lane = stats.get("lane") or fresh_discovery_query_lane(query)
+        lane_stats = by_lane.setdefault(lane, {
+            "searches": 0,
+            "seen": 0,
+            "early_candidates": 0,
+            "eligible": 0,
+            "sends": 0,
+            "watch": 0,
+            "bad_noise": 0,
+            "avg_candidate_score": 0,
+            "_score_sum": 0.0,
+            "_score_count": 0,
+        })
+        lane_stats["searches"] += int(stats.get("searches_run", 0) or 0)
+        lane_stats["seen"] += int(stats.get("items_seen", 0) or 0)
+        lane_stats["early_candidates"] += int(stats.get("early_alert_candidates", 0) or 0)
+        lane_stats["eligible"] += int(stats.get("eligible_candidates", 0) or 0)
+        lane_stats["sends"] += int(stats.get("sends", 0) or 0)
+        lane_stats["watch"] += int(stats.get("watch", 0) or 0)
+        lane_stats["bad_noise"] += int(stats.get("bad_noise_count", 0) or 0)
+        lane_stats["_score_sum"] += float(stats.get("score_sum", 0) or 0)
+        lane_stats["_score_count"] += int(stats.get("score_count", 0) or 0)
+    for lane_stats in by_lane.values():
+        count = lane_stats.pop("_score_count", 0)
+        score_sum = lane_stats.pop("_score_sum", 0.0)
+        lane_stats["avg_candidate_score"] = round(score_sum / count, 1) if count else 0
+    return by_lane
+
+
 def print_fresh_discovery_summary():
     print(f"[FRESH_DISCOVERY_SUMMARY] enabled={FRESH_DISCOVERY_STATS['enabled']} "
           f"pool_total={FRESH_DISCOVERY_STATS['pool_total']} queries_run={FRESH_DISCOVERY_STATS['queries_run']} "
@@ -4144,12 +4458,29 @@ def print_fresh_discovery_summary():
           f"sent={ALERT_CANDIDATE_STATS['sent']} "
           f"blocked_by_reason={ALERT_CANDIDATE_STATS['blocked_by_reason']} "
           f"by_lane={ALERT_CANDIDATE_STATS['by_lane']}")
-    print(f"[TOP_MISSED_CANDIDATES] top={ALERT_CANDIDATE_STATS['top_missed'][:10]}")
+    print(f"[TOP_MISSED_CANDIDATES] top_non_dedupe={ALERT_CANDIDATE_STATS['top_missed'][:10]}")
+    print(f"[DEDUPED_STRONG_CANDIDATES_SUMMARY] "
+          f"count={ALERT_CANDIDATE_STATS['dedupe_count']} "
+          f"top={ALERT_CANDIDATE_STATS['dedupe_missed'][:10]}")
     print(f"[SEARCH_LANE_BALANCE_SUMMARY] "
           f"selected_by_lane={SEARCH_LANE_BALANCE_STATS['selected_by_lane']} "
           f"sent_by_lane={SEARCH_LANE_BALANCE_STATS['sent_by_lane']} "
           f"watch_by_lane={SEARCH_LANE_BALANCE_STATS['watch_by_lane']} "
           f"pop_culture_searches_last_10={SEARCH_LANE_BALANCE_STATS['pop_culture_searches_last_10']}")
+    searches = max(1, int(SPEED_MODE_STATS.get("search_count", 0) or 0))
+    early_candidates = int(ALERT_CANDIDATE_STATS.get("early_alert_candidates", 0) or 0)
+    eligible = int(ALERT_CANDIDATE_STATS.get("eligible_after_final_arbiter", 0) or 0)
+    sends = int(SEND_PROVENANCE_STATS.get("send_success", 0) or 0)
+    bad_noise = int(SEARCH_EFFICIENCY_STATS.get("bad_noise", 0) or 0)
+    print(f"[SEARCH_EFFICIENCY_SUMMARY] searches={SPEED_MODE_STATS.get('search_count', 0)} "
+          f"active_allowed={SEARCH_EFFICIENCY_STATS['active_allowed']} "
+          f"active_blocked={SEARCH_EFFICIENCY_STATS['active_blocked']} "
+          f"cooled_down={SEARCH_EFFICIENCY_STATS['cooled_down']} "
+          f"early_candidates_per_search={early_candidates / searches:.2f} "
+          f"eligible_per_search={eligible / searches:.2f} "
+          f"sends_per_search={sends / searches:.2f} "
+          f"bad_noise_per_search={bad_noise / searches:.2f}")
+    print(f"[LANE_SEARCH_EFFICIENCY] by_lane={lane_search_efficiency_snapshot()}")
     print(f"[CHAOS_AUTH_BLOCK_SUMMARY] blocked={LANE_POLICY_STATS['chaos_auth_blocked']} "
           f"by_reason={LANE_POLICY_STATS['chaos_auth_block_reasons']} "
           f"examples={LANE_POLICY_STATS['chaos_auth_examples']}")
@@ -4555,6 +4886,54 @@ def _old_blank_tag_hit(text: str) -> bool:
     ])
 
 
+OLD_TAG_ALERT_TERMS = [
+    "nutmeg", "screen stars", "hanes", "hanes beefy", "fruit of the loom",
+    "jerzees", "tultex",
+]
+OLD_TAG_ALERT_ITEM_TYPES = [
+    "t shirt", "t-shirt", "tshirt", "tee", "koszulka", "shirt",
+    "sweatshirt", "hoodie", "crewneck", "jacket", "jersey",
+    "longsleeve", "long sleeve", "bluza",
+]
+OLD_TAG_LOW_PRIORITY_ITEM_TYPES = [
+    "pants", "leggings", "blouse", "women top", "top damski", "top",
+    "bluzka", "underwear", "skirt", "dress", "spodnie", "legginsy",
+    "sukienka", "spodnica",
+]
+
+
+def old_tag_wrong_item_type(item: dict, text: str | None = None) -> bool:
+    text = text or _raw_presend_text(item or {})
+    if not raw_contains_any_phrase(text, OLD_TAG_ALERT_TERMS):
+        return False
+    if raw_contains_any_phrase(text, OLD_TAG_LOW_PRIORITY_ITEM_TYPES):
+        return True
+    return not raw_contains_any_phrase(text, OLD_TAG_ALERT_ITEM_TYPES)
+
+
+def made_in_usa_without_quality_context(item: dict, text: str | None = None) -> bool:
+    text = text or _raw_presend_text(item or {})
+    if not raw_contains_any_phrase(text, ["made in usa", "made in u.s.a", "usa made"]):
+        return False
+    if raw_contains_any_phrase(text, WOMEN_FIT_TERMS + FITTED_TOP_TERMS + [
+        "basic", "plain", "blank", "gładki", "gladki", "bluzka",
+    ]):
+        return True
+    quality_context = [
+        "single stitch", "graphic", "print", "tour", "concert", "band",
+        "sports", "nba", "nfl", "mlb", "nhl", "ncaa", "military",
+        "us army", "us navy", "usmc", "air force", "racing", "nascar",
+        "designer", "archive", "workwear", "carhartt", "harley",
+        "screen stars", "hanes beefy", "fruit of the loom", "jerzees",
+        "nutmeg", "tultex", "old tag",
+    ]
+    good_blank_type = raw_contains_any_phrase(text, [
+        "t shirt", "t-shirt", "tee", "koszulka", "sweatshirt",
+        "crewneck", "hoodie", "bluza",
+    ]) and raw_contains_any_phrase(text, OLD_TAG_ALERT_TERMS + ["vintage", "90s", "80s", "00s"])
+    return not (raw_contains_any_phrase(text, quality_context) or good_blank_type)
+
+
 def _log_weak_descriptors_ignored(text: str, title: str):
     for term in WEAK_DESCRIPTOR_TERMS:
         if raw_contains_phrase(text, term):
@@ -4764,6 +5143,7 @@ def _early_hidden_gem_bump(decision: dict, query: str | None = None):
     EARLY_HIDDEN_GEM_STATS["by_lane"][lane] = EARLY_HIDDEN_GEM_STATS["by_lane"].get(lane, 0) + 1
     title = str((decision.get("item") or {}).get("title") or "")[:70]
     if outcome in {ITEM_OUTCOME_WATCH, "alert_candidate"}:
+        query_performance_bump(query, "watch", lane=lane)
         EARLY_HIDDEN_GEM_STATS["watch_by_lane"][lane] = (
             EARLY_HIDDEN_GEM_STATS["watch_by_lane"].get(lane, 0) + 1
         )
@@ -4817,6 +5197,7 @@ def _add_alert_candidate(decision: dict, item: dict, query: str | None = None):
     ALERT_CANDIDATE_STATS["early_alert_candidates"] += 1
     lane = entry["lane"]
     ALERT_CANDIDATE_STATS["by_lane"][lane] = ALERT_CANDIDATE_STATS["by_lane"].get(lane, 0) + 1
+    query_performance_bump(entry.get("query"), "early_alert_candidates", lane=lane)
 
 
 def evaluate_item_for_hidden_gem(item, query=None, source=None) -> dict:
@@ -4891,6 +5272,13 @@ def evaluate_item_for_hidden_gem(item, query=None, source=None) -> dict:
             alert_reason = "sport_racing_collector_route"
         elif sport_auth:
             watch_reason = "sport_racing_watch_context"
+
+    if alert_reason and old_tag_wrong_item_type(item, text):
+        watch_reason = "old_tag_wrong_item_type_watch"
+        alert_reason = ""
+    if alert_reason and made_in_usa_without_quality_context(item, text):
+        watch_reason = "made_in_usa_without_quality_context_watch"
+        alert_reason = ""
 
     severe_negative = any(reason in negatives for reason in [
         "kids_presend_block", "kids_or_youth_size", "non_clothing",
@@ -5011,15 +5399,23 @@ def score_alert_candidate(entry: dict) -> int:
 def _alert_candidate_block(reason: str, entry: dict, score: int):
     stats = ALERT_CANDIDATE_STATS["blocked_by_reason"]
     stats[reason] = stats.get(reason, 0) + 1
-    missed = ALERT_CANDIDATE_STATS["top_missed"]
-    missed.append({
+    miss = {
         "score": score,
         "lane": entry.get("lane"),
         "reason": entry.get("early_reason"),
         "block_reason": reason,
         "title": str((entry.get("item") or {}).get("title") or "")[:70],
         "query": entry.get("query"),
-    })
+    }
+    if "dedupe" in str(reason or ""):
+        ALERT_CANDIDATE_STATS["dedupe_count"] += 1
+        deduped = ALERT_CANDIDATE_STATS["dedupe_missed"]
+        deduped.append(miss)
+        deduped.sort(key=lambda x: x.get("score", 0), reverse=True)
+        del deduped[10:]
+        return
+    missed = ALERT_CANDIDATE_STATS["top_missed"]
+    missed.append(miss)
     missed.sort(key=lambda x: x.get("score", 0), reverse=True)
     del missed[10:]
 
@@ -5077,6 +5473,8 @@ def send_alert_candidates(max_cycle_slots: int, sent_this_cycle: int) -> int:
         decision = decide_alert_outcome(item, result, "ALERT_CANDIDATE", query=entry.get("query"))
         if decision.get("outcome") == ITEM_OUTCOME_ALERT:
             ALERT_CANDIDATE_STATS["eligible_after_final_arbiter"] += 1
+            query_performance_bump(entry.get("query"), "eligible_candidates", lane=entry.get("lane"))
+            query_performance_score_add(entry.get("query"), score)
         else:
             _alert_candidate_block(decision.get("reason") or "final_arbiter_block", entry, score)
             continue
@@ -5255,6 +5653,15 @@ def decide_alert_outcome(item, result=None, source=None, query=None) -> dict:
             watch_reasons.extend(alert_reasons)
             alert_reasons = []
             add_watch("safeguard_relaxed_watch_only")
+
+    if alert_reasons and old_tag_wrong_item_type(item, text):
+        watch_reasons.extend(alert_reasons)
+        alert_reasons = []
+        add_watch("old_tag_wrong_item_type_watch")
+    if alert_reasons and made_in_usa_without_quality_context(item, text):
+        watch_reasons.extend(alert_reasons)
+        alert_reasons = []
+        add_watch("made_in_usa_without_quality_context_watch")
 
     exceptional_auth = len(hard_auth) >= 3 or any("single stitch" in str(x) or "made in usa" in str(x) for x in hard_auth)
     severe_negative = any(reason in negatives for reason in [
@@ -6715,6 +7122,7 @@ def send_alert_message(text, item: dict, result: dict, source: str, key: str, ph
         print(f"[SEND_BYPASS_BLOCK] reason={reason} title={title} source={source} engine={engine}")
         if qname:
             query_coverage_record(qname)["blocked_count"] += 1
+            query_performance_bump(qname, "bad_noise_count", lane=lane)
         retain_early_watch_after_filter(item, final_reason)
         audit_candidate("final_skip", item, result=result, block_reason=reason,
                         alert_type=_alert_type(result, source), score=result.get("final_score"))
@@ -6750,6 +7158,7 @@ def send_alert_message(text, item: dict, result: dict, source: str, key: str, ph
         SEND_PROVENANCE_STATS["alerts_by_source"][source] = SEND_PROVENANCE_STATS["alerts_by_source"].get(source, 0) + 1
         SEND_PROVENANCE_STATS["alerts_by_engine"][engine] = SEND_PROVENANCE_STATS["alerts_by_engine"].get(engine, 0) + 1
         SEND_PROVENANCE_STATS["alerts_by_lane"][lane] = SEND_PROVENANCE_STATS["alerts_by_lane"].get(lane, 0) + 1
+        query_performance_bump(qname, "sends", lane=lane)
         print(f"[SEND_SUCCESS] source={source} key={key} telegram_status={LAST_TELEGRAM_STATUS or 200} title={title}")
         return True
     error = LAST_TELEGRAM_ERROR or "send_message_returned_false"
@@ -8287,6 +8696,7 @@ def check_search(search, seen, market_price):
                 seen_audit_item["_search_meta"] = {"name": search.get("name")}
                 audit_candidate("seen", seen_audit_item, search)
                 query_coverage_record(search.get("name"))["items_seen"] += 1
+                query_performance_bump(search.get("name"), "items_seen", lane=_search_lane(search))
                 verbose_item_log("audit_seen", f"[AUDIT_SEEN] query={search.get('name')} title={title[:60]}")
 
                 early_hidden_gem = item.get("_early_hidden_gem") or evaluate_item_for_hidden_gem(
@@ -8382,9 +8792,17 @@ def check_search(search, seen, market_price):
                         cnt_profile_rej += 1
                         for reason in _reject_log:
                             reject_reasons[reason] = reject_reasons.get(reason, 0) + 1
-                        _block_after_early("profile_filter:" + ",".join(_reject_log[:3]))
-                        item_micro_delay(title)
-                        continue
+                        early_lanes = set(early_hidden_gem.get("matched_lanes") or [])
+                        if early_hidden_gem.get("lane") == "music_band" or "music_band" in early_lanes:
+                            print(f"[MUSIC_PROFILE_FILTER_BYPASS_FOR_EARLY_LANE] "
+                                  f"title={title[:70]} "
+                                  f"early_reason={early_hidden_gem.get('reason')} "
+                                  f"later_filter={','.join(_reject_log[:3])}")
+                        else:
+                            query_performance_bump(search.get("name"), "bad_noise_count", lane=_search_lane(search))
+                            _block_after_early("profile_filter:" + ",".join(_reject_log[:3]))
+                            item_micro_delay(title)
+                            continue
 
                 # ── Req 3 — HUMAN VIBE SKIP (10–15% random) ──────────
                 if early_hidden_gem.get("outcome") == ITEM_OUTCOME_DISCARD and human_vibe_skip(title, pct=0.12):
@@ -9026,55 +9444,16 @@ while True:
 
         if SPEED_MODE_ENABLED and time.time() >= _speed_slow_until:
             target_count = max(1, FAST_MAX_SEARCHES_PER_CYCLE)
-            selected_names = {s.get("name") for s in this_cycle_searches}
-            lane_counts: dict[str, int] = {}
-            for s in this_cycle_searches:
-                lane = fresh_discovery_query_lane(s.get("name") or "")
-                lane_counts[lane] = lane_counts.get(lane, 0) + 1
-            lane_order = ["vintage_auth", "music_band", "designer_archive", "workwear", "sport_racing", "military", "pop_culture"]
-            candidates = [s for s in SEARCHES if s.get("name") not in selected_names]
-            random.shuffle(candidates)
-            while len(this_cycle_searches) < target_count and candidates:
-                wanted_lane = min(lane_order, key=lambda ln: (lane_counts.get(ln, 0), 1 if ln == "pop_culture" else 0))
-                pick = None
-                for s in candidates:
-                    lane = fresh_discovery_query_lane(s.get("name") or "")
-                    if lane == "pop_culture" and lane_counts.get("pop_culture", 0) >= max(1, target_count // 10):
-                        continue
-                    if lane == wanted_lane:
-                        pick = s
-                        break
-                if pick is None:
-                    pick = candidates[0]
-                    lane = fresh_discovery_query_lane(pick.get("name") or "")
-                    if lane == "pop_culture" and lane_counts.get("pop_culture", 0) >= max(1, target_count // 10):
-                        candidates.remove(pick)
-                        continue
-                candidates.remove(pick)
-                this_cycle_searches.append(pick)
-                selected_names.add(pick.get("name"))
-                lane = fresh_discovery_query_lane(pick.get("name") or "")
-                lane_counts[lane] = lane_counts.get(lane, 0) + 1
-            if len(this_cycle_searches) > target_count:
-                this_cycle_searches = this_cycle_searches[:target_count]
-            pop_limit = max(1, target_count // 10)
-            balanced_searches = []
-            pop_seen = 0
-            for s in this_cycle_searches:
-                lane = fresh_discovery_query_lane(s.get("name") or "")
-                if lane == "pop_culture":
-                    if pop_seen >= pop_limit:
-                        continue
-                    pop_seen += 1
-                balanced_searches.append(s)
-            this_cycle_searches = balanced_searches
+            this_cycle_searches = optimize_active_search_plan(this_cycle_searches, target_count)
             lane_counts = {}
             for s in this_cycle_searches:
-                lane = fresh_discovery_query_lane(s.get("name") or "")
+                lane = _search_lane(s)
                 lane_counts[lane] = lane_counts.get(lane, 0) + 1
             print(f"[FAST_SEARCH_PLAN] search_count={len(this_cycle_searches)} "
                   f"selected_by_lane={lane_counts} "
                   f"queries={[s.get('name') for s in this_cycle_searches]}")
+        else:
+            this_cycle_searches = optimize_active_search_plan(this_cycle_searches, len(this_cycle_searches))
 
         print(f"[SEARCH_PLAN] "
               f"core={[s.get('name') for s in this_cycle_searches if is_core_search(s)][:6]} "
@@ -9105,6 +9484,7 @@ while True:
             core_search = is_core_search(search)
             qcov = query_coverage_record(search["name"])
             qcov["core"] = core_search
+            query_performance_bump(search.get("name"), "searches_run", lane=_search_lane(search))
             # Req 7 — hard stop if cycle marked for stop by 403
             if _cycle_403_stop:
                 print(f"  [403] cycle_stop — przerywam cykl po banie")
@@ -9313,6 +9693,7 @@ while True:
                 _search_by_name[name]
                 for name in CURATED_FALLBACK_SEARCH_NAMES
                 if name in _search_by_name
+                and active_search_allowed(name, source="fallback")[0]
             ]
             print(f"[FALLBACK_POOL_USED] pool=curated count={len(_fallback_searches)} "
                   f"queries={[s.get('name') for s in _fallback_searches]}")
