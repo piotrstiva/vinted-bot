@@ -60,11 +60,52 @@ NO_MARKET_DATA_CAP_STATS = {
     "count": 0,
     "examples": [],
 }
+ENGINE_TASTE_ALIGNMENT_STATS = {
+    "scored": 0,
+    "tier_a": 0,
+    "tier_b": 0,
+    "tier_c_only": 0,
+    "price_size_only_blocked": 0,
+    "chaos_scout_only_blocked": 0,
+    "profit_ignored_no_taste": 0,
+    "conditional_brand_blocked": 0,
+    "early_alert_candidates_preserved": 0,
+    "top_candidates": [],
+}
 
 
 def reset_no_market_data_cap_stats():
     NO_MARKET_DATA_CAP_STATS["count"] = 0
     NO_MARKET_DATA_CAP_STATS["examples"] = []
+
+
+def reset_engine_taste_alignment_stats():
+    ENGINE_TASTE_ALIGNMENT_STATS.update({
+        "scored": 0,
+        "tier_a": 0,
+        "tier_b": 0,
+        "tier_c_only": 0,
+        "price_size_only_blocked": 0,
+        "chaos_scout_only_blocked": 0,
+        "profit_ignored_no_taste": 0,
+        "conditional_brand_blocked": 0,
+        "early_alert_candidates_preserved": 0,
+        "top_candidates": [],
+    })
+
+
+def print_engine_taste_alignment_summary():
+    print(f"[ENGINE_TASTE_ALIGNMENT_SUMMARY] "
+          f"scored={ENGINE_TASTE_ALIGNMENT_STATS['scored']} "
+          f"tier_a={ENGINE_TASTE_ALIGNMENT_STATS['tier_a']} "
+          f"tier_b={ENGINE_TASTE_ALIGNMENT_STATS['tier_b']} "
+          f"tier_c_only={ENGINE_TASTE_ALIGNMENT_STATS['tier_c_only']} "
+          f"price_size_only_blocked={ENGINE_TASTE_ALIGNMENT_STATS['price_size_only_blocked']} "
+          f"chaos_scout_only_blocked={ENGINE_TASTE_ALIGNMENT_STATS['chaos_scout_only_blocked']} "
+          f"profit_ignored_no_taste={ENGINE_TASTE_ALIGNMENT_STATS['profit_ignored_no_taste']} "
+          f"conditional_brand_blocked={ENGINE_TASTE_ALIGNMENT_STATS['conditional_brand_blocked']} "
+          f"early_alert_candidates_preserved={ENGINE_TASTE_ALIGNMENT_STATS['early_alert_candidates_preserved']}")
+    print(f"[ENGINE_TOP_CANDIDATES] top={ENGINE_TASTE_ALIGNMENT_STATS['top_candidates'][:10]}")
 
 
 def log_no_market_data_cap(title: str, real_signal_hits: list):
@@ -307,11 +348,8 @@ LUXURY_BRANDS = {
 # Brands that guarantee minimum confidence 6.0 when detected
 STRONG_BRANDS = {
     "patagonia",
-    "supreme", "palace", "stussy", "bape",
-    "fear of god", "essentials",
-    "carhartt",
+    "supreme", "palace", "bape",
     "helly hansen",
-    "asics",
     "levi's", "levis", "levi", "wrangler", "diesel",
     "ralph lauren", "polo ralph lauren",
     "gucci", "louis vuitton", "prada", "hermes",
@@ -916,6 +954,10 @@ CONDITIONAL_STRONG_BRANDS = [
     "nike", "adidas", "asics",
     "the north face", "tnf", "columbia",
     "helly hansen", "puma", "reebok",
+    "new balance", "carhartt", "carhartt wip", "stussy",
+    "salomon", "arc'teryx", "arcteryx", "arc teryx",
+    "stone island", "cp company", "c.p. company", "belstaff",
+    "represent", "broken planet", "denim tears", "corteiz",
 ]
 
 DESIRABLE_CARHARTT = [
@@ -1078,6 +1120,42 @@ TASTE_META_SIGNALS = {
 }
 
 
+TIER_A_HARD_AUTH = [
+    "single stitch", "single stitched", "made in usa", "made in u.s.a",
+    "screen stars", "hanes beefy", "fruit of the loom usa", "jerzees usa",
+    "jerzees made in usa", "tultex", "giant", "brockum", "winterland",
+    "nutmeg", "salem", "salem sportswear", "changes",
+    "copyright", "licensed", "official licensed", "deadstock", "nos",
+    "cast and crew", "cast & crew", "movie promo", "promo tee", "staff tee",
+    "studio store", "warner bros studio store", "disney parks", "disney cruise",
+    "carhartt detroit", "detroit jacket", "carhartt santa fe", "santa fe",
+    "active jacket", "double knee", "chore coat", "duck canvas", "blanket lined",
+    "jeff hamilton", "jh design", "chase authentics", "chalk line", "starter",
+    "logo 7",
+]
+TIER_B_STYLE_CONTEXT = [
+    "vintage graphic", "faded", "all over print", "aop", "big back print",
+    "back print", "double sided", "large print", "big print", "racing",
+    "nascar", "daytona", "sturgis", "bike week", "biker event",
+    "tour", "concert", "world tour", "festival", "archive", "runway",
+    "made in italy", "collection", "rare", "wool", "leather", "silk",
+    "mesh", "denim", "knit", "workwear", "canvas", "duck", "carpenter",
+    "military", "us army", "us navy", "usmc", "air force", "pt shirt",
+    "squadron", "battalion", "division", "desert storm", "studio tour",
+    "theme park", "movie promo",
+]
+TIER_C_WEAK = [
+    "vintage", "retro", "y2k", "streetwear", "swag", "rare", "archive",
+    "good size", "cheap", "tanio", "okazja",
+]
+ENGINE_CONDITIONAL_BRANDS = set(CONDITIONAL_STRONG_BRANDS) | {
+    "nike", "adidas", "puma", "new balance", "asics", "the north face",
+    "carhartt wip", "stussy", "salomon", "arc'teryx", "arcteryx",
+    "stone island", "cp company", "c.p. company", "belstaff", "represent",
+    "broken planet", "denim tears", "corteiz",
+}
+
+
 def _has_real_taste_signal(signals) -> bool:
     return any(str(sig) not in TASTE_META_SIGNALS for sig in (signals or []))
 
@@ -1218,6 +1296,112 @@ def _sports_taste_hit(text_l: str) -> str | None:
         if context:
             return "athletics"
     return None
+
+
+def _year_1980_2009_hits(text_l: str) -> list[str]:
+    return sorted(set(re.findall(r"\b(19[8-9][0-9]|200[0-9])\b", text_l)))
+
+
+def _designer_archive_context_count(text_l: str) -> int:
+    designer_hit = _first_hit(text_l, [
+        "dolce gabbana", "d&g", "d and g", "galliano", "jean paul gaultier",
+        "gaultier", "moschino", "vivienne westwood", "issey miyake",
+        "comme des garcons", "helmut lang", "raf simons", "rrl", "double rl",
+        "polo sport", "burberrys", "aquascutum",
+    ])
+    if not designer_hit:
+        return 0
+    return len(set(_keyword_hits_lower(text_l, [
+        "archive", "90s", "00s", "made in italy", "runway", "collection",
+        "leather", "wool", "silk", "mesh", "denim", "knit", "jacket",
+        "coat", "jeans", "graphic tee", "newspaper print", "all over print",
+        "spellout", "big logo", "old tag", "rare",
+    ])))
+
+
+def engine_signal_tier_profile(item: dict, result: dict | None = None) -> dict:
+    result = result or {}
+    title = str((item or {}).get("title") or "")
+    text_l = _item_search_text(item or {}, result)
+    brand = str(result.get("brand") or result.get("brand_detected") or detect_brand(title) or "").lower()
+    tier_a = _keyword_hits_lower(text_l, TIER_A_HARD_AUTH)
+    tier_b = _keyword_hits_lower(text_l, TIER_B_STYLE_CONTEXT)
+    tier_c = _keyword_hits_lower(text_l, TIER_C_WEAK)
+    years = _year_1980_2009_hits(text_l)
+    if years:
+        tier_a.extend([f"year:{y}" for y in years])
+    if _first_hit(text_l, BAND_KEYWORDS) and _first_hit(text_l, ["tour", "concert", "world tour", "festival"]) and years:
+        tier_a.append("tour_year_auth")
+    elif _first_hit(text_l, BAND_KEYWORDS) and _first_hit(text_l, ["tour", "concert", "world tour", "festival"]):
+        tier_b.append("band_tour_context")
+    if _first_hit(text_l, ["us army", "u.s. army", "us navy", "u.s. navy", "usmc", "marines", "air force", "usaf"]):
+        if _first_hit(text_l, ["unit", "base", "squadron", "battalion", "division", "pt shirt", "desert storm"]) or years:
+            tier_a.append("military_branch_context")
+        else:
+            tier_b.append("military_branch_context")
+    if _designer_archive_context_count(text_l) >= 2:
+        tier_a.append("designer_archive_context")
+    elif _designer_archive_context_count(text_l) == 1:
+        tier_b.append("designer_archive_context")
+    if brand in ENGINE_CONDITIONAL_BRANDS and not tier_a and not tier_b:
+        negative = [f"conditional_brand_no_context:{brand}"]
+    else:
+        negative = []
+    positive = list(dict.fromkeys(tier_a + tier_b))
+    if tier_a:
+        tier = "A"
+        reason = "hard_auth_route"
+        score = min(100, 70 + len(set(tier_a)) * 6 + len(set(tier_b)) * 3)
+    elif len(set(tier_b)) >= 2:
+        tier = "B"
+        reason = "style_context_route"
+        score = min(84, 55 + len(set(tier_b)) * 7)
+    elif tier_b:
+        tier = "B"
+        reason = "style_context_route"
+        score = 55
+    elif tier_c:
+        tier = "C"
+        reason = None
+        score = 20
+    else:
+        tier = "none"
+        reason = None
+        score = 0
+    return {
+        "engine_candidate_score": int(score),
+        "engine_tier": tier,
+        "engine_positive_signals": positive[:12],
+        "engine_negative_signals": negative[:8],
+        "engine_send_eligible_reason": reason,
+        "engine_tier_a_signals": list(dict.fromkeys(tier_a))[:12],
+        "engine_tier_b_signals": list(dict.fromkeys(tier_b))[:12],
+        "engine_tier_c_signals": list(dict.fromkeys(tier_c))[:12],
+    }
+
+
+def apply_engine_candidate_profile(result: dict) -> dict:
+    item = result.get("item", {}) or {}
+    profile = engine_signal_tier_profile(item, result)
+    result.update(profile)
+    ENGINE_TASTE_ALIGNMENT_STATS["scored"] += 1
+    if profile["engine_tier"] == "A":
+        ENGINE_TASTE_ALIGNMENT_STATS["tier_a"] += 1
+    elif profile["engine_tier"] == "B":
+        ENGINE_TASTE_ALIGNMENT_STATS["tier_b"] += 1
+    elif profile["engine_tier"] == "C":
+        ENGINE_TASTE_ALIGNMENT_STATS["tier_c_only"] += 1
+    top = ENGINE_TASTE_ALIGNMENT_STATS["top_candidates"]
+    top.append({
+        "score": profile["engine_candidate_score"],
+        "tier": profile["engine_tier"],
+        "signals": profile["engine_positive_signals"][:4],
+        "title": str(item.get("title") or "")[:60],
+        "query": (item.get("_search_meta") or {}).get("name"),
+    })
+    top.sort(key=lambda x: x.get("score", 0), reverse=True)
+    del top[10:]
+    return result
 
 
 def _market_entry_for_signal(db: MarketDB, brand: str | None, category: str | None) -> dict | None:
@@ -2122,6 +2306,13 @@ def compute_taste_watch_score(item: dict, result: dict) -> dict:
         hard_reason = "non_clothing_style_watch_block"
 
     real_taste_signal = _has_real_taste_signal(taste_signals)
+    price_size_only = bool(taste_signals and not real_taste_signal)
+    if price_size_only:
+        hard_reason = hard_reason or "taste_price_size_only"
+        ENGINE_TASTE_ALIGNMENT_STATS["price_size_only_blocked"] += 1
+        if DEBUG_ALERTS:
+            print(f"  [TASTE_PRICE_SIZE_ONLY_BLOCK] title={title[:60]} "
+                  f"signals={taste_signals}")
     if age <= 30 and score >= 55 and price <= 50 and real_taste_signal and not hard_reason:
         old_score = score
         score = min(100, score + 10)
@@ -2151,8 +2342,8 @@ def compute_taste_watch_score(item: dict, result: dict) -> dict:
         and not hard_reason
         and (
             (score >= 60 and price <= 160 and real_taste_signal)
-            or (score >= 50 and price <= 50 and len(taste_signals) >= 2)
-            or streetwear_size_ok
+            or (score >= 50 and price <= 50 and len(taste_signals) >= 2 and real_taste_signal)
+            or (streetwear_size_ok and real_taste_signal)
         )
     )
     if TASTE_WATCH_ENABLED:
@@ -2172,6 +2363,7 @@ def compute_taste_watch_score(item: dict, result: dict) -> dict:
         "taste_watch_candidate": candidate,
         "taste_bucket": bucket,
         "taste_watch_hard_block_reason": hard_reason,
+        "taste_price_size_only": price_size_only,
     }
 
 
@@ -2690,6 +2882,13 @@ class ChaosEngine:
 
         # ── PATTERN SCORING (core system) ─────────────────
         pattern_score, matched_patterns = compute_pattern_score(title, brand, band)
+        tier_profile = engine_signal_tier_profile(item, {
+            "brand": brand,
+            "brand_detected": brand,
+            "category": cat,
+            "engine": "CHAOS",
+            "pattern_score": pattern_score,
+        })
 
         # Undervaluation detection
         anomaly_score = 0
@@ -2717,6 +2916,19 @@ class ChaosEngine:
             confidence = min(confidence, 5.5)
             if DEBUG_ALERTS:
                 log_no_market_data_cap(title, real_signal_hits)
+        taste_reason = tier_profile.get("engine_send_eligible_reason")
+        profit_for_send = profit if taste_reason else 0
+        if not taste_reason:
+            ENGINE_TASTE_ALIGNMENT_STATS["chaos_scout_only_blocked"] += 1
+            if profit > 0:
+                ENGINE_TASTE_ALIGNMENT_STATS["profit_ignored_no_taste"] += 1
+                if DEBUG_ALERTS:
+                    print(f"  [PROFIT_IGNORED_NO_TASTE_SIGNAL] title={title[:60]} "
+                          f"profit={profit:.0f} reason=no_taste_signal")
+            if DEBUG_ALERTS:
+                print(f"  [CHAOS_SCOUT_ONLY_BLOCK] title={title[:60]} "
+                      f"reason=no_taste_tier_signal conf={confidence:.1f} "
+                      f"profit={profit:.0f} pattern={pattern_score}")
 
         if profit < 10 and anomaly_score == 0 and pattern_score <= 0:
             return {**base, "_skip_reason": "low_profit_no_anomaly",
@@ -2730,15 +2942,15 @@ class ChaosEngine:
 
         send = (
                 # Spec: CHAOS profit >= 40 AND conf >= 6
-                (profit >= 40 and confidence >= 6.0)
+                (profit_for_send >= 40 and confidence >= 6.0)
                 # Pattern shortcut: high pattern score unlocks lower profit threshold
-                or (pattern_score >= 5 and profit >= 30 and confidence >= 5.5)
+                or (pattern_score >= 5 and profit_for_send >= 30 and confidence >= 5.5)
                 # Strong brand — lower profit bar
-                or (profit >= 30 and is_strong_brand and confidence >= 5.0)
+                or (profit_for_send >= 30 and is_strong_brand and confidence >= 5.0)
                 # Band brand + vintage
-                or (profit >= 20 and is_band and is_strong_band_feat and confidence >= 5.0)
+                or (profit_for_send >= 20 and is_band and is_strong_band_feat and confidence >= 5.0)
                 # Anomaly + brand
-                or (profit >= 20 and anomaly_score >= 2 and is_strong_brand)
+                or (profit_for_send >= 20 and anomaly_score >= 2 and is_strong_brand)
             )
 
         # DB learning
@@ -2767,6 +2979,7 @@ class ChaosEngine:
 
         return {
             **base,
+            **tier_profile,
             "send_alert":       send,
             "profit":           round(profit, 2),
             "estimated_value":  round(estimated_value, 2),
@@ -3548,6 +3761,17 @@ class Engine:
         # BRAND wins if brand is strong AND brand engine returned a result
         # GRAIL wins next if is_grail qualifies
         # CHAOS is fallback
+        for _engine_result in (c_result, b_result, g_result):
+            apply_engine_candidate_profile(_engine_result)
+            _brand_l = str(_engine_result.get("brand") or _engine_result.get("brand_detected") or "").lower()
+            if _brand_l in ENGINE_CONDITIONAL_BRANDS and not _engine_result.get("engine_send_eligible_reason"):
+                _engine_result["send_alert"] = False
+                _engine_result["send"] = False
+                _engine_result["_skip_reason"] = "conditional_brand_no_context"
+                ENGINE_TASTE_ALIGNMENT_STATS["conditional_brand_blocked"] += 1
+                if DEBUG_ALERTS:
+                    print(f"  [CONDITIONAL_BRAND_NO_CONTEXT_BLOCK] brand={_brand_l} title={title[:60]}")
+
         brand_name  = b_result.get("brand")
         is_strong   = b_result.get("is_strong_brand", False) or (
             brand_name in STRONG_BRANDS if brand_name else False
@@ -3574,14 +3798,18 @@ class Engine:
             # Non-strong brand but brand engine produced result
             best_name = "BRAND"
             best      = dict(b_result)
-        elif c_result.get("confidence", 0) > 0:
+        elif c_result.get("confidence", 0) > 0 and c_result.get("engine_send_eligible_reason"):
             best_name = "CHAOS"
             best      = dict(c_result)
         else:
             # Fallback: pick highest confidence
             best_name, best = max(
                 [("GRAIL", g_result), ("BRAND", b_result), ("CHAOS", c_result)],
-                key=lambda x: x[1].get("confidence", 0)
+                key=lambda x: (
+                    1 if x[1].get("engine_send_eligible_reason") else 0,
+                    1 if x[0] != "CHAOS" else 0,
+                    x[1].get("confidence", 0),
+                )
             )
             best = dict(best)
 
@@ -3682,24 +3910,37 @@ class Engine:
         matched_patterns= best.get("matched_patterns", [])
         send   = False
         reason = "below_threshold"
+        engine_taste_reason = best.get("engine_send_eligible_reason")
+        if not engine_taste_reason:
+            if profit > 0:
+                ENGINE_TASTE_ALIGNMENT_STATS["profit_ignored_no_taste"] += 1
+                if DEBUG_ALERTS:
+                    print(f"  [PROFIT_IGNORED_NO_TASTE_SIGNAL] title={title[:60]} "
+                          f"profit={profit:.0f} reason=no_taste_signal")
+            if best_name == "CHAOS":
+                ENGINE_TASTE_ALIGNMENT_STATS["chaos_scout_only_blocked"] += 1
+                if DEBUG_ALERTS:
+                    print(f"  [CHAOS_SCOUT_ONLY_BLOCK] title={title[:60]} "
+                          f"reason=no_taste_tier_signal conf={confidence:.1f} "
+                          f"profit={profit:.0f} pattern={pattern_score}")
 
         # Production thresholds always; DEBUG_ALERTS only controls logging.
-        if is_grail and profit >= 50 and pattern_score >= 5:
+        if engine_taste_reason and is_grail and profit >= 50 and pattern_score >= 5:
             send   = True
             reason = f"grail(score={best.get('grail_score',0)},pattern={pattern_score},profit={profit:.0f})"
-        elif is_grail and profit >= 30 and best.get("anomaly_score", 0) >= 2:
+        elif engine_taste_reason and is_grail and profit >= 30 and best.get("anomaly_score", 0) >= 2:
             send   = True
             reason = f"grail_anomaly(profit={profit:.0f},anomaly={best.get('anomaly_score',0)})"
-        elif is_strong and profit >= 40:
+        elif engine_taste_reason and is_strong and profit >= 40:
             send   = True
             reason = f"brand_strong(profit={profit:.0f},conf={confidence:.1f})"
-        elif best_name == "BRAND" and not is_strong and profit >= 25 and confidence >= 5.5:
+        elif engine_taste_reason and best_name == "BRAND" and not is_strong and profit >= 25 and confidence >= 5.5:
             send   = True
             reason = f"brand_deal(profit={profit:.0f},conf={confidence:.1f})"
-        elif best_name == "CHAOS" and profit >= 40 and confidence >= 6.0:
+        elif engine_taste_reason and best_name == "CHAOS" and profit >= 40 and confidence >= 6.0:
             send   = True
             reason = f"chaos_flip(profit={profit:.0f},conf={confidence:.1f})"
-        elif best_name == "CHAOS" and pattern_score >= 5 and profit >= 30 and confidence >= 5.5:
+        elif engine_taste_reason and best_name == "CHAOS" and pattern_score >= 5 and profit >= 30 and confidence >= 5.5:
             send   = True
             reason = f"chaos_pattern(pattern={pattern_score},profit={profit:.0f})"
         elif confidence > 0:
@@ -3760,6 +4001,7 @@ class Engine:
         """
         market_prices = market_prices or {}
         reset_no_market_data_cap_stats()
+        reset_engine_taste_alignment_stats()
         total     = len(items)
         processed = 0
         all_scored: list[dict] = []   # wszystkie wyniki z evaluate_and_decide
@@ -3801,6 +4043,20 @@ class Engine:
             tier   = r.get("signal_tier", "TIER_C")
             desirability = float(r.get("desirability_score", 0) or 0)
             await_state = r.get("await_state", {}) or {}
+            early = (r.get("item") or {}).get("_early_hidden_gem") or r.get("_early_hidden_gem") or {}
+            early_alert_candidate = early.get("outcome") == "alert_candidate"
+            hard_negative_reason = any(str(x) in str(r.get("_quality_block_reason") or r.get("reason") or "") for x in [
+                "fast_fashion", "fake", "foreign", "non_clothing", "kids",
+                "women", "fitted", "crop", "carhartt_pants_small_size",
+            ])
+            if early_alert_candidate and not hard_negative_reason:
+                old_reason = r.get("_quality_block_reason") or r.get("quality_reason") or r.get("reason")
+                ENGINE_TASTE_ALIGNMENT_STATS["early_alert_candidates_preserved"] += 1
+                if DEBUG_ALERTS:
+                    print(f"  [ENGINE_DEFERS_TO_EARLY_ALERT_CANDIDATE] "
+                          f"title={str((r.get('item') or {}).get('title') or '')[:60]} "
+                          f"old_block_reason={old_reason} early_reason={early.get('reason')}")
+                return True, "early_alert_candidate_preserved"
             tier_b_allowed = bool(
                 tier == "TIER_B"
                 and (
@@ -3952,6 +4208,7 @@ class Engine:
             _print_quality_summary(sent_count=0)
             _print_style_watch_preview()
             print_no_market_data_cap_summary()
+            print_engine_taste_alignment_summary()
             self.db.save(force=True)
             return []
 
@@ -3982,6 +4239,7 @@ class Engine:
             profit = r.get("profit", 0) or r.get("estimated_profit", 0)
             conf = r.get("confidence", 0)
             signal = r.get("signal_quality_score", 0)
+            engine_candidate = r.get("engine_candidate_score", 0)
             rarity = r.get("rarity_score", r.get("grail_score", 0) * 10)
             desirability = r.get("desirability_score", 0)
             tier = r.get("signal_tier", r.get("tier", "TIER_C"))
@@ -3990,8 +4248,9 @@ class Engine:
                 profit * 0.25
                 + (conf * 10) * 0.15
                 + signal * 0.30
-                + rarity * 0.15
+                + rarity * 0.10
                 + desirability * 0.15
+                + engine_candidate * 0.10
                 + tier_bonus
             )
             r["tier_bonus"] = tier_bonus
@@ -4048,6 +4307,7 @@ class Engine:
             _print_quality_summary(sent_count=0)
             _print_style_watch_preview()
             print_no_market_data_cap_summary()
+            print_engine_taste_alignment_summary()
             self.db.save(force=True)
             return []
         print(f"  🎚 min_profit={min_profit} → {len(candidate_pool)} candidates")
@@ -4353,6 +4613,7 @@ class Engine:
         _print_quality_summary(sent_count=len(final))
         _print_style_watch_preview()
         print_no_market_data_cap_summary()
+        print_engine_taste_alignment_summary()
 
         self.db.save(force=True)
         print(f"  💾 MarketDB saved: {len(self.db.db)} grup → {DB_FILE}")
