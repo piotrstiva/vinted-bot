@@ -5367,6 +5367,12 @@ def score_alert_candidate(entry: dict) -> int:
         score += 20
     if _candidate_has_any(text, ["carhartt detroit", "santa fe", "active jacket", "chore", "double knee", "duck", "canvas", "blanket lined"]):
         score += 20
+    engine_score = entry.get("engine_score") or entry.get("engine_candidate_score")
+    if engine_score:
+        try:
+            score += min(20, int(float(engine_score) * 0.2))
+        except Exception:
+            pass
     if lane == "designer_archive" and len(_arbiter_hits(text, DESIGNER_ARCHIVE_CONTEXT_SIGNALS)) >= 2:
         score += 20
     if lane == "military" and raw_contains_any_phrase(text, ["us army", "u.s. army", "us navy", "u.s. navy", "usmc", "air force", "usaf"]) and raw_contains_any_phrase(text, ["unit", "base", "pt shirt", "squadron", "battalion", "division"]):
