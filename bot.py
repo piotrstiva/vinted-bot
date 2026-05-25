@@ -87,6 +87,20 @@ POP_CULTURE_MAX_SEARCHES_PER_10_CYCLES = int(os.getenv("POP_CULTURE_MAX_SEARCHES
 MAX_SENDS_PER_LANE_PER_CYCLE = int(os.getenv("MAX_SENDS_PER_LANE_PER_CYCLE", "2"))
 WATCH_ALERTS_ENABLED = os.getenv("WATCH_ALERTS_ENABLED", "0") == "1"
 SAFEGUARD_RELAX_ALERTS_ENABLED = os.getenv("SAFEGUARD_RELAX_ALERTS_ENABLED", "0") == "1"
+SPEED_MODE_ENABLED = os.getenv("SPEED_MODE_ENABLED", "1") == "1"
+FAST_REQUEST_DELAY_MIN = float(os.getenv("FAST_REQUEST_DELAY_MIN", "5"))
+FAST_REQUEST_DELAY_MAX = float(os.getenv("FAST_REQUEST_DELAY_MAX", "9"))
+FAST_CYCLE_BREAK_MIN = int(os.getenv("FAST_CYCLE_BREAK_MIN", "75"))
+FAST_CYCLE_BREAK_MAX = int(os.getenv("FAST_CYCLE_BREAK_MAX", "120"))
+FAST_MAX_SEARCHES_PER_CYCLE = int(os.getenv("FAST_MAX_SEARCHES_PER_CYCLE", "12"))
+FAST_DISABLE_THINKING_PAUSE = os.getenv("FAST_DISABLE_THINKING_PAUSE", "1") == "1"
+FAST_DISABLE_ITEM_MICRO_DELAY = os.getenv("FAST_DISABLE_ITEM_MICRO_DELAY", "1") == "1"
+FAST_DISABLE_VIBE_SKIP = os.getenv("FAST_DISABLE_VIBE_SKIP", "1") == "1"
+ALERT_CANDIDATE_SEND_ENABLED = os.getenv("ALERT_CANDIDATE_SEND_ENABLED", "1") == "1"
+ALERT_CANDIDATE_MAX_SEND_PER_CYCLE = int(os.getenv("ALERT_CANDIDATE_MAX_SEND_PER_CYCLE", "4"))
+ALERT_CANDIDATE_MIN_SCORE = int(os.getenv("ALERT_CANDIDATE_MIN_SCORE", "65"))
+STRONG_CANDIDATE_MAX_SYNTHETIC_AGE_MIN = int(os.getenv("STRONG_CANDIDATE_MAX_SYNTHETIC_AGE_MIN", "720"))
+REAL_VISIBLE_MAX_AGE_MIN = int(os.getenv("REAL_VISIBLE_MAX_AGE_MIN", "180"))
 
 
 def _file_sha256_short(path: str) -> str:
@@ -131,6 +145,13 @@ def print_build_trace():
 
 
 print_build_trace()
+print(f"[SPEED_MODE_CONFIG] enabled={int(SPEED_MODE_ENABLED)} "
+      f"request_delay={FAST_REQUEST_DELAY_MIN:.0f}-{FAST_REQUEST_DELAY_MAX:.0f} "
+      f"cycle_break={FAST_CYCLE_BREAK_MIN}-{FAST_CYCLE_BREAK_MAX} "
+      f"max_searches_per_cycle={FAST_MAX_SEARCHES_PER_CYCLE} "
+      f"disable_thinking_pause={int(FAST_DISABLE_THINKING_PAUSE)} "
+      f"disable_item_micro_delay={int(FAST_DISABLE_ITEM_MICRO_DELAY)} "
+      f"disable_vibe_skip={int(FAST_DISABLE_VIBE_SKIP)}")
 if DETAIL_AGE_VERIFY_ENABLED:
     print("[DETAIL_AGE_VERIFY_ENABLED]")
 else:
@@ -518,6 +539,9 @@ def human_vibe_skip(title: str, pct: float = 0.12) -> bool:
     Req 3 — 10–15% random skip to simulate human inattention.
     Returns True if item should be SKIPPED (not kept).
     """
+    if SPEED_MODE_ENABLED and FAST_DISABLE_VIBE_SKIP and time.time() >= _speed_slow_until:
+        SPEED_MODE_STATS["vibe_skip_disabled"] += 1
+        return False
     return random.random() < pct
 
 
@@ -574,6 +598,8 @@ def item_micro_delay(item_title: str = "") -> None:
     Req 1 — Sleep after processing each item to simulate human reading speed.
     15% chance of longer 'reading' pause.
     """
+    if SPEED_MODE_ENABLED and FAST_DISABLE_ITEM_MICRO_DELAY and time.time() >= _speed_slow_until:
+        return
     if _CORE_SEARCH_ACTIVE:
         return
     if random.random() < ITEM_READ_PAUSE_PCT:
@@ -599,6 +625,8 @@ def maybe_random_idle(context: str = "") -> bool:
     Req 7 — 20% chance of random idle pause (30–90s).
     Returns True if idled.
     """
+    if SPEED_MODE_ENABLED and FAST_DISABLE_THINKING_PAUSE and time.time() >= _speed_slow_until:
+        return False
     if random.random() < SEARCH_IDLE_PCT:
         idle = random.uniform(SEARCH_IDLE_MIN, SEARCH_IDLE_MAX)
         print(f"  [IDLE] random_idle={idle:.0f}s context={context}")
@@ -2394,6 +2422,25 @@ EARLY_HIDDEN_GEM_STATS = {
     "retained_after_filter": 0,
     "legacy": {},
 }
+ALERT_CANDIDATES: list[dict] = []
+ALERT_CANDIDATE_STATS = {
+    "early_alert_candidates": 0,
+    "ranked": 0,
+    "eligible_after_final_arbiter": 0,
+    "sent": 0,
+    "blocked_by_reason": {},
+    "by_lane": {},
+    "top_missed": [],
+}
+SPEED_MODE_STATS = {
+    "search_count": 0,
+    "cycle_duration": 0,
+    "request_delays": [],
+    "thinking_pauses_skipped": 0,
+    "vibe_skip_disabled": 0,
+    "http_403": 0,
+    "http_429": 0,
+}
 SEND_PROVENANCE_STATS = {
     "send_attempts": 0,
     "send_success": 0,
@@ -3237,6 +3284,25 @@ def reset_fresh_discovery_cycle():
         "retained_after_filter": 0,
         "legacy": {},
     })
+    ALERT_CANDIDATES.clear()
+    ALERT_CANDIDATE_STATS.update({
+        "early_alert_candidates": 0,
+        "ranked": 0,
+        "eligible_after_final_arbiter": 0,
+        "sent": 0,
+        "blocked_by_reason": {},
+        "by_lane": {},
+        "top_missed": [],
+    })
+    SPEED_MODE_STATS.update({
+        "search_count": 0,
+        "cycle_duration": 0,
+        "request_delays": [],
+        "thinking_pauses_skipped": 0,
+        "vibe_skip_disabled": 0,
+        "http_403": 0,
+        "http_429": 0,
+    })
     SEND_PROVENANCE_STATS.update({
         "send_attempts": 0,
         "send_success": 0,
@@ -4060,6 +4126,25 @@ def print_fresh_discovery_summary():
         and SEND_PROVENANCE_STATS["provenance_count"] < SEND_PROVENANCE_STATS["send_success"]
     ):
         print("[CRITICAL_SEND_PROVENANCE_GAP]")
+    avg_delay = (
+        sum(SPEED_MODE_STATS["request_delays"]) / len(SPEED_MODE_STATS["request_delays"])
+        if SPEED_MODE_STATS["request_delays"] else 0
+    )
+    print(f"[SPEED_MODE_SUMMARY] search_count={SPEED_MODE_STATS['search_count']} "
+          f"cycle_duration={SPEED_MODE_STATS['cycle_duration']:.0f} "
+          f"avg_request_delay={avg_delay:.1f} "
+          f"thinking_pauses_skipped={SPEED_MODE_STATS['thinking_pauses_skipped']} "
+          f"vibe_skip_disabled={SPEED_MODE_STATS['vibe_skip_disabled']} "
+          f"http_403={SPEED_MODE_STATS['http_403']} "
+          f"http_429={SPEED_MODE_STATS['http_429']}")
+    print(f"[ALERT_CANDIDATE_SUMMARY] "
+          f"early_alert_candidates={ALERT_CANDIDATE_STATS['early_alert_candidates']} "
+          f"ranked={ALERT_CANDIDATE_STATS['ranked']} "
+          f"eligible_after_final_arbiter={ALERT_CANDIDATE_STATS['eligible_after_final_arbiter']} "
+          f"sent={ALERT_CANDIDATE_STATS['sent']} "
+          f"blocked_by_reason={ALERT_CANDIDATE_STATS['blocked_by_reason']} "
+          f"by_lane={ALERT_CANDIDATE_STATS['by_lane']}")
+    print(f"[TOP_MISSED_CANDIDATES] top={ALERT_CANDIDATE_STATS['top_missed'][:10]}")
     print(f"[SEARCH_LANE_BALANCE_SUMMARY] "
           f"selected_by_lane={SEARCH_LANE_BALANCE_STATS['selected_by_lane']} "
           f"sent_by_lane={SEARCH_LANE_BALANCE_STATS['sent_by_lane']} "
@@ -4703,6 +4788,37 @@ def _early_hidden_gem_bump(decision: dict, query: str | None = None):
             legacy["alert_candidates"] += 1
 
 
+def _add_alert_candidate(decision: dict, item: dict, query: str | None = None):
+    if not ALERT_CANDIDATE_SEND_ENABLED:
+        return
+    item = dict(item or {})
+    early = {k: v for k, v in (decision or {}).items() if k != "item"}
+    item["_early_hidden_gem"] = early
+    age_info = get_item_age_info(item)
+    entry = {
+        "item": item,
+        "query": query or (item.get("_search_meta") or {}).get("name"),
+        "lane": decision.get("lane") or "none",
+        "early_reason": decision.get("reason"),
+        "hard_auth_signals": decision.get("hard_auth_signals") or [],
+        "price": item.get("price"),
+        "age_source": age_info.get("source"),
+        "age_min": age_info.get("minutes"),
+        "raw_style_score": None,
+        "engine_score": None,
+        "early_decision": early,
+    }
+    key = get_item_dedupe_key(item)
+    for existing in ALERT_CANDIDATES:
+        if existing.get("key") == key:
+            return
+    entry["key"] = key
+    ALERT_CANDIDATES.append(entry)
+    ALERT_CANDIDATE_STATS["early_alert_candidates"] += 1
+    lane = entry["lane"]
+    ALERT_CANDIDATE_STATS["by_lane"][lane] = ALERT_CANDIDATE_STATS["by_lane"].get(lane, 0) + 1
+
+
 def evaluate_item_for_hidden_gem(item, query=None, source=None) -> dict:
     item = item or {}
     result = {"engine": source or "EARLY"}
@@ -4810,6 +4926,8 @@ def evaluate_item_for_hidden_gem(item, query=None, source=None) -> dict:
         "item": item,
     }
     _early_hidden_gem_bump(decision, query=query)
+    if outcome == "alert_candidate":
+        _add_alert_candidate(decision, item, query=query)
     if outcome != ITEM_OUTCOME_DISCARD or VERBOSE_ITEM_DEBUG:
         print(f"[EARLY_HIDDEN_GEM] outcome={outcome} lane={primary} reason={reason} "
               f"query={query} title={str(item.get('title') or '')[:70]}")
@@ -4824,6 +4942,171 @@ def retain_early_watch_after_filter(item, later_block_reason: str):
     print(f"[WATCH_RETAINED_AFTER_FILTER] lane={early.get('lane')} "
           f"early_reason={early.get('reason')} later_block_reason={later_block_reason} "
           f"title={str((item or {}).get('title') or '')[:70]}")
+
+
+ALERT_CANDIDATE_OLD_TAG_TERMS = [
+    "screen stars", "hanes beefy", "fruit of the loom usa", "giant",
+    "brockum", "winterland", "nutmeg", "salem", "changes", "jerzees",
+]
+
+
+def _candidate_has_any(haystack: str, terms: list[str]) -> bool:
+    return any(raw_contains_phrase(haystack, term) for term in terms)
+
+
+def score_alert_candidate(entry: dict) -> int:
+    item = entry.get("item") or {}
+    early = entry.get("early_decision") or item.get("_early_hidden_gem") or {}
+    text = _raw_presend_text(item)
+    lane = entry.get("lane") or early.get("lane") or "none"
+    hard_auth = [str(x).lower() for x in (entry.get("hard_auth_signals") or early.get("hard_auth_signals") or [])]
+    negatives = [str(x).lower() for x in (early.get("negative_signals") or [])]
+    price = float(item.get("price") or 0)
+    score = 40 if early.get("outcome") == "alert_candidate" else 0
+
+    hard_text = " ".join(hard_auth)
+    if "single stitch" in hard_text:
+        score += 30
+    if "made in usa" in hard_text or raw_contains_phrase(text, "made in usa") or raw_contains_phrase(text, "made in u.s.a"):
+        score += 30
+    if _candidate_has_any(text, ALERT_CANDIDATE_OLD_TAG_TERMS):
+        score += 25
+    if _lane_year_signals(text):
+        score += 25
+    if _candidate_has_any(text, ["tour", "concert", "world tour", "festival"]):
+        score += 20
+    if _candidate_has_any(text, ["jeff hamilton", "jh design", "chalk line", "starter", "logo 7", "nutmeg", "salem"]):
+        score += 20
+    if _candidate_has_any(text, ["carhartt detroit", "santa fe", "active jacket", "chore", "double knee", "duck", "canvas", "blanket lined"]):
+        score += 20
+    if lane == "designer_archive" and len(_arbiter_hits(text, DESIGNER_ARCHIVE_CONTEXT_SIGNALS)) >= 2:
+        score += 20
+    if lane == "military" and raw_contains_any_phrase(text, ["us army", "u.s. army", "us navy", "u.s. navy", "usmc", "air force", "usaf"]) and raw_contains_any_phrase(text, ["unit", "base", "pt shirt", "squadron", "battalion", "division"]):
+        score += 15
+    if price and price <= 80:
+        score += 10
+    if lane in {"workwear", "sport_racing"} and price and price <= 120:
+        score += 10
+    if _raw_size_bucket(text, item) in {"medium", "large"}:
+        score += 10
+
+    if any(n in negatives for n in ["kids_presend_block", "kids_or_youth_size"]):
+        score -= 50
+    if any(n in negatives for n in ["women_basic_fitted", "women_or_fitted_presend_block"]):
+        score -= 40
+    if any(n in negatives for n in ["modern_merch_or_fast_fashion_brand", "fast_fashion_presend_block"]):
+        score -= 40
+    if "marker_only_watch" in negatives:
+        score -= 30
+    if len(hard_auth) == 0:
+        score -= 20
+    age_info = get_item_age_info(item)
+    if age_info.get("source") == "synthetic_rank" and int(age_info.get("minutes") or 0) >= 180 and not hard_auth:
+        score -= 30
+    if price and price > RAW_STYLE_SNIPER_MAX_PRICE and len(hard_auth) < 2:
+        score -= 20
+    return max(0, min(100, int(score)))
+
+
+def _alert_candidate_block(reason: str, entry: dict, score: int):
+    stats = ALERT_CANDIDATE_STATS["blocked_by_reason"]
+    stats[reason] = stats.get(reason, 0) + 1
+    missed = ALERT_CANDIDATE_STATS["top_missed"]
+    missed.append({
+        "score": score,
+        "lane": entry.get("lane"),
+        "reason": entry.get("early_reason"),
+        "block_reason": reason,
+        "title": str((entry.get("item") or {}).get("title") or "")[:70],
+        "query": entry.get("query"),
+    })
+    missed.sort(key=lambda x: x.get("score", 0), reverse=True)
+    del missed[10:]
+
+
+def send_alert_candidates(max_cycle_slots: int, sent_this_cycle: int) -> int:
+    if not ALERT_CANDIDATE_SEND_ENABLED or max_cycle_slots <= sent_this_cycle:
+        return 0
+    ranked = []
+    for entry in ALERT_CANDIDATES:
+        score = score_alert_candidate(entry)
+        entry["score"] = score
+        ranked.append(entry)
+    ranked.sort(key=lambda e: (
+        e.get("score", 0),
+        len(e.get("hard_auth_signals") or []),
+        -float(e.get("price") or 9999),
+    ), reverse=True)
+    ALERT_CANDIDATE_STATS["ranked"] = len(ranked)
+    sent = 0
+    top_log = []
+    for entry in ranked:
+        if sent >= ALERT_CANDIDATE_MAX_SEND_PER_CYCLE or sent_this_cycle + sent >= max_cycle_slots:
+            _alert_candidate_block("alert_candidate_cycle_limit", entry, int(entry.get("score") or 0))
+            continue
+        score = int(entry.get("score") or 0)
+        item = entry.get("item") or {}
+        if score < ALERT_CANDIDATE_MIN_SCORE:
+            _alert_candidate_block("alert_candidate_score_below_min", entry, score)
+            continue
+        key = get_item_dedupe_key(item)
+        if already_sent(key):
+            _alert_candidate_block("alert_candidate_dedupe", entry, score)
+            continue
+        age_info = get_item_age_info(item)
+        hard_auth = entry.get("hard_auth_signals") or []
+        if age_info.get("usable_for_freshness") and int(age_info.get("minutes") or 0) > REAL_VISIBLE_MAX_AGE_MIN:
+            _alert_candidate_block("real_visible_age_too_old", entry, score)
+            continue
+        if age_info.get("source") == "synthetic_rank" and int(age_info.get("minutes") or 0) >= 180 and hard_auth:
+            print(f"[SYNTHETIC_AGE_NOT_STALE_PASS] title={str(item.get('title') or '')[:70]} "
+                  f"age_min={age_info.get('minutes')} reason=synthetic_rank_not_real_age "
+                  f"hard_auth={hard_auth[:5]}")
+        result = {
+            "engine": "ALERT_CANDIDATE",
+            "item": item,
+            "final_score": score,
+            "signal_quality_score": score,
+            "raw_style_score": entry.get("raw_style_score"),
+            "tier": "WATCH",
+            "taste_bucket": entry.get("lane"),
+            "desirable_signals": hard_auth,
+            "_early_hidden_gem": item.get("_early_hidden_gem") or entry.get("early_decision"),
+            "_alert_candidate": True,
+        }
+        decision = decide_alert_outcome(item, result, "ALERT_CANDIDATE", query=entry.get("query"))
+        if decision.get("outcome") == ITEM_OUTCOME_ALERT:
+            ALERT_CANDIDATE_STATS["eligible_after_final_arbiter"] += 1
+        else:
+            _alert_candidate_block(decision.get("reason") or "final_arbiter_block", entry, score)
+            continue
+        photo = item.get("photo") or get_item_photo(item.get("id"), item.get("link") or item.get("url") or "")
+        sent_ok = send_alert_message(
+            format_telegram_alert(item, result, "ITEM"),
+            item,
+            result,
+            "ALERT_CANDIDATE",
+            key,
+            photo_url=photo,
+            item_link=item.get("link") or item.get("url"),
+            query=entry.get("query"),
+        )
+        if not sent_ok:
+            reason = (result.get("_send_provenance") or {}).get("final_reason") or result.get("_lane_policy_reason") or "send_blocked"
+            _alert_candidate_block(reason, entry, score)
+            continue
+        log_decision_trace(item, result, "ALERT_CANDIDATE", "alert_candidate_ranker", send_status="success")
+        mark_sent(item, result, entry.get("query"))
+        audit_candidate("sent", item, result=result, sent=True, alert_type="ALERT_CANDIDATE", score=score)
+        query_coverage_record(entry.get("query"))["alerts_sent"] += 1
+        lane_record_send(item, result)
+        ALERT_CANDIDATE_STATS["sent"] += 1
+        sent += 1
+        top_log.append({"score": score, "lane": entry.get("lane"), "reason": entry.get("early_reason"), "title": str(item.get("title") or "")[:55], "query": entry.get("query")})
+    print(f"[ALERT_CANDIDATE_RANKING] total={len(ALERT_CANDIDATES)} "
+          f"eligible={ALERT_CANDIDATE_STATS['eligible_after_final_arbiter']} "
+          f"sent={sent} top={top_log[:5]}")
+    return sent
 
 
 def _arbiter_negative_signals(item: dict, result: dict, lane_info: dict) -> list[str]:
@@ -5254,7 +5537,7 @@ def telegram_presend_gate(item, result=None, source="MAIN") -> tuple[bool, str]:
                     DETAIL_AGE_STATS["blocked_unverified"] += 1
                     return _presend_block(result, source, detail_age.get("block_reason") or "detail_age_unverified_block")
 
-    if visible_age is not None and visible_age > RAW_STYLE_MAX_VISIBLE_AGE_MIN and not strong_grail:
+    if visible_age is not None and visible_age > REAL_VISIBLE_MAX_AGE_MIN and not strong_grail:
         AGE_GATE_STATS["blocked_stale_visible_age"] += 1
         print(f"[STALE_BLOCK_DETAIL] visible_age={visible_age} title={title[:80]}")
         return _presend_block(result, source, "stale_visible_age_presend_block")
@@ -5276,6 +5559,22 @@ def telegram_presend_gate(item, result=None, source="MAIN") -> tuple[bool, str]:
         and (strong_grail or source in {"RAW_STYLE", "STYLE_WATCH"} and score >= 90)
         and bucket != "old_blank"
     )
+    exceptional_small_auth = (
+        score >= 90
+        and len([
+            sig for sig in real_reasons
+            if any(anchor in sig.lower() for anchor in (
+                "single stitch", "made in usa", "screen stars", "hanes beefy",
+                "fruit of the loom usa", "giant", "brockum", "winterland",
+                "nutmeg", "salem", "changes", "jerzees", "tour", "promo",
+                "jeff hamilton",
+            ))
+        ]) >= 2
+    )
+    if exceptional_small_auth and (women_fit or fitted_top or small_size):
+        exception_ok = True
+        print(f"[SMALL_SIZE_EXCEPTION_PASS] title={title[:70]} "
+              f"hard_auth={real_reasons[:6]} score={score:.0f}")
     if (women_fit or fitted_top) and not exception_ok:
         AGE_GATE_STATS["blocked_women_fitted"] += 1
         return _presend_block(result, source, "women_or_fitted_presend_block")
@@ -6996,6 +7295,7 @@ CYCLE_BREAK_LONG_PCT   = 0.20   # 20% chance of extended break
 # Req 7 — 403 retry config
 _consecutive_403       = 0
 _cycle_403_stop        = False   # flag: stop cycle after 3rd failure
+_speed_slow_until      = 0.0
 _403_RETRY_WAITS       = [
     (20.0, 40.0),    # 1st retry wait range
     (60.0, 120.0),   # 2nd retry wait range
@@ -7032,13 +7332,18 @@ def _human_delay(label: str = "") -> float:
     Req 1+11 — Generuje human-like delay z jitterem.
     Każdy request MUSI mieć delay. Nigdy request→request bez przerwy.
     """
-    if random.random() < VINTED_DELAY_SPIKE_PCT:
+    speed_active = SPEED_MODE_ENABLED and time.time() >= _speed_slow_until
+    if speed_active:
+        delay = random.uniform(FAST_REQUEST_DELAY_MIN, FAST_REQUEST_DELAY_MAX)
+        print(f"  [REQUEST] delay={delay:.1f}s speed_mode=1 search={label}")
+    elif random.random() < VINTED_DELAY_SPIKE_PCT:
         delay = random.uniform(VINTED_DELAY_SPIKE_MIN, VINTED_DELAY_SPIKE_MAX)
         print(f"  [REQUEST] delay={delay:.1f}s (spike) search={label}")
     else:
         delay = random.uniform(VINTED_DELAY_BASE_MIN, VINTED_DELAY_BASE_MAX)
         print(f"  [REQUEST] delay={delay:.1f}s search={label}")
     time.sleep(delay)
+    SPEED_MODE_STATS["request_delays"].append(delay)
     return delay
 
 
@@ -7046,6 +7351,9 @@ def _thinking_pause(after: str = "") -> float:
     """
     Req 4 — Human-like pause between searches (15–45s, 15% chance 60–120s).
     """
+    if SPEED_MODE_ENABLED and FAST_DISABLE_THINKING_PAUSE and time.time() >= _speed_slow_until:
+        SPEED_MODE_STATS["thinking_pauses_skipped"] += 1
+        return 0.0
     if random.random() < THINKING_PAUSE_LONG_PCT:
         pause = random.uniform(THINKING_PAUSE_LONG_MIN, THINKING_PAUSE_LONG_MAX)
         print(f"  [SEARCH] thinking_pause={pause:.0f}s (long) after={after}")
@@ -7120,7 +7428,7 @@ def vinted_fetch(url: str, label: str = "") -> "requests.Response | None":
     - 3-attempt 403 retry with escalating waits
     - hard stop on 3rd failure → long sleep + session refresh
     """
-    global _consecutive_403, _cycle_403_stop
+    global _consecutive_403, _cycle_403_stop, _speed_slow_until
 
     # Req 12 — rate limit guard
     _check_rate_limit()
@@ -7139,12 +7447,20 @@ def vinted_fetch(url: str, label: str = "") -> "requests.Response | None":
                 return r
 
             if r.status_code == 429:
+                SPEED_MODE_STATS["http_429"] += 1
+                if SPEED_MODE_ENABLED:
+                    _speed_slow_until = time.time() + 30 * 60
+                    print("[SPEED_MODE_BACKOFF] reason=http_429 duration_min=30")
                 wait = VINTED_429_WAIT * attempt
                 print(f"  🚫 429 [{label}] — czekam {wait}s (próba {attempt}/3)")
                 time.sleep(wait)
                 continue
 
             if r.status_code in (403, 401):
+                SPEED_MODE_STATS["http_403"] += 1
+                if SPEED_MODE_ENABLED:
+                    _speed_slow_until = time.time() + 30 * 60
+                    print("[SPEED_MODE_BACKOFF] reason=http_403 duration_min=30")
                 _consecutive_403 += 1
 
                 if attempt <= 2:
@@ -7870,6 +8186,22 @@ def check_search(search, seen, market_price):
         for it in items:
             age = parse_item_age_minutes(it)
             if age is None or age > hard_cutoff_min:
+                early = it.get("_early_hidden_gem") or {}
+                age_info = get_item_age_info(it)
+                hard_auth = early.get("hard_auth_signals") or []
+                synthetic_strong = (
+                    early.get("outcome") == "alert_candidate"
+                    and age_info.get("source") == "synthetic_rank"
+                    and age is not None
+                    and age <= STRONG_CANDIDATE_MAX_SYNTHETIC_AGE_MIN
+                    and bool(hard_auth)
+                )
+                if synthetic_strong:
+                    print(f"[SYNTHETIC_AGE_NOT_STALE_PASS] title={str(it.get('title') or '')[:70]} "
+                          f"age_min={age} reason=synthetic_rank_not_real_age "
+                          f"hard_auth={hard_auth[:5]}")
+                    tiered_items.append(it)
+                    continue
                 retain_early_watch_after_filter(it, f"age_window_excluded:{age}")
                 continue
             tiered_items.append(it)
@@ -8661,7 +8993,7 @@ while True:
         this_cycle_searches = pool[:n_searches + 2]   # +2 buffer for skips
 
         # Req 10 — early exit
-        if random.random() < 0.10:
+        if random.random() < 0.10 and not (SPEED_MODE_ENABLED and time.time() >= _speed_slow_until):
             print(f"  [CYCLE] early_exit=True (noise injection)")
             core_keep = [s for s in this_cycle_searches if is_core_search(s)]
             peripheral_keep = [s for s in this_cycle_searches if not is_core_search(s)][:1]
@@ -8691,6 +9023,58 @@ while True:
                 this_cycle_searches.append(fresh_search)
                 existing_search_names.add(fresh_search["name"])
                 print(f"[FRESH_DISCOVERY_QUERY] query={fresh_query} reason=knowledge_rotation")
+
+        if SPEED_MODE_ENABLED and time.time() >= _speed_slow_until:
+            target_count = max(1, FAST_MAX_SEARCHES_PER_CYCLE)
+            selected_names = {s.get("name") for s in this_cycle_searches}
+            lane_counts: dict[str, int] = {}
+            for s in this_cycle_searches:
+                lane = fresh_discovery_query_lane(s.get("name") or "")
+                lane_counts[lane] = lane_counts.get(lane, 0) + 1
+            lane_order = ["vintage_auth", "music_band", "designer_archive", "workwear", "sport_racing", "military", "pop_culture"]
+            candidates = [s for s in SEARCHES if s.get("name") not in selected_names]
+            random.shuffle(candidates)
+            while len(this_cycle_searches) < target_count and candidates:
+                wanted_lane = min(lane_order, key=lambda ln: (lane_counts.get(ln, 0), 1 if ln == "pop_culture" else 0))
+                pick = None
+                for s in candidates:
+                    lane = fresh_discovery_query_lane(s.get("name") or "")
+                    if lane == "pop_culture" and lane_counts.get("pop_culture", 0) >= max(1, target_count // 10):
+                        continue
+                    if lane == wanted_lane:
+                        pick = s
+                        break
+                if pick is None:
+                    pick = candidates[0]
+                    lane = fresh_discovery_query_lane(pick.get("name") or "")
+                    if lane == "pop_culture" and lane_counts.get("pop_culture", 0) >= max(1, target_count // 10):
+                        candidates.remove(pick)
+                        continue
+                candidates.remove(pick)
+                this_cycle_searches.append(pick)
+                selected_names.add(pick.get("name"))
+                lane = fresh_discovery_query_lane(pick.get("name") or "")
+                lane_counts[lane] = lane_counts.get(lane, 0) + 1
+            if len(this_cycle_searches) > target_count:
+                this_cycle_searches = this_cycle_searches[:target_count]
+            pop_limit = max(1, target_count // 10)
+            balanced_searches = []
+            pop_seen = 0
+            for s in this_cycle_searches:
+                lane = fresh_discovery_query_lane(s.get("name") or "")
+                if lane == "pop_culture":
+                    if pop_seen >= pop_limit:
+                        continue
+                    pop_seen += 1
+                balanced_searches.append(s)
+            this_cycle_searches = balanced_searches
+            lane_counts = {}
+            for s in this_cycle_searches:
+                lane = fresh_discovery_query_lane(s.get("name") or "")
+                lane_counts[lane] = lane_counts.get(lane, 0) + 1
+            print(f"[FAST_SEARCH_PLAN] search_count={len(this_cycle_searches)} "
+                  f"selected_by_lane={lane_counts} "
+                  f"queries={[s.get('name') for s in this_cycle_searches]}")
 
         print(f"[SEARCH_PLAN] "
               f"core={[s.get('name') for s in this_cycle_searches if is_core_search(s)][:6]} "
@@ -8727,7 +9111,7 @@ while True:
                 break
 
             # Req 6 — 20% chance: skip search entirely (noise)
-            if random.random() < 0.20 and not core_search:
+            if random.random() < 0.20 and not core_search and not (SPEED_MODE_ENABLED and time.time() >= _speed_slow_until):
                 qcov["skipped_this_cycle"] = True
                 print(f"  [SEARCH_SKIP] name={search['name']} reason=random_noise_peripheral_only")
                 continue
@@ -8785,6 +9169,8 @@ while True:
                 maybe_random_idle(context=search["name"])
 
         cycle_duration = time.time() - cycle_start
+        SPEED_MODE_STATS["search_count"] = searches_done
+        SPEED_MODE_STATS["cycle_duration"] = cycle_duration
         print(f"  [CYCLE] search_count={searches_done} duration={cycle_duration:.0f}s")
 
         # ── STEP 7 — EVALUATE_AND_DECIDE ────────────────────────────
@@ -8903,7 +9289,9 @@ while True:
                       f"reason={reason} | {item['title'][:35]}")
 
                 # Req 10 — micro delay after each sent item
-                if random.random() < ITEM_IDLE_PCT:
+                if SPEED_MODE_ENABLED and FAST_DISABLE_ITEM_MICRO_DELAY and time.time() >= _speed_slow_until:
+                    pass
+                elif random.random() < ITEM_IDLE_PCT:
                     idle = random.uniform(ITEM_IDLE_MIN, ITEM_IDLE_MAX)
                     print(f"  [ITEM] idle={idle:.1f}s (simulate reading)")
                     time.sleep(idle)
@@ -8911,6 +9299,9 @@ while True:
                     time.sleep(random.uniform(ITEM_MICRO_DELAY_MIN, ITEM_MICRO_DELAY_MAX))
 
         # ── FALLBACK ────────────────────────────────────────────────
+        alert_candidate_sent = send_alert_candidates(MAX_PER_CYCLE, sent_this_cycle)
+        sent_this_cycle += alert_candidate_sent
+
         raw_style_sent = send_raw_style_candidates(MAX_PER_CYCLE, sent_this_cycle)
         sent_this_cycle += raw_style_sent
 
@@ -9050,7 +9441,10 @@ while True:
                 print(f"  💾 MarketDB: {len(engine.db.db)} grup | dirty={engine.db._dirty}")
 
         # Req 5 — CYCLE BREAK: 2–5 min, 20% chance 5–10 min
-        if random.random() < CYCLE_BREAK_LONG_PCT:
+        if SPEED_MODE_ENABLED and time.time() >= _speed_slow_until:
+            break_t = random.uniform(FAST_CYCLE_BREAK_MIN, FAST_CYCLE_BREAK_MAX)
+            print(f"  [CYCLE] break={break_t:.0f}s speed_mode=1")
+        elif random.random() < CYCLE_BREAK_LONG_PCT:
             break_t = random.uniform(CYCLE_BREAK_LONG_MIN, CYCLE_BREAK_LONG_MAX)
             print(f"  [CYCLE] extended_break={break_t:.0f}s (20% chance)")
         else:
